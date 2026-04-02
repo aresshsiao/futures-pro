@@ -31,14 +31,17 @@
     const src = await res.text();
 
     const { code } = Babel.transform(src, {
-      presets: ["react"],
+      presets: [["react", { runtime: "automatic" }]],
       filename: "trading-platform.jsx",
     });
 
     // 將 bare specifier 換成完整 CDN URL（Blob URL 不支援 importmap）
+    const CDN = "https://esm.sh";
     const resolved = code
-      .replace(/from\s+"react"/g, 'from "https://esm.sh/react@18"')
-      .replace(/from\s+'react'/g, "from 'https://esm.sh/react@18'");
+      .replace(/from\s+"react"/g, `from "${CDN}/react@18"`)
+      .replace(/from\s+'react'/g, `from '${CDN}/react@18'`)
+      .replace(/from\s+"react\/jsx-runtime"/g, `from "${CDN}/react@18/jsx-runtime"`)
+      .replace(/from\s+'react\/jsx-runtime'/g, `from '${CDN}/react@18/jsx-runtime'`);
 
     const blob = new Blob([resolved], { type: "application/javascript" });
     const url = URL.createObjectURL(blob);
