@@ -35,15 +35,23 @@ class TaifexImporter:
       收盤價, 漲跌價, 漲跌%, 成交量, 結算價, 未沖銷契約數, ...
     """
 
-    # 商品代碼對照: 期交所全名 → 系統代碼
+    # 商品代碼對照: 期交所中文名 or 英文代碼 → 系統代碼
+    # TAIFEX CSV 的「契約」欄有時是中文名，有時直接是英文代碼
     SYMBOL_MAP = {
-        "臺股期貨": "TX",
+        # 中文名稱
+        "臺股期貨":     "TX",
         "小型臺指期貨": "MTX",
-        "電子期貨": "TE",
-        "金融期貨": "TF",
-        "臺指選擇權": "TXO",
-        "微型臺指期貨": "MXF",
-        "股票期貨": None,  # 跳過個股期貨
+        "微型臺指期貨": "TMF",
+        # 英文代碼 (直接對應)
+        "TX":  "TX",
+        "MTX": "MTX",
+        "TMF": "TMF",
+    }
+    # 支援的商品
+    KNOWN_SYMBOLS: dict[str, str] = {
+        "TX":  "臺股期貨（大台）",
+        "MTX": "小型臺指期貨（小台）",
+        "TMF": "微型臺指期貨",
     }
 
     def __init__(self, raw_dir: str = "data/raw/taifex"):
@@ -263,23 +271,28 @@ class TaifexImporter:
         bars: list[Bar] = []
         reader = csv.reader(io.StringIO(text))
         header_found = False
+        first_data_row_logged = False
         for row in reader:
             if not row:
                 continue
             if not header_found:
                 if any("交易日期" in cell for cell in row):
                     header_found = True
+                    logger.debug("[Taifex] CSV header: %s", row[:6])
                 continue
+            if not first_data_row_logged:
+                logger.info("[Taifex] CSV 第一筆資料 (前6欄): %s", row[:6])
+                first_data_row_logged = True
             bar = self._parse_row(row)
             if bar:
                 bars.append(bar)
         return bars
 
-    def download_recent(self) -> list[Bar]:
+    def download_recent(self, symbols: list[str] | None = None) -> list[Bar]:
         """
-        從期交所網站下載近 30 個交易日所有 CSV ZIP：
-        - ZIP 快取在本地（僅在伺服器大小不同時重下）
-        - CSV 全在記憶體解析，不寫出磁碟
+        從期交所網站下載近 30 個交易日所有 CSV ZIP，
+        解析並回傳指定商品的 Bar（ZIP 快取在本地）。
+        symbols=None 表示匯入全部支援商品。
         """
         urls = self.fetch_download_urls()
         if not urls:
@@ -293,22 +306,43 @@ class TaifexImporter:
             bars = self._parse_zip_bytes(zip_bytes, url.split("/")[-1])
             all_bars.extend(bars)
 
-        logger.info("[Taifex] 下載完成: 共 %d 筆 K 線", len(all_bars))
-        return all_bars
+        return self._filter_symbols(all_bars, symbols)
 
     # ── 從本地目錄匯入 ────────────────────────────
 
-    def import_directory(self, directory: str | Path = None) -> list[Bar]:
-        """批量匯入整個目錄下的 CSV 檔案"""
+    def import_directory(
+        self,
+        directory: str | Path = None,
+        symbols: list[str] | None = None,
+    ) -> list[Bar]:
+        """
+        批量匯入整個目錄下的 CSV 和 ZIP 檔案（ZIP 在記憶體中解壓）。
+        symbols=None 表示匯入全部支援商品。
+        """
         dir_path = Path(directory) if directory else self._raw_dir
         all_bars: list[Bar] = []
 
         csv_files = sorted(dir_path.glob("*.csv"))
-        logger.info(f"[Taifex] 掃描目錄: {dir_path} → 找到 {len(csv_files)} 個 CSV")
+        zip_files = sorted(dir_path.glob("*.zip"))
+        logger.info(
+            "[Taifex] 掃描目錄: %s → 找到 %d 個 CSV, %d 個 ZIP",
+            dir_path, len(csv_files), len(zip_files),
+        )
 
         for f in csv_files:
-            bars = self.parse_daily_csv(f)
-            all_bars.extend(bars)
+            all_bars.extend(self.parse_daily_csv(f))
 
-        logger.info(f"[Taifex] 匯入完成: 共 {len(all_bars)} 筆 K 線")
-        return all_bars
+        for f in zip_files:
+            all_bars.extend(self._parse_zip_bytes(f.read_bytes(), f.name))
+
+        result = self._filter_symbols(all_bars, symbols)
+        logger.info("[Taifex] 匯入完成: 共 %d 筆 K 線 (過濾後 %d 筆)", len(all_bars), len(result))
+        return result
+
+    @staticmethod
+    def _filter_symbols(bars: list[Bar], symbols: list[str] | None) -> list[Bar]:
+        """若 symbols 指定則只保留該商品，否則回傳全部。"""
+        if not symbols:
+            return bars
+        target = set(symbols)
+        return [b for b in bars if b.symbol in target]

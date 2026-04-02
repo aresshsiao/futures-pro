@@ -1000,7 +1000,19 @@ function DatabasePage({ send, addHandler }) {
   const [logs, setLogs] = useState([]);
   const [summary, setSummary] = useState([]);
   const [importDir, setImportDir] = useState("data/raw/taifex");
+  const [selectedSymbols, setSelectedSymbols] = useState(["TX"]);
   const logsEndRef = useRef(null);
+
+  const SYMBOL_OPTIONS = [
+    { id: "TX",  label: "TX",  desc: "臺股期貨（大台）" },
+    { id: "MTX", label: "MTX", desc: "小型臺指（小台）" },
+    { id: "TMF", label: "TMF", desc: "微型臺指期貨" },
+  ];
+
+  const toggleSymbol = (id) =>
+    setSelectedSymbols(prev =>
+      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
+    );
 
   const addLog = (msg, type = "info") =>
     setLogs(l => [...l, { time: new Date().toLocaleTimeString("zh-TW"), msg, type }]);
@@ -1031,11 +1043,15 @@ function DatabasePage({ send, addHandler }) {
       addHandler("import_result", (msg) => {
         setDownloading(false);
         setImporting(false);
-        if (msg.count !== undefined) {
-          addLog(`匯入完成 ✓ — 共寫入 ${msg.count.toLocaleString()} 筆 K 線`, "success");
+        const action = msg.source === "download" ? "下載" : "匯入";
+        if (msg.parsed !== undefined) {
+          const dupNote = msg.inserted < msg.parsed
+            ? `（${(msg.parsed - msg.inserted).toLocaleString()} 筆已存在略過）`
+            : "";
+          addLog(`${action}完成 ✓ — 解析 ${msg.parsed.toLocaleString()} 筆，新增 ${msg.inserted.toLocaleString()} 筆 ${dupNote}`, "success");
           setSummary(msg.summary || []);
         } else {
-          addLog("匯入失敗，請確認 CSV 目錄是否存在", "error");
+          addLog(`${action}失敗，請確認來源是否正確`, "error");
         }
       }),
 
@@ -1058,14 +1074,14 @@ function DatabasePage({ send, addHandler }) {
 
   const startDownload = () => {
     setDownloading(true);
-    addLog("連線至期交所網站，下載近 30 個交易日行情 ZIP...", "info");
-    send("import_taifex", { source: "download" });
+    addLog(`連線至期交所網站，下載近 30 個交易日行情 ZIP... (${selectedSymbols.join(", ")})`, "info");
+    send("import_taifex", { source: "download", symbols: selectedSymbols });
   };
 
   const startImport = () => {
     setImporting(true);
-    addLog(`匯入本地 CSV 目錄: ${importDir}`, "info");
-    send("import_taifex", { source: "local", directory: importDir });
+    addLog(`匯入本地 ZIP/CSV: ${importDir} (${selectedSymbols.join(", ")})`, "info");
+    send("import_taifex", { source: "local", directory: importDir, symbols: selectedSymbols });
   };
 
   const startBrokerSync = () => {
@@ -1136,6 +1152,34 @@ function DatabasePage({ send, addHandler }) {
             <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>{item.desc}</div>
           </button>
         ))}
+      </div>
+
+      {/* ─── 商品選擇 ─── */}
+      <div style={{
+        padding: "10px 14px", marginBottom: 12,
+        background: COLORS.bgCard, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+      }}>
+        <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 8, fontWeight: 600 }}>
+          匯入商品
+          <span style={{ color: COLORS.textMuted, fontWeight: 400, marginLeft: 8 }}>（期交所下載 & 本地匯入 & 券商同步 共用）</span>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {SYMBOL_OPTIONS.map(({ id, label, desc }) => {
+            const on = selectedSymbols.includes(id);
+            return (
+              <button key={id} onClick={() => toggleSymbol(id)} disabled={busy} style={{
+                padding: "4px 12px", borderRadius: 4, fontSize: 11, cursor: busy ? "not-allowed" : "pointer",
+                background: on ? "rgba(59,130,246,0.15)" : "transparent",
+                border: `1px solid ${on ? COLORS.accent : COLORS.border}`,
+                color: on ? COLORS.accent : COLORS.textDim,
+                transition: "all .15s",
+              }}>
+                <span style={{ fontWeight: 700 }}>{label}</span>
+                <span style={{ marginLeft: 4, color: on ? COLORS.textDim : COLORS.textMuted }}>{desc}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* ─── 期交所目錄輸入 ─── */}

@@ -159,18 +159,24 @@ async def handle_import_taifex(ws, data: dict):
     data.source = "local"    → 從本地目錄匯入 CSV（預設）
     """
     source = data.get("source", "local")
+    symbols = data.get("symbols") or None  # None = 全部商品
 
     if source == "download":
         loop = asyncio.get_event_loop()
-        bars = await loop.run_in_executor(None, taifex.download_recent)
+        bars = await loop.run_in_executor(
+            None, lambda: taifex.download_recent(symbols)
+        )
     else:
         directory = data.get("directory", "data/raw/taifex")
-        bars = taifex.import_directory(directory)
+        bars = taifex.import_directory(directory, symbols)
 
-    count = db.insert_bars(bars)
+    parsed = len(bars)
+    inserted = db.insert_bars(bars)
     await ws.send_json({
         "type": "import_result",
-        "count": count,
+        "source": source,
+        "parsed": parsed,
+        "inserted": inserted,
         "summary": db.summary(),
     })
 
@@ -180,7 +186,7 @@ async def handle_broker_sync(ws, data: dict):
     from data.sources.broker_sync import BrokerSync
     from core.models import Timeframe
 
-    if not quote.is_connected():
+    if not quote.is_connected:
         await ws.send_json({
             "type": "broker_sync_result",
             "success": False,
