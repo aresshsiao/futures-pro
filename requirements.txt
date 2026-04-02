@@ -1,0 +1,21 @@
+# Futures Pro — Python Dependencies
+
+# ── Web Server ────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+
+# ── Data Processing ───────────────────────
+pandas>=2.2.0
+numpy>=1.26.0
+
+# ── Database ──────────────────────────────
+# SQLite is built-in, no extra package needed
+
+# ── Broker SDKs (按需安裝) ─────────────────
+# shioaji>=1.0.0       # 永豐金 (pip install shioaji)
+# fubon-neo>=0.1.0     # 富邦期貨
+# yuanta-api>=0.1.0    # 元大期貨 (unofficial)
+
+# ── Utilities ─────────────────────────────
+pyyaml>=6.0

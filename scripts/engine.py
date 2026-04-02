@@ -1,0 +1,290 @@
+"""
+scripts/engine.py — Script 執行引擎
+類似 XQ XScript / Pine Script 的概念。
+Script 不內建在主架構中，而是作為外部插件匯入。
+"""
+from __future__ import annotations
+import importlib.util
+import logging
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+import pandas as pd
+
+from core.event_bus import EventBus
+from core.models import (
+    Bar, Direction, IndicatorOutput, OrderType,
+    ScriptMeta, ScriptType, StrategySignal,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Script 可用的 API
+# ═══════════════════════════════════════════════════════════
+
+class ScriptContext:
+    """
+    傳入 Script 的執行上下文。
+    Script 透過 ctx 來讀取市場資料 & 發送交易訊號。
+
+    Indicator 使用:
+        ctx.plot("ma5", values, color="#f59e0b")
+
+    Strategy 使用:
+        ctx.buy(qty=1)
+        ctx.sell(qty=1)
+        ctx.buy_limit(price=17500, qty=1)
+    """
+
+    def __init__(self, script_meta: ScriptMeta, bars: pd.DataFrame):
+        self._meta = script_meta
+        self._bars = bars        # DataFrame with columns: open, high, low, close, volume, timestamp
+        self._signals: list[StrategySignal] = []
+        self._plots: dict[str, list[float]] = {}
+        self._plot_colors: dict[str, str] = {}
+        self._overlay = True
+        self._params = dict(script_meta.parameters)
+
+    # ── 資料存取 ──────────────────────────────────────
+
+    @property
+    def data(self) -> pd.DataFrame:
+        """K線資料 (DataFrame)"""
+        return self._bars
+
+    @property
+    def close(self) -> pd.Series:
+        return self._bars["close"]
+
+    @property
+    def open(self) -> pd.Series:
+        return self._bars["open"]
+
+    @property
+    def high(self) -> pd.Series:
+        return self._bars["high"]
+
+    @property
+    def low(self) -> pd.Series:
+        return self._bars["low"]
+
+    @property
+    def volume(self) -> pd.Series:
+        return self._bars["volume"]
+
+    def param(self, key: str, default: Any = None) -> Any:
+        """讀取 Script 參數"""
+        return self._params.get(key, default)
+
+    # ── 指標繪圖 (Indicator) ──────────────────────────
+
+    def plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
+        """畫一條線 (疊在K線上)"""
+        if isinstance(values, pd.Series):
+            values = values.tolist()
+        self._plots[name] = values
+        self._plot_colors[name] = color
+
+    def subplot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
+        """畫在獨立子圖"""
+        self.plot(name, values, color)
+        self._overlay = False
+
+    # ── 交易訊號 (Strategy) ───────────────────────────
+
+    def buy(self, qty: int = 1, reason: str = "") -> None:
+        """市價買進"""
+        self._signals.append(StrategySignal(
+            script_name=self._meta.name,
+            direction=Direction.BUY,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            reason=reason,
+        ))
+
+    def sell(self, qty: int = 1, reason: str = "") -> None:
+        """市價賣出"""
+        self._signals.append(StrategySignal(
+            script_name=self._meta.name,
+            direction=Direction.SELL,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            reason=reason,
+        ))
+
+    def buy_limit(self, price: float, qty: int = 1, reason: str = "") -> None:
+        """限價買進"""
+        self._signals.append(StrategySignal(
+            script_name=self._meta.name,
+            direction=Direction.BUY,
+            qty=qty,
+            price=price,
+            order_type=OrderType.LIMIT,
+            reason=reason,
+        ))
+
+    def sell_limit(self, price: float, qty: int = 1, reason: str = "") -> None:
+        """限價賣出"""
+        self._signals.append(StrategySignal(
+            script_name=self._meta.name,
+            direction=Direction.SELL,
+            qty=qty,
+            price=price,
+            order_type=OrderType.LIMIT,
+            reason=reason,
+        ))
+
+
+# ═══════════════════════════════════════════════════════════
+#  Script 執行引擎
+# ═══════════════════════════════════════════════════════════
+
+class ScriptEngine:
+    """
+    載入並執行 Script (指標 / 策略)。
+
+    Script 規範:
+    ─────────────
+    每個 Script 是一個 .py 檔案，需包含:
+
+    # 指標 Script:
+    def calc(ctx: ScriptContext):
+        ma5 = ctx.close.rolling(5).mean()
+        ma20 = ctx.close.rolling(20).mean()
+        ctx.plot("MA5", ma5, color="#f59e0b")
+        ctx.plot("MA20", ma20, color="#8b5cf6")
+
+    # 策略 Script:
+    def on_bar(ctx: ScriptContext):
+        ma5 = ctx.close.rolling(5).mean()
+        ma20 = ctx.close.rolling(20).mean()
+        if ma5.iloc[-1] > ma20.iloc[-1] and ma5.iloc[-2] <= ma20.iloc[-2]:
+            ctx.buy(1, reason="MA5 上穿 MA20")
+    """
+
+    def __init__(self, scripts_dir: str = "scripts/user"):
+        self.bus = EventBus()
+        self._scripts_dir = Path(scripts_dir)
+        self._scripts: dict[str, ScriptMeta] = {}
+        self._modules: dict[str, Any] = {}  # 載入的 Python 模組
+
+    # ── Script 管理 ───────────────────────────────────
+
+    def load_script(self, meta: ScriptMeta) -> bool:
+        """從檔案載入 Script"""
+        path = Path(meta.file_path)
+        if not path.exists():
+            logger.error(f"[ScriptEngine] 找不到檔案: {path}")
+            return False
+
+        try:
+            spec = importlib.util.spec_from_file_location(meta.name, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            # 驗證 Script 結構
+            if meta.script_type == ScriptType.INDICATOR and not hasattr(module, "calc"):
+                logger.error(f"[ScriptEngine] 指標 Script 缺少 calc() 函式: {meta.name}")
+                return False
+            if meta.script_type == ScriptType.STRATEGY and not hasattr(module, "on_bar"):
+                logger.error(f"[ScriptEngine] 策略 Script 缺少 on_bar() 函式: {meta.name}")
+                return False
+
+            self._modules[meta.id] = module
+            self._scripts[meta.id] = meta
+            logger.info(f"[ScriptEngine] 載入成功: {meta.name} ({meta.script_type.value})")
+            return True
+
+        except Exception:
+            logger.exception(f"[ScriptEngine] 載入失敗: {meta.name}")
+            return False
+
+    def unload_script(self, script_id: str) -> None:
+        self._scripts.pop(script_id, None)
+        self._modules.pop(script_id, None)
+
+    def enable_script(self, script_id: str) -> None:
+        if script_id in self._scripts:
+            self._scripts[script_id].enabled = True
+
+    def disable_script(self, script_id: str) -> None:
+        if script_id in self._scripts:
+            self._scripts[script_id].enabled = False
+
+    @property
+    def enabled_indicators(self) -> list[ScriptMeta]:
+        return [s for s in self._scripts.values()
+                if s.enabled and s.script_type == ScriptType.INDICATOR]
+
+    @property
+    def enabled_strategies(self) -> list[ScriptMeta]:
+        return [s for s in self._scripts.values()
+                if s.enabled and s.script_type == ScriptType.STRATEGY]
+
+    # ── 執行 ──────────────────────────────────────────
+
+    def run_indicator(
+        self, script_id: str, bars: pd.DataFrame
+    ) -> Optional[IndicatorOutput]:
+        """執行指標 Script，回傳繪圖資料"""
+        meta = self._scripts.get(script_id)
+        module = self._modules.get(script_id)
+        if not meta or not module or not meta.enabled:
+            return None
+
+        ctx = ScriptContext(meta, bars)
+        try:
+            module.calc(ctx)
+            return IndicatorOutput(
+                name=meta.name,
+                series=ctx._plots,
+                overlays=ctx._overlay,
+                colors=ctx._plot_colors,
+            )
+        except Exception:
+            logger.exception(f"[ScriptEngine] 指標執行錯誤: {meta.name}")
+            return None
+
+    def run_strategy(
+        self, script_id: str, bars: pd.DataFrame
+    ) -> list[StrategySignal]:
+        """執行策略 Script，回傳交易訊號"""
+        meta = self._scripts.get(script_id)
+        module = self._modules.get(script_id)
+        if not meta or not module or not meta.enabled:
+            return []
+
+        ctx = ScriptContext(meta, bars)
+        try:
+            module.on_bar(ctx)
+            if ctx._signals:
+                for sig in ctx._signals:
+                    logger.info(
+                        f"[ScriptEngine] 策略訊號: {meta.name} → "
+                        f"{sig.direction.value} x{sig.qty} ({sig.reason})"
+                    )
+                    self.bus.emit_sync("script_signal", sig)
+            return ctx._signals
+        except Exception:
+            logger.exception(f"[ScriptEngine] 策略執行錯誤: {meta.name}")
+            return []
+
+    def run_all_on_bar(self, bars: pd.DataFrame) -> dict[str, IndicatorOutput]:
+        """
+        每收到一根新 Bar 時呼叫。
+        執行所有啟用的指標 & 策略。
+        """
+        indicator_results = {}
+
+        for meta in self.enabled_indicators:
+            result = self.run_indicator(meta.id, bars)
+            if result:
+                indicator_results[meta.id] = result
+
+        for meta in self.enabled_strategies:
+            self.run_strategy(meta.id, bars)
+
+        return indicator_results
