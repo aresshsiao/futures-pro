@@ -51,6 +51,9 @@ data/daily/**
 data/db/**
 data/runtime/**
 data/out/**
+data/*.db
+data/*.db-shm
+data/*.db-wal
 *.log
 config.json
 keys.json

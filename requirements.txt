@@ -13,9 +13,9 @@ numpy>=1.26.0
 # SQLite is built-in, no extra package needed
 
 # ── Broker SDKs (按需安裝) ─────────────────
-# shioaji>=1.0.0       # 永豐金 (pip install shioaji)
+shioaji>=1.0.0       # 永豐金 (pip install shioaji)
 # fubon-neo>=0.1.0     # 富邦期貨
-# yuanta-api>=0.1.0    # 元大期貨 (unofficial)
 
 # ── Utilities ─────────────────────────────
 pyyaml>=6.0
+requests>=2.31.0

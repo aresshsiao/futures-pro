@@ -75,6 +75,59 @@ const COLORS = {
   warnBg: "rgba(245,158,11,0.12)",
 };
 
+// ─── WebSocket Hook ───────────────────────────────────────────────────
+function useWebSocket(url) {
+  const wsRef = useRef(null);
+  const handlersRef = useRef({});
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    let ws;
+    let stopped = false;
+
+    function connect() {
+      if (stopped) return;
+      ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => setConnected(true);
+
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          const handler = handlersRef.current[msg.type];
+          if (handler) handler(msg);
+        } catch (_) {}
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        if (!stopped) setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
+    return () => {
+      stopped = true;
+      ws?.close();
+    };
+  }, [url]);
+
+  const send = useCallback((action, data = {}) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action, data }));
+    }
+  }, []);
+
+  // addHandler returns a cleanup function
+  const addHandler = useCallback((type, fn) => {
+    handlersRef.current[type] = fn;
+    return () => { delete handlersRef.current[type]; };
+  }, []);
+
+  return { send, addHandler, connected };
+}
+
 // ─── Candlestick Chart Component (K-line only) ──────────────────────
 function CandlestickChart({ data, indicators = [] }) {
   const canvasRef = useRef(null);
@@ -940,108 +993,225 @@ function ScriptsPanel({ scripts, setScripts, activeView }) {
 }
 
 // ─── Database Page ───────────────────────────────────────────────────
-function DatabasePage() {
+function DatabasePage({ send, addHandler }) {
   const [importing, setImporting] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [logs, setLogs] = useState([
-    { time: "14:30:22", msg: "資料庫就緒 — 期交所歷史資料已載入", type: "info" },
-    { time: "14:30:22", msg: "TX 日K資料: 2019-01-02 ~ 2025-12-31 (1,742 筆)", type: "info" },
-    { time: "14:30:22", msg: "MTX 日K資料: 2019-01-02 ~ 2025-12-31 (1,742 筆)", type: "info" },
-  ]);
+  const [syncing, setSyncing] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const [summary, setSummary] = useState([]);
+  const [importDir, setImportDir] = useState("data/raw/taifex");
+  const logsEndRef = useRef(null);
+
+  const addLog = (msg, type = "info") =>
+    setLogs(l => [...l, { time: new Date().toLocaleTimeString("zh-TW"), msg, type }]);
+
+  // 自動捲到最新日誌
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  // 初始化: 載入 DB 摘要並註冊 WS 回調
+  useEffect(() => {
+    send("db_summary", {});
+
+    const cleanups = [
+      addHandler("db_summary", (msg) => {
+        const data = msg.data || [];
+        setSummary(data);
+        if (data.length > 0) {
+          addLog(`資料庫已載入 — ${data.length} 個商品/週期`, "info");
+          data.forEach(d =>
+            addLog(`  ${d.symbol} ${d.timeframe}: ${d.count.toLocaleString()} 筆　(${d.start?.slice(0,10)} ~ ${d.end?.slice(0,10)})`, "info")
+          );
+        } else {
+          addLog("資料庫空白，請先匯入期交所 CSV 或從券商同步", "info");
+        }
+      }),
+
+      addHandler("import_result", (msg) => {
+        setImporting(false);
+        if (msg.count !== undefined) {
+          addLog(`匯入完成 ✓ — 共寫入 ${msg.count.toLocaleString()} 筆 K 線`, "success");
+          setSummary(msg.summary || []);
+        } else {
+          addLog("匯入失敗，請確認 CSV 目錄是否存在", "error");
+        }
+      }),
+
+      addHandler("broker_sync_result", (msg) => {
+        setSyncing(false);
+        if (msg.success) {
+          addLog(`券商同步完成 ✓ — 共 ${msg.total.toLocaleString()} 筆`, "success");
+          Object.entries(msg.results || {}).forEach(([k, v]) => {
+            if (v > 0) addLog(`  ${k}: +${v} 筆`, "info");
+          });
+          setSummary(msg.summary || []);
+        } else {
+          addLog(`券商同步失敗: ${msg.message}`, "error");
+        }
+      }),
+    ];
+
+    return () => cleanups.forEach(fn => fn());
+  }, [send, addHandler]);
+
+  const startDownload = () => {
+    setImporting(true);
+    addLog("連線至期交所網站，下載近 30 個交易日行情 ZIP...", "info");
+    send("import_taifex", { source: "download" });
+  };
 
   const startImport = () => {
     setImporting(true);
-    setProgress(0);
-    const msgs = [
-      "開始下載期交所每日行情資料...",
-      "解析 CSV 檔案格式...",
-      "轉換欄位名稱與資料型態...",
-      "寫入 SQLite 資料庫...",
-      "建立索引...",
-      "資料匯入完成 ✓"
-    ];
-    msgs.forEach((m, i) => {
-      setTimeout(() => {
-        setProgress(((i + 1) / msgs.length) * 100);
-        setLogs(l => [...l, { time: new Date().toLocaleTimeString("zh-TW"), msg: m, type: i === msgs.length - 1 ? "success" : "info" }]);
-        if (i === msgs.length - 1) setImporting(false);
-      }, (i + 1) * 800);
+    addLog(`匯入本地 CSV 目錄: ${importDir}`, "info");
+    send("import_taifex", { source: "local", directory: importDir });
+  };
+
+  const startBrokerSync = () => {
+    setSyncing(true);
+    addLog("從券商 API 同步歷史資料 (TX, MTX, TE — 日K/小時K)...", "info");
+    send("broker_sync", {
+      symbols: ["TX", "MTX", "TE"],
+      timeframes: ["1d", "1h", "15m"],
+      count: 200,
     });
   };
 
-  return (
-    <div style={{ padding: 20, maxWidth: 900, margin: "0 auto" }}>
-      <h2 style={{ color: COLORS.text, fontSize: 18, fontWeight: 700, marginBottom: 16 }}>📦 期貨資料庫管理</h2>
+  const refreshSummary = () => {
+    addLog("重新整理資料庫統計...", "info");
+    send("db_summary", {});
+  };
 
+  const busy = importing || syncing;
+
+  return (
+    <div style={{ padding: 20, maxWidth: 960, margin: "0 auto", height: "100%", overflowY: "auto" }}>
+      <h2 style={{ color: COLORS.text, fontSize: 18, fontWeight: 700, marginBottom: 16 }}>期貨資料庫管理</h2>
+
+      {/* ─── 操作按鈕 ─── */}
       <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
         {[
-          { label: "期交所下載", desc: "手動下載並轉換每日行情", action: startImport, icon: "⬇️" },
-          { label: "券商同步", desc: "從券商API同步近期資料", action: () => {}, icon: "🔄" },
-          { label: "資料檢查", desc: "檢查缺漏與資料完整性", action: () => {}, icon: "🔍" },
-        ].map((item, i) => (
-          <button key={i} onClick={item.action} disabled={importing} style={{
-            flex: 1, padding: "16px 14px", background: COLORS.bgCard, border: `1px solid ${COLORS.border}`,
-            borderRadius: 8, cursor: importing ? "not-allowed" : "pointer", textAlign: "left",
-            opacity: importing && i === 0 ? 0.6 : 1, transition: "all .15s"
+          {
+            label: "期交所下載", icon: "⬇",
+            desc: "從期交所網站下載近 30 個交易日行情 ZIP",
+            action: startDownload,
+            active: importing,
+            color: COLORS.warn,
+          },
+          {
+            label: "匯入本地 CSV", icon: "📂",
+            desc: "解析下方目錄中的 .csv 檔案",
+            action: startImport,
+            active: importing,
+            color: COLORS.warn,
+          },
+          {
+            label: "券商同步", icon: "↻",
+            desc: "從已連線券商 API 取得歷史 K 棒",
+            action: startBrokerSync,
+            active: syncing,
+            color: COLORS.accent,
+          },
+          {
+            label: "重新整理", icon: "⟳",
+            desc: "重新讀取資料庫統計",
+            action: refreshSummary,
+            active: false,
+            color: COLORS.up,
+          },
+        ].map((item) => (
+          <button key={item.label} onClick={item.action} disabled={busy} style={{
+            flex: 1, padding: "14px 12px",
+            background: item.active ? `${item.color}18` : COLORS.bgCard,
+            border: `1px solid ${item.active ? item.color : COLORS.border}`,
+            borderRadius: 8, cursor: busy ? "not-allowed" : "pointer",
+            textAlign: "left", opacity: busy && !item.active ? 0.5 : 1,
+            transition: "all .15s",
           }}>
-            <div style={{ fontSize: 20, marginBottom: 6 }}>{item.icon}</div>
-            <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{item.label}</div>
+            <div style={{ fontSize: 18, color: item.color, marginBottom: 5 }}>{item.icon}</div>
+            <div style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>
+              {item.active ? `${item.label}中...` : item.label}
+            </div>
             <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>{item.desc}</div>
           </button>
         ))}
       </div>
 
-      {/* Progress */}
-      {importing && (
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ height: 4, background: COLORS.bgCard, borderRadius: 2, overflow: "hidden" }}>
-            <div style={{
-              height: "100%", width: `${progress}%`, background: `linear-gradient(90deg, ${COLORS.accent}, ${COLORS.up})`,
-              transition: "width .5s ease", borderRadius: 2
-            }} />
-          </div>
-          <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 4, textAlign: "right" }}>{progress.toFixed(0)}%</div>
+      {/* ─── 期交所目錄輸入 ─── */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8, marginBottom: 16,
+        padding: "10px 14px", background: COLORS.bgCard,
+        border: `1px solid ${COLORS.border}`, borderRadius: 8,
+      }}>
+        <span style={{ color: COLORS.textDim, fontSize: 11, whiteSpace: "nowrap" }}>CSV 目錄:</span>
+        <input
+          value={importDir}
+          onChange={e => setImportDir(e.target.value)}
+          disabled={busy}
+          style={{
+            flex: 1, background: "transparent", border: "none", outline: "none",
+            color: COLORS.text, fontSize: 12, fontFamily: "monospace",
+          }}
+          placeholder="data/raw/taifex"
+        />
+        <span style={{ color: COLORS.textMuted, fontSize: 10 }}>（放置期交所手動下載的 .csv 檔案）</span>
+      </div>
+
+      {/* ─── 資料庫統計 ─── */}
+      {summary.length > 0 && (
+        <div style={{
+          marginBottom: 16, background: COLORS.bgCard,
+          border: `1px solid ${COLORS.border}`, borderRadius: 8, overflow: "hidden",
+        }}>
+          <div style={{
+            padding: "8px 14px", borderBottom: `1px solid ${COLORS.border}`,
+            fontSize: 11, color: COLORS.textDim, fontWeight: 600,
+          }}>資料庫統計</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ background: "rgba(255,255,255,0.02)" }}>
+                {["商品", "週期", "筆數", "最早", "最新"].map(h => (
+                  <th key={h} style={{
+                    padding: "6px 14px", textAlign: "left",
+                    color: COLORS.textDim, fontWeight: 600,
+                    borderBottom: `1px solid ${COLORS.border}`,
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {summary.map((d, i) => (
+                <tr key={i} style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+                  <td style={{ padding: "6px 14px", color: COLORS.warn, fontWeight: 600 }}>{d.symbol}</td>
+                  <td style={{ padding: "6px 14px", color: COLORS.textDim }}>{d.timeframe}</td>
+                  <td style={{ padding: "6px 14px", color: COLORS.text }}>{d.count.toLocaleString()}</td>
+                  <td style={{ padding: "6px 14px", color: COLORS.textMuted, fontFamily: "monospace" }}>{d.start?.slice(0,10)}</td>
+                  <td style={{ padding: "6px 14px", color: COLORS.textMuted, fontFamily: "monospace" }}>{d.end?.slice(0,10)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {/* Data sources info */}
-      <div style={{
-        padding: 14, background: COLORS.bgCard, borderRadius: 8, marginBottom: 16,
-        border: `1px solid ${COLORS.border}`
-      }}>
-        <div style={{ fontSize: 12, color: COLORS.textDim, fontWeight: 600, marginBottom: 8 }}>資料來源架構</div>
-        <div style={{ display: "flex", gap: 20, fontSize: 11 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ color: COLORS.warn, fontWeight: 600, marginBottom: 4 }}>📂 歷史資料 (期交所)</div>
-            <div style={{ color: COLORS.textDim, lineHeight: 1.6 }}>
-              手動下載 → CSV 解析 → 欄位轉換 → SQLite<br/>
-              支援日K / 分K 資料匯入
-            </div>
-          </div>
-          <div style={{ width: 1, background: COLORS.border }} />
-          <div style={{ flex: 1 }}>
-            <div style={{ color: COLORS.accent, fontWeight: 600, marginBottom: 4 }}>🔌 即時資料 (券商API)</div>
-            <div style={{ color: COLORS.textDim, lineHeight: 1.6 }}>
-              自動同步 → 格式統一 → 合併至資料庫<br/>
-              補齊期交所資料的空白期間
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Log */}
+      {/* ─── 操作日誌 ─── */}
       <div style={{
         background: "#0d1117", border: `1px solid ${COLORS.border}`, borderRadius: 8,
-        padding: 12, maxHeight: 300, overflowY: "auto", fontFamily: "monospace", fontSize: 11
+        padding: 12, maxHeight: 260, overflowY: "auto", fontFamily: "monospace", fontSize: 11,
       }}>
+        {logs.length === 0 && (
+          <span style={{ color: COLORS.textMuted }}>連線中，等待後端回應...</span>
+        )}
         {logs.map((l, i) => (
-          <div key={i} style={{ padding: "3px 0", display: "flex", gap: 10 }}>
-            <span style={{ color: COLORS.textMuted }}>{l.time}</span>
+          <div key={i} style={{ padding: "2px 0", display: "flex", gap: 10 }}>
+            <span style={{ color: COLORS.textMuted, flexShrink: 0 }}>{l.time}</span>
             <span style={{
-              color: l.type === "success" ? COLORS.up : l.type === "error" ? COLORS.down : COLORS.textDim
+              color: l.type === "success" ? COLORS.up
+                   : l.type === "error"   ? COLORS.down
+                   : COLORS.textDim,
             }}>{l.msg}</span>
           </div>
         ))}
+        <div ref={logsEndRef} />
       </div>
     </div>
   );
@@ -1183,6 +1353,8 @@ export default function TradingPlatform() {
   const [page, setPage] = useState("trading");
   const [klineData] = useState(() => generateKlineData(120));
   const [scripts, setScripts] = useState(MOCK_SCRIPTS);
+  const wsUrl = `ws://${window.location.host}/ws`;
+  const { send, addHandler, connected } = useWebSocket(wsUrl);
   const [showBrokerConfig, setShowBrokerConfig] = useState(false);
   const [brokerConfig, setBrokerConfig] = useState({ quoteBroker: "永豐金", tradeBroker: "永豐金" });
   const [clock, setClock] = useState("");
@@ -1262,7 +1434,7 @@ export default function TradingPlatform() {
 
       {/* ─── Content ──────────────────────────────── */}
       <div style={{ flex: 1, overflow: "hidden" }}>
-        {page === "database" && <DatabasePage />}
+        {page === "database" && <DatabasePage send={send} addHandler={addHandler} />}
         {page === "backtest" && <BacktestPage scripts={scripts} />}
         {page === "scripts" && (
           <div style={{ height: "100%", ...panelStyle, margin: 8, borderRadius: 8 }}>
@@ -1399,12 +1571,8 @@ export default function TradingPlatform() {
       }}>
         <div style={{ display: "flex", gap: 16 }}>
           <span>
-            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: COLORS.up, marginRight: 4, boxShadow: `0 0 6px ${COLORS.up}` }} />
-            問價連線正常
-          </span>
-          <span>
-            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: COLORS.up, marginRight: 4, boxShadow: `0 0 6px ${COLORS.up}` }} />
-            交易連線正常
+            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: connected ? COLORS.up : COLORS.down, marginRight: 4, boxShadow: `0 0 6px ${connected ? COLORS.up : COLORS.down}` }} />
+            {connected ? "後端連線正常" : "後端未連線"}
           </span>
           <span>延遲: 3ms</span>
         </div>

@@ -153,13 +153,54 @@ async def handle_broker_config(ws, data: dict):
 
 
 async def handle_import_taifex(ws, data: dict):
-    """前端: 匯入期交所資料"""
-    directory = data.get("directory", "data/raw/taifex")
-    bars = taifex.import_directory(directory)
+    """前端: 匯入期交所資料
+    data.source = "download" → 從期交所網站下載近 30 天
+    data.source = "local"    → 從本地目錄匯入 CSV（預設）
+    """
+    import asyncio
+    source = data.get("source", "local")
+
+    if source == "download":
+        # 在 executor 裡跑阻塞的 requests 下載
+        loop = asyncio.get_event_loop()
+        bars = await loop.run_in_executor(None, taifex.download_recent)
+    else:
+        directory = data.get("directory", "data/raw/taifex")
+        bars = taifex.import_directory(directory)
+
     count = db.insert_bars(bars)
     await ws.send_json({
         "type": "import_result",
         "count": count,
+        "summary": db.summary(),
+    })
+
+
+async def handle_broker_sync(ws, data: dict):
+    """前端: 從券商 API 同步歷史資料"""
+    from data.sources.broker_sync import BrokerSync
+    from core.models import Timeframe
+
+    if not quote.is_connected():
+        await ws.send_json({
+            "type": "broker_sync_result",
+            "success": False,
+            "message": "券商未連線，請先設定並連線券商",
+        })
+        return
+
+    symbols = data.get("symbols", ["TX", "MTX"])
+    timeframes = [Timeframe(tf) for tf in data.get("timeframes", ["1d"])]
+    count = data.get("count", 200)
+
+    syncer = BrokerSync(quote._adapter, db)
+    results = await syncer.sync_multiple(symbols, timeframes, count)
+
+    await ws.send_json({
+        "type": "broker_sync_result",
+        "success": True,
+        "results": results,
+        "total": sum(results.values()),
         "summary": db.summary(),
     })
 
@@ -226,6 +267,7 @@ def setup():
     register_action("get_orders", handle_get_orders)
     register_action("broker_config", handle_broker_config)
     register_action("import_taifex", handle_import_taifex)
+    register_action("broker_sync", handle_broker_sync)
     register_action("db_summary", handle_db_summary)
 
     # 事件接線

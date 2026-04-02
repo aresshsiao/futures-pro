@@ -1,15 +1,17 @@
 """
 data/sources/taifex.py — 期交所資料下載與轉換
-手動下載期交所每日行情 CSV → 解析 → 轉換 → 寫入 SQLite
+自動從期交所網站下載最近 30 天每日行情 ZIP → 解壓 CSV → 解析 → 存入 SQLite
 """
 from __future__ import annotations
 import csv
 import io
 import logging
-import re
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 from core.models import Bar, Timeframe
 
@@ -21,7 +23,7 @@ class TaifexImporter:
     期交所 (TAIFEX) 資料匯入器
 
     資料來源:
-      https://www.taifex.com.tw/cht/3/futDataDown
+      https://www.taifex.com.tw/cht/3/dlFutPrevious30DaysSalesData
       日行情 CSV 格式 (Big5 編碼)
 
     支援匯入:
@@ -150,6 +152,151 @@ class TaifexImporter:
             return float(s)
         except ValueError:
             return 0.0
+
+    # ── 從期交所網站下載 ───────────────────────────
+
+    LISTING_URL = "https://www.taifex.com.tw/cht/3/dlFutPrevious30DaysSalesData"
+    DOWNLOAD_PREFIX = "onClick=\"javascript:window.open('"
+    DOWNLOAD_SUFFIX = "')\""
+    BASE_URL = "https://www.taifex.com.tw"
+
+    def fetch_download_urls(self) -> list[str]:
+        """
+        解析期交所「近 30 個交易日每日行情下載」頁面，
+        回傳所有 CSV ZIP 的完整下載 URL。
+        """
+        try:
+            resp = requests.get(self.LISTING_URL, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.error("[Taifex] 無法取得下載頁面: %s", e)
+            return []
+
+        urls: list[str] = []
+        tmp = resp.text
+        while self.DOWNLOAD_PREFIX in tmp:
+            pos = tmp.find(self.DOWNLOAD_PREFIX)
+            tmp = tmp[pos + len(self.DOWNLOAD_PREFIX):]
+            pos = tmp.find(self.DOWNLOAD_SUFFIX)
+            candidate = tmp[:pos]
+            if "CSV" in candidate.upper():
+                full_url = candidate if candidate.startswith("http") else self.BASE_URL + candidate
+                urls.append(full_url)
+            tmp = tmp[pos + len(self.DOWNLOAD_SUFFIX):]
+
+        logger.info("[Taifex] 找到 %d 個 CSV ZIP 連結", len(urls))
+        return urls
+
+    def _get_remote_size(self, url: str) -> int:
+        """用 HEAD 請求取得伺服器端檔案大小，取不到回傳 -1。"""
+        try:
+            resp = requests.head(url, timeout=15, allow_redirects=True)
+            resp.raise_for_status()
+            return int(resp.headers.get("Content-Length", -1))
+        except Exception:
+            return -1
+
+    def _zip_cache_path(self, url: str) -> Path:
+        """根據 URL 決定本地 ZIP 快取路徑。"""
+        filename = url.split("/")[-1].split("?")[0] or "taifex.zip"
+        if not filename.upper().endswith(".ZIP"):
+            filename += ".zip"
+        return self._raw_dir / filename
+
+    def _load_zip_bytes(self, url: str) -> Optional[bytes]:
+        """
+        取得 ZIP 內容（bytes）：
+        - 若本地快取存在且與伺服器大小相同 → 直接讀快取
+        - 否則重新下載並更新快取
+        """
+        cache = self._zip_cache_path(url)
+        remote_size = self._get_remote_size(url)
+
+        if cache.exists() and remote_size > 0 and cache.stat().st_size == remote_size:
+            logger.info("[Taifex] 快取命中 (大小一致 %d bytes): %s", remote_size, cache.name)
+            return cache.read_bytes()
+
+        reason = "首次下載" if not cache.exists() else f"大小不符 (本地 {cache.stat().st_size} / 遠端 {remote_size})"
+        logger.info("[Taifex] %s — 下載: %s", reason, url)
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.error("[Taifex] 下載失敗 %s: %s", url, e)
+            return None
+
+        cache.write_bytes(resp.content)
+        logger.info("[Taifex] 已快取: %s (%d bytes)", cache.name, len(resp.content))
+        return resp.content
+
+    def _parse_zip_bytes(self, zip_bytes: bytes, source_name: str = "") -> list[Bar]:
+        """
+        在記憶體中解析 ZIP，不寫出任何 CSV 檔案。
+        支援 Big5 / UTF-8 編碼自動偵測。
+        """
+        bars: list[Bar] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                for name in zf.namelist():
+                    if not name.upper().endswith(".CSV"):
+                        continue
+                    raw = zf.read(name)
+                    # 嘗試 Big5，再試 UTF-8
+                    for enc in ("big5", "utf-8-sig", "utf-8"):
+                        try:
+                            text = raw.decode(enc, errors="strict")
+                            break
+                        except (UnicodeDecodeError, LookupError):
+                            text = None
+                    if text is None:
+                        text = raw.decode("big5", errors="replace")
+
+                    parsed = self._parse_csv_text(text)
+                    bars.extend(parsed)
+                    logger.info("[Taifex] 解析 %s/%s → %d 筆", source_name, name, len(parsed))
+        except zipfile.BadZipFile as e:
+            logger.error("[Taifex] 無效 ZIP (%s): %s", source_name, e)
+        return bars
+
+    def _parse_csv_text(self, text: str) -> list[Bar]:
+        """從 CSV 字串（已解碼）解析 Bar 列表。"""
+        bars: list[Bar] = []
+        reader = csv.reader(io.StringIO(text))
+        header_found = False
+        for row in reader:
+            if not row:
+                continue
+            if not header_found:
+                if any("交易日期" in cell for cell in row):
+                    header_found = True
+                continue
+            bar = self._parse_row(row)
+            if bar:
+                bars.append(bar)
+        return bars
+
+    def download_recent(self) -> list[Bar]:
+        """
+        從期交所網站下載近 30 個交易日所有 CSV ZIP：
+        - ZIP 快取在本地（僅在伺服器大小不同時重下）
+        - CSV 全在記憶體解析，不寫出磁碟
+        """
+        urls = self.fetch_download_urls()
+        if not urls:
+            return []
+
+        all_bars: list[Bar] = []
+        for url in urls:
+            zip_bytes = self._load_zip_bytes(url)
+            if zip_bytes is None:
+                continue
+            bars = self._parse_zip_bytes(zip_bytes, url.split("/")[-1])
+            all_bars.extend(bars)
+
+        logger.info("[Taifex] 下載完成: 共 %d 筆 K 線", len(all_bars))
+        return all_bars
+
+    # ── 從本地目錄匯入 ────────────────────────────
 
     def import_directory(self, directory: str | Path = None) -> list[Bar]:
         """批量匯入整個目錄下的 CSV 檔案"""
