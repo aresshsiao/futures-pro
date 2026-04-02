@@ -994,6 +994,7 @@ function ScriptsPanel({ scripts, setScripts, activeView }) {
 
 // ─── Database Page ───────────────────────────────────────────────────
 function DatabasePage({ send, addHandler }) {
+  const [downloading, setDownloading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [logs, setLogs] = useState([]);
@@ -1028,6 +1029,7 @@ function DatabasePage({ send, addHandler }) {
       }),
 
       addHandler("import_result", (msg) => {
+        setDownloading(false);
         setImporting(false);
         if (msg.count !== undefined) {
           addLog(`匯入完成 ✓ — 共寫入 ${msg.count.toLocaleString()} 筆 K 線`, "success");
@@ -1055,7 +1057,7 @@ function DatabasePage({ send, addHandler }) {
   }, [send, addHandler]);
 
   const startDownload = () => {
-    setImporting(true);
+    setDownloading(true);
     addLog("連線至期交所網站，下載近 30 個交易日行情 ZIP...", "info");
     send("import_taifex", { source: "download" });
   };
@@ -1081,7 +1083,7 @@ function DatabasePage({ send, addHandler }) {
     send("db_summary", {});
   };
 
-  const busy = importing || syncing;
+  const busy = downloading || importing || syncing;
 
   return (
     <div style={{ padding: 20, maxWidth: 960, margin: "0 auto", height: "100%", overflowY: "auto" }}>
@@ -1094,7 +1096,7 @@ function DatabasePage({ send, addHandler }) {
             label: "期交所下載", icon: "⬇",
             desc: "從期交所網站下載近 30 個交易日行情 ZIP",
             action: startDownload,
-            active: importing,
+            active: downloading,
             color: COLORS.warn,
           },
           {
@@ -1102,7 +1104,7 @@ function DatabasePage({ send, addHandler }) {
             desc: "解析下方目錄中的 .csv 檔案",
             action: startImport,
             active: importing,
-            color: COLORS.warn,
+            color: COLORS.accent,
           },
           {
             label: "券商同步", icon: "↻",

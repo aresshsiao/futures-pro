@@ -26,8 +26,8 @@
       document.head.appendChild(s);
     });
 
-    // 取得 JSX 原始碼並轉換
-    const res = await fetch("/static/trading-platform.jsx");
+    // 取得 JSX 原始碼並轉換（加時間戳避免瀏覽器快取舊版）
+    const res = await fetch(`/static/trading-platform.jsx?v=${Date.now()}`);
     const src = await res.text();
 
     const { code } = Babel.transform(src, {

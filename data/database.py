@@ -73,12 +73,13 @@ class Database:
     # ── 寫入 ──────────────────────────────────────────
 
     def insert_bars(self, bars: list[Bar]) -> int:
-        """批量寫入K線 (重複時忽略)"""
+        """批量寫入K線 (重複時忽略)，回傳實際新增筆數。"""
         rows = [
             (b.symbol, b.timeframe.value, b.timestamp.isoformat(),
              b.open, b.high, b.low, b.close, b.volume)
             for b in bars
         ]
+        before = self._conn.total_changes
         self._conn.executemany(
             """INSERT OR IGNORE INTO bars
                (symbol, timeframe, timestamp, open, high, low, close, volume)
@@ -86,7 +87,7 @@ class Database:
             rows,
         )
         self._conn.commit()
-        return len(rows)
+        return self._conn.total_changes - before
 
     def insert_ticks(self, symbol: str, ticks: list[tuple[str, float, int]]) -> int:
         """批量寫入 Tick: [(timestamp_iso, price, volume), ...]"""

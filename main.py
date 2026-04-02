@@ -7,6 +7,7 @@ import asyncio
 import logging
 import sys
 
+
 import uvicorn
 
 from core.event_bus import EventBus
@@ -157,11 +158,9 @@ async def handle_import_taifex(ws, data: dict):
     data.source = "download" → 從期交所網站下載近 30 天
     data.source = "local"    → 從本地目錄匯入 CSV（預設）
     """
-    import asyncio
     source = data.get("source", "local")
 
     if source == "download":
-        # 在 executor 裡跑阻塞的 requests 下載
         loop = asyncio.get_event_loop()
         bars = await loop.run_in_executor(None, taifex.download_recent)
     else:
