@@ -259,34 +259,137 @@ class TaifexImporter:
                     if text is None:
                         text = raw.decode("big5", errors="replace")
 
-                    parsed = self._parse_csv_text(text)
+                    parsed = self._parse_csv_text(text, source_name=name)
                     bars.extend(parsed)
                     logger.info("[Taifex] 解析 %s/%s → %d 筆", source_name, name, len(parsed))
         except zipfile.BadZipFile as e:
             logger.error("[Taifex] 無效 ZIP (%s): %s", source_name, e)
         return bars
 
-    def _parse_csv_text(self, text: str) -> list[Bar]:
+    def _parse_csv_text(self, text: str, source_name: str = "") -> list[Bar]:
         """從 CSV 字串（已解碼）解析 Bar 列表。"""
         bars: list[Bar] = []
         reader = csv.reader(io.StringIO(text))
         header_found = False
+        is_tick = False
+        
+        # 尋找 CSV 標頭
+        for row in reader:
+            if not row:
+                continue
+            if any("成交日期" in cell for cell in row):
+                header_found = True
+                is_tick = True
+                logger.debug("[Taifex] 偵測到 Tick 資料表頭: %s", row[:6])
+                break
+            elif any("交易日期" in cell for cell in row):
+                header_found = True
+                is_tick = False
+                logger.debug("[Taifex] 偵測到 日K線 資料表頭: %s", row[:6])
+                break
+
+        if not header_found:
+            return []
+
+        # 若是 Tick 資料，呼叫特殊解析與聚合
+        if is_tick:
+            return self._parse_tick_to_m1_bars(reader, source_name)
+
+        # 否則是 Daily OHLC 資料
         first_data_row_logged = False
         for row in reader:
             if not row:
                 continue
-            if not header_found:
-                if any("交易日期" in cell for cell in row):
-                    header_found = True
-                    logger.debug("[Taifex] CSV header: %s", row[:6])
-                continue
             if not first_data_row_logged:
-                logger.info("[Taifex] CSV 第一筆資料 (前6欄): %s", row[:6])
+                logger.info("[Taifex] Daily CSV 第一筆資料 (前6欄): %s", row[:6])
                 first_data_row_logged = True
             bar = self._parse_row(row)
             if bar:
                 bars.append(bar)
         return bars
+
+    def _parse_tick_to_m1_bars(self, reader, source_name: str) -> list[Bar]:
+        """
+        將 Tick CSV (逐筆明細) 依分鐘 (M1) 聚合為 Bar 列表。
+        自動挑選當日成交量最高的主力合約 (近月) 回傳。
+        """
+        from collections import defaultdict
+        
+        # vols: symbol -> delivery -> total_volume
+        vols = defaultdict(lambda: defaultdict(int))
+        # m1_bars: symbol -> delivery -> timestamp -> [open, high, low, close, volume]
+        m1_bars = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+
+        for row in reader:
+            if not row or len(row) < 6:
+                continue
+            
+            try:
+                date_str = row[0].strip()
+                prod_name = row[1].strip()
+                delivery = row[2].strip()
+                time_str = row[3].strip()
+                price_str = row[4].strip()
+                qty_str = row[5].strip()
+
+                symbol = self.KNOWN_SYMBOLS.get(prod_name) or self.SYMBOL_MAP.get(prod_name)
+                if not symbol:
+                    continue  # 跳過不認識的商品
+
+                # 濾除價差單 (例如 202212/202301)
+                if "/" in delivery:
+                    continue
+
+                price = float(price_str) if price_str and price_str != "-" else 0.0
+                if price <= 0:
+                    continue
+                qty = int(qty_str) if qty_str else 0
+
+                # 截斷秒數變成 M1
+                if len(time_str) >= 4:
+                    minute_time_str = time_str[:4] + "00"
+                else:
+                    continue
+                
+                dt = datetime.strptime(date_str + minute_time_str, "%Y%m%d%H%M%S")
+
+                vols[symbol][delivery] += qty
+                b = m1_bars[symbol][delivery][dt]
+                if not b:
+                    b.extend([price, price, price, price, qty])
+                else:
+                    b[1] = max(b[1], price)
+                    b[2] = min(b[2], price)
+                    b[3] = price
+                    b[4] += qty
+
+            except (ValueError, IndexError):
+                continue
+
+        result_bars: list[Bar] = []
+        for symbol, deliveries in m1_bars.items():
+            if not deliveries:
+                continue
+            
+            # 依成交量挑選當天的主力合約
+            main_delivery = max(deliveries.keys(), key=lambda d: vols[symbol][d])
+            main_delivery_bars = deliveries[main_delivery]
+
+            for dt, b in main_delivery_bars.items():
+                result_bars.append(Bar(
+                    symbol=symbol,
+                    timeframe=Timeframe.M1,
+                    timestamp=dt,
+                    open=b[0],
+                    high=b[1],
+                    low=b[2],
+                    close=b[3],
+                    volume=b[4],
+                    is_closed=True,
+                ))
+
+        logger.info("[Taifex] %s 聚合為 %d 筆 M1 K 線", source_name, len(result_bars))
+        return result_bars
 
     def download_recent(self, symbols: list[str] | None = None) -> list[Bar]:
         """
