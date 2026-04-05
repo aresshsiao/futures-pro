@@ -45,7 +45,7 @@ class BacktestEngine:
 
         # 1. 載入歷史資料
         bars = self._db.get_bars(
-            config.symbol, config.timeframe,
+            config.symbol,
             start=config.start_date, end=config.end_date,
             limit=99999,
         )

@@ -131,11 +131,59 @@ function useWebSocket(url) {
 // ─── Candlestick Chart Component (K-line only) ──────────────────────
 function CandlestickChart({ data, indicators = [] }) {
   const canvasRef = useRef(null);
+  const containerRef = useRef(null);
   const [tooltip, setTooltip] = useState(null);
   const [crosshair, setCrosshair] = useState(null);
 
-  const visibleCount = 60;
-  const visibleData = useMemo(() => data.slice(-visibleCount), [data, visibleCount]);
+  // visibleCount: 畫面顯示幾根K棒；offset: 從右端往左偏移幾根（0=最新）
+  const [visibleCount, setVisibleCount] = useState(60);
+  const [offset, setOffset] = useState(0);
+  const dragRef = useRef(null); // { startX, startOffset }
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+  const visibleData = useMemo(() => {
+    if (!data.length) return [];
+    const end = data.length - offset;
+    const start = Math.max(0, end - visibleCount);
+    return data.slice(start, end);
+  }, [data, offset, visibleCount]);
+
+  // 鍵盤左右方向鍵
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "ArrowLeft")  setOffset(o => clamp(o + 5, 0, data.length - 10));
+      if (e.key === "ArrowRight") setOffset(o => clamp(o - 5, 0, data.length - 10));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [data.length]);
+
+  // 滾輪縮放 K 棒數量
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      setVisibleCount(c => clamp(c + (e.deltaY > 0 ? 5 : -5), 10, 1800));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // 拖拉平移
+  const handleMouseDown = (e) => {
+    dragRef.current = { startX: e.clientX, startOffset: offset };
+  };
+  const handleDragMove = (e) => {
+    if (!dragRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const candleW = (rect.width - 50) / visibleCount;
+    const dx = e.clientX - dragRef.current.startX;
+    const delta = Math.round(-dx / candleW);
+    setOffset(clamp(dragRef.current.startOffset + delta, 0, data.length - 10));
+  };
+  const handleMouseUp = () => { dragRef.current = null; };
 
   const drawChart = useCallback(() => {
     const canvas = canvasRef.current;
@@ -208,16 +256,19 @@ function CandlestickChart({ data, indicators = [] }) {
       }
     });
 
-    // MA lines (from indicators)
+    // MA lines (from indicators) — 用全域索引回溯計算
+    const globalStart = data.length - offset - visibleData.length;
     if (indicators.includes("MA_Cross")) {
       [{ period: 5, color: "#f59e0b" }, { period: 20, color: "#8b5cf6" }].forEach(({ period, color }) => {
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         let started = false;
-        for (let i = period - 1; i < visibleData.length; i++) {
+        for (let i = 0; i < visibleData.length; i++) {
+          const gi = globalStart + i;
+          if (gi < period - 1) continue;
           let sum = 0;
-          for (let j = i - period + 1; j <= i; j++) sum += visibleData[j].close;
+          for (let j = gi - period + 1; j <= gi; j++) sum += data[j].close;
           const ma = sum / period;
           const x = i * candleW + candleW / 2;
           const y = 10 + ((adjMax - ma) / (adjMax - adjMin)) * (h - 20);
@@ -243,9 +294,35 @@ function CandlestickChart({ data, indicators = [] }) {
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [visibleData, indicators, crosshair]);
+  }, [visibleData, indicators, crosshair, data, offset]);
 
   useEffect(() => { drawChart(); }, [drawChart]);
+
+  const calcIndicatorValues = (globalIdx) => {
+    const result = {};
+    if (indicators.includes("MA_Cross")) {
+      for (const period of [5, 20]) {
+        if (globalIdx >= period - 1) {
+          let sum = 0;
+          for (let j = globalIdx - period + 1; j <= globalIdx; j++) sum += data[j].close;
+          result[`MA${period}`] = (sum / period).toFixed(0);
+        }
+      }
+    }
+    if (indicators.includes("RSI_Signal")) {
+      const period = 14;
+      if (globalIdx >= period) {
+        let gain = 0, loss = 0;
+        for (let j = globalIdx - period + 1; j <= globalIdx; j++) {
+          const diff = data[j].close - data[j - 1].close;
+          if (diff > 0) gain += diff; else loss -= diff;
+        }
+        const rs = gain / (loss || 1);
+        result["RSI"] = (100 - 100 / (1 + rs)).toFixed(1);
+      }
+    }
+    return result;
+  };
 
   const handleMouseMove = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -254,19 +331,24 @@ function CandlestickChart({ data, indicators = [] }) {
     setCrosshair({ x, y });
 
     const w = rect.width - 50;
-    const idx = Math.floor((x / w) * visibleData.length);
-    if (idx >= 0 && idx < visibleData.length) {
-      setTooltip({ ...visibleData[idx], x: e.clientX, y: e.clientY });
+    const visibleIdx = Math.floor((x / w) * visibleData.length);
+    if (visibleIdx >= 0 && visibleIdx < visibleData.length) {
+      // visibleData 是 data 的最後 visibleCount 筆，換算全域索引
+      const globalIdx = data.length - visibleData.length + visibleIdx;
+      const indVals = calcIndicatorValues(globalIdx);
+      setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, indVals });
     }
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+    <div ref={containerRef} style={{ position: "relative", width: "100%", height: "100%" }}>
       <canvas
         ref={canvasRef}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => { setTooltip(null); setCrosshair(null); }}
-        style={{ width: "100%", height: "100%", cursor: "crosshair", display: "block" }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={(e) => { handleDragMove(e); handleMouseMove(e); }}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={() => { dragRef.current = null; setTooltip(null); setCrosshair(null); }}
+        style={{ width: "100%", height: "100%", cursor: dragRef.current ? "grabbing" : "crosshair", display: "block" }}
       />
       {tooltip && (
         <div style={{
@@ -276,12 +358,25 @@ function CandlestickChart({ data, indicators = [] }) {
           color: COLORS.text, pointerEvents: "none", zIndex: 100, backdropFilter: "blur(8px)",
           boxShadow: "0 4px 20px rgba(0,0,0,0.5)"
         }}>
-          <div style={{ color: COLORS.textDim, marginBottom: 4 }}>{tooltip.date}</div>
+          <div style={{ color: COLORS.textDim, marginBottom: 4 }}>
+            {new Date(tooltip.time).toLocaleString("zh-TW", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" })}
+          </div>
           <div>開 <span style={{ color: COLORS.text, fontWeight: 600 }}>{tooltip.open}</span></div>
           <div>高 <span style={{ color: COLORS.up }}>{tooltip.high}</span></div>
           <div>低 <span style={{ color: COLORS.down }}>{tooltip.low}</span></div>
           <div>收 <span style={{ color: tooltip.close >= tooltip.open ? COLORS.up : COLORS.down, fontWeight: 600 }}>{tooltip.close}</span></div>
           <div>量 <span style={{ color: COLORS.accent }}>{tooltip.volume.toLocaleString()}</span></div>
+          {tooltip.indVals && Object.keys(tooltip.indVals).length > 0 && (
+            <>
+              <div style={{ borderTop: `1px solid ${COLORS.border}`, margin: "5px 0" }} />
+              {Object.entries(tooltip.indVals).map(([name, val]) => (
+                <div key={name}>
+                  <span style={{ color: COLORS.textDim }}>{name} </span>
+                  <span style={{ color: COLORS.warn, fontWeight: 600 }}>{val}</span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -1397,7 +1492,8 @@ function BacktestPage({ scripts }) {
 // ─── Main App ────────────────────────────────────────────────────────
 export default function TradingPlatform() {
   const [page, setPage] = useState("trading");
-  const [klineData] = useState(() => generateKlineData(120));
+  const [klineData, setKlineData] = useState([]);
+  const [activeSymbol, setActiveSymbol] = useState("TX");
   const [scripts, setScripts] = useState(MOCK_SCRIPTS);
   const wsUrl = `ws://${window.location.host}/ws`;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
@@ -1420,6 +1516,48 @@ export default function TradingPlatform() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
+
+  // 連線成功或切換商品時拉 M1 原始資料（拉足夠多讓各週期都有資料）
+  const [rawM1, setRawM1] = useState([]);
+  useEffect(() => {
+    if (!connected) return;
+    send("get_history", { symbol: activeSymbol, count: 2000 });
+  }, [connected, activeSymbol]);
+
+  // 後端回傳 M1 原始資料
+  useEffect(() => {
+    addHandler("history_bars", (msg) => {
+      if (msg.bars && msg.bars.length > 0) {
+        setRawM1(msg.bars);
+      }
+    });
+  }, [addHandler]);
+
+  // M1 聚合為所選週期
+  useEffect(() => {
+    if (!rawM1.length) return;
+    const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
+    if (!minutes) {
+      // 日/周/月 暫不聚合，直接用 M1
+      setKlineData(rawM1.slice(-300));
+      return;
+    }
+    const periodMs = minutes * 60 * 1000;
+    const buckets = new Map();
+    for (const b of rawM1) {
+      const key = Math.floor(b.time / periodMs) * periodMs;
+      if (!buckets.has(key)) {
+        buckets.set(key, { time: key, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume, delivery: b.delivery });
+      } else {
+        const c = buckets.get(key);
+        c.high = Math.max(c.high, b.high);
+        c.low = Math.min(c.low, b.low);
+        c.close = b.close;
+        c.volume += b.volume;
+      }
+    }
+    setKlineData([...buckets.values()].sort((a, b) => a.time - b.time).slice(-300));
+  }, [rawM1, timeframe]);
 
   const panelStyle = {
     background: COLORS.bgPanel,
@@ -1525,7 +1663,7 @@ export default function TradingPlatform() {
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ color: COLORS.text, fontWeight: 700, fontFamily: "monospace", fontSize: 16 }}>
-                    TX {klineData[klineData.length - 1]?.close}
+                    {activeSymbol} {klineData[klineData.length - 1]?.close ?? "--"}
                   </span>
                   <span style={{
                     color: klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? COLORS.up : COLORS.down,

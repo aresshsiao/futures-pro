@@ -63,6 +63,16 @@ class ScriptType(str, Enum):
 # ═══════════════════════════════════════════════════════════
 
 @dataclass
+class Product:
+    """商品基本資料"""
+    symbol: str
+    name: str = ""
+    exchange: str = "TAIFEX"
+    tick_size: float = 1.0
+    multiplier: int = 200
+
+
+@dataclass
 class Tick:
     """逐筆成交"""
     symbol: str
@@ -84,6 +94,7 @@ class Bar:
     low: float
     close: float
     volume: int
+    delivery: str = ""       # 到期月份，例如 "202412"
     is_closed: bool = False  # 該根K棒是否已收完
 
 

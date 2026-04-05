@@ -75,32 +75,22 @@ async def handle_subscribe(ws, data: dict):
 
 
 async def handle_get_history(ws, data: dict):
-    """前端: 取得歷史K線 (優先從DB，不足則從券商)"""
-    from core.models import Timeframe
+    """前端: 取得歷史K線 (從DB查詢)"""
     symbol = data["symbol"]
-    tf = Timeframe(data["timeframe"])
-    count = data.get("count", 200)
+    count = data.get("count", 300)
 
-    # 先查 DB
-    bars = db.get_bars(symbol, tf, limit=count)
-
-    # DB 不足 → 從券商補
-    if len(bars) < count and quote.is_connected:
-        broker_bars = await quote.get_history(symbol, tf, count)
-        if broker_bars:
-            db.insert_bars(broker_bars)
-            bars = db.get_bars(symbol, tf, limit=count)
+    bars = db.get_bars(symbol, limit=count)
 
     await ws.send_json({
         "type": "history_bars",
         "symbol": symbol,
-        "timeframe": tf.value,
         "bars": [
             {
-                "timestamp": b.timestamp.isoformat(),
+                "time": int(b.timestamp.timestamp()) * 1000,  # 毫秒
                 "open": b.open, "high": b.high,
                 "low": b.low, "close": b.close,
                 "volume": b.volume,
+                "delivery": b.delivery,
             }
             for b in bars
         ],
@@ -227,7 +217,7 @@ def on_bar_complete(bar):
     import pandas as pd
 
     # 取得足夠的歷史資料給 Script 計算
-    bars = db.get_bars(bar.symbol, bar.timeframe, limit=200)
+    bars = db.get_bars(bar.symbol, limit=200)
     if len(bars) < 5:
         return
 

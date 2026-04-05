@@ -332,7 +332,7 @@ class TaifexImporter:
                 price_str = row[4].strip()
                 qty_str = row[5].strip()
 
-                symbol = self.KNOWN_SYMBOLS.get(prod_name) or self.SYMBOL_MAP.get(prod_name)
+                symbol = self.SYMBOL_MAP.get(prod_name)
                 if not symbol:
                     continue  # 跳過不認識的商品
 
@@ -343,14 +343,21 @@ class TaifexImporter:
                 price = float(price_str) if price_str and price_str != "-" else 0.0
                 if price <= 0:
                     continue
-                qty = int(qty_str) if qty_str else 0
+                # 原始量為 B+S 合計，除以 2 取單邊
+                qty = int(qty_str) // 2 if qty_str else 0
 
-                # 截斷秒數變成 M1
-                if len(time_str) >= 4:
+                # 時間邊界修正（對齊到所屬 M1 區間起點）
+                # 夜盤最後一秒 05:00:00 → 歸入 04:59
+                # 日盤最後一秒 13:45:00 → 歸入 13:44
+                if time_str.startswith("050000"):
+                    minute_time_str = "044900"
+                elif time_str.startswith("134500"):
+                    minute_time_str = "134400"
+                elif len(time_str) >= 4:
                     minute_time_str = time_str[:4] + "00"
                 else:
                     continue
-                
+
                 dt = datetime.strptime(date_str + minute_time_str, "%Y%m%d%H%M%S")
 
                 vols[symbol][delivery] += qty
@@ -385,6 +392,7 @@ class TaifexImporter:
                     low=b[2],
                     close=b[3],
                     volume=b[4],
+                    delivery=main_delivery,
                     is_closed=True,
                 ))
 
