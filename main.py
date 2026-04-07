@@ -77,24 +77,88 @@ async def handle_subscribe(ws, data: dict):
 async def handle_get_history(ws, data: dict):
     """前端: 取得歷史K線 (從DB查詢)"""
     symbol = data["symbol"]
+    timeframe = data.get("timeframe", "1")  # "1","3","15","60","日","周","月"
     count = data.get("count", 300)
 
-    bars = db.get_bars(symbol, limit=count)
-
-    await ws.send_json({
-        "type": "history_bars",
-        "symbol": symbol,
-        "bars": [
+    if timeframe in ("日", "周", "月"):
+        bars_raw = db.get_bars(symbol, limit=999_999)
+        bars_out = _aggregate_bars(bars_raw, timeframe, count)
+    else:
+        bars_raw = db.get_bars(symbol, limit=count)
+        bars_out = [
             {
-                "time": int(b.timestamp.timestamp()) * 1000,  # 毫秒
+                "time": int(b.timestamp.timestamp()) * 1000,
                 "open": b.open, "high": b.high,
                 "low": b.low, "close": b.close,
                 "volume": b.volume,
                 "delivery": b.delivery,
             }
-            for b in bars
-        ],
+            for b in bars_raw
+        ]
+
+    await ws.send_json({
+        "type": "history_bars",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "bars": bars_out,
     })
+
+
+def _aggregate_bars(bars, timeframe: str, limit: int) -> list[dict]:
+    """
+    將 M1 bars 聚合為日/周/月，回傳最新 limit 筆。
+    日K 以 trading_calendar 表判斷每根 bar 屬於哪個交易日，
+    避免時間規則無法處理國定假日的問題。
+    """
+    from datetime import datetime
+
+    # 取得交易日 session 對照表（日K 才需要）
+    sessions = db.get_session_map() if timeframe == "日" else []
+
+    def trade_date_for(ts_unix: int) -> str:
+        """日K：查日曆；無資料時 fallback 用時間規則"""
+        if sessions:
+            return db.bar_to_trade_date(ts_unix, sessions)
+        return datetime.fromtimestamp(ts_unix).strftime("%Y-%m-%d")
+
+    def key_fn(b) -> str:
+        ts = int(b.timestamp.timestamp())
+        dt = b.timestamp
+        if timeframe == "日":
+            return trade_date_for(ts)
+        elif timeframe == "周":
+            # 週K：以交易日的週一為 key
+            trade_date = trade_date_for(ts) if sessions else dt.strftime("%Y-%m-%d")
+            d = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            from datetime import timedelta
+            monday = d - timedelta(days=d.weekday())
+            return monday.strftime("%Y-%m-%d")
+        else:  # 月
+            trade_date = trade_date_for(ts) if sessions else dt.strftime("%Y-%m-%d")
+            return trade_date[:7]  # YYYY-MM
+
+    buckets: dict = {}
+    for b in bars:
+        k = key_fn(b)
+        if k not in buckets:
+            # time 用交易日午夜零時，與 CSV 檔名日期一致
+            trade_date = datetime.strptime(k[:10], "%Y-%m-%d")
+            buckets[k] = {
+                "time": int(trade_date.timestamp()) * 1000,
+                "open": b.open, "high": b.high,
+                "low": b.low, "close": b.close,
+                "volume": b.volume,
+                "delivery": b.delivery,
+            }
+        else:
+            c = buckets[k]
+            c["high"] = max(c["high"], b.high)
+            c["low"] = min(c["low"], b.low)
+            c["close"] = b.close
+            c["volume"] += b.volume
+
+    result = sorted(buckets.values(), key=lambda x: x["time"])
+    return result[-limit:]
 
 
 async def handle_get_positions(ws, data: dict):
@@ -271,6 +335,9 @@ def setup():
 
     # 資料庫
     db.connect()
+    # 優先從 TWSE 下載完整交易日曆，ZIP 目錄作為補充
+    if db.build_calendar_from_twse() == 0:
+        db.build_calendar_from_zip_dir("data/raw/taifex")
 
     logger.info("=" * 60)
     logger.info("  Futures Pro v0.1.0")

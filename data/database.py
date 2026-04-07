@@ -9,17 +9,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from core.models import Bar, Product
+from core.models import Bar
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path("data/futures.db")
 
-# 已知商品清單 (symbol → (name, exchange, tick_size, multiplier))
-KNOWN_PRODUCTS: dict[str, tuple] = {
-    "TX":  ("臺股期貨",     "TAIFEX", 1.0, 200),
-    "MTX": ("小型臺指期貨", "TAIFEX", 1.0,  50),
-    "TMF": ("微型臺指期貨", "TAIFEX", 1.0,  10),
+# 已知商品清單 (symbol → 中文名)
+KNOWN_PRODUCTS: dict[str, str] = {
+    "TX":  "臺股期貨",
+    "MTX": "小型臺指期貨",
+    "TMF": "微型臺指期貨",
 }
 
 
@@ -28,10 +28,9 @@ class Database:
     SQLite 資料庫
 
     資料表:
-      products — 商品基本資料 (symbol, name, exchange, tick_size, multiplier)
-      TX       — 臺股期貨 M1 K線 (timestamp, O, H, L, C, V)
-      MTX      — 小型臺指期貨 M1 K線
-      TMF      — 微型臺指期貨 M1 K線
+      TX  — 臺股期貨 M1 K線 (timestamp, delivery, O, H, L, C, V)
+      MTX — 小型臺指期貨 M1 K線
+      TMF — 微型臺指期貨 M1 K線
     """
 
     def __init__(self, path: Path = DB_PATH):
@@ -45,7 +44,6 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._migrate_schema()
         self._create_tables()
-        self._seed_products()
         logger.info(f"[Database] 已連線: {self._path}")
 
     def close(self) -> None:
@@ -53,21 +51,15 @@ class Database:
             self._conn.close()
 
     def _migrate_schema(self) -> None:
-        """將舊 bars 單表遷移到各商品獨立資料表"""
         tables = {row[0] for row in self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
 
-        # 刪除舊的 ticks table
-        if "ticks" in tables:
-            self._conn.execute("DROP TABLE ticks")
-            logger.info("[Database] 已刪除 ticks 資料表")
-
-        # 舊的 bars 單表 → 刪除（資料需重新匯入）
-        if "bars" in tables:
-            self._conn.execute("DROP TABLE bars")
-            self._conn.commit()
-            logger.info("[Database] 已刪除舊 bars 資料表，需重新匯入資料")
+        # 刪除舊的廢棄資料表
+        for old in ("ticks", "bars", "products"):
+            if old in tables:
+                self._conn.execute(f"DROP TABLE {old}")
+                logger.info("[Database] 已刪除舊資料表: %s", old)
 
         # 若商品 table 沒有 delivery 欄位 → 刪除重建
         for symbol in KNOWN_PRODUCTS:
@@ -76,6 +68,7 @@ class Database:
                 if "delivery" not in cols:
                     self._conn.execute(f'DROP TABLE "{symbol}"')
                     logger.info("[Database] 已刪除舊 %s 資料表，需重新匯入資料", symbol)
+
         self._conn.commit()
 
     def _bar_table_sql(self, symbol: str) -> str:
@@ -92,65 +85,26 @@ class Database:
         """
 
     def _create_tables(self) -> None:
-        sql = """
-            CREATE TABLE IF NOT EXISTS products (
-                symbol      TEXT PRIMARY KEY,
-                name        TEXT NOT NULL DEFAULT '',
-                exchange    TEXT NOT NULL DEFAULT 'TAIFEX',
-                tick_size   REAL NOT NULL DEFAULT 1.0,
-                multiplier  INTEGER NOT NULL DEFAULT 200
-            );
-        """
+        sql = ""
         for symbol in KNOWN_PRODUCTS:
             sql += self._bar_table_sql(symbol)
+        sql += """
+            CREATE TABLE IF NOT EXISTS trading_calendar (
+                trade_date TEXT PRIMARY KEY,  -- YYYY-MM-DD，為期交所公告的交易日
+                source     TEXT NOT NULL DEFAULT 'zip'  -- 'zip' | 'manual'
+            );
+        """
         self._conn.executescript(sql)
         self._conn.commit()
 
-    def _seed_products(self) -> None:
-        rows = [
-            (sym, name, exch, tick, mult)
-            for sym, (name, exch, tick, mult) in KNOWN_PRODUCTS.items()
-        ]
-        self._conn.executemany(
-            """INSERT OR IGNORE INTO products (symbol, name, exchange, tick_size, multiplier)
-               VALUES (?, ?, ?, ?, ?)""",
-            rows,
-        )
-        self._conn.commit()
-
     def _ensure_bar_table(self, symbol: str) -> None:
-        """動態建立新商品的 bar 資料表（不在 KNOWN_PRODUCTS 內時）"""
         self._conn.executescript(self._bar_table_sql(symbol))
         self._conn.commit()
-
-    # ── Products ──────────────────────────────────────────────
-
-    def upsert_product(self, product: Product) -> None:
-        self._conn.execute(
-            """INSERT INTO products (symbol, name, exchange, tick_size, multiplier)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(symbol) DO UPDATE SET
-                 name=excluded.name,
-                 exchange=excluded.exchange,
-                 tick_size=excluded.tick_size,
-                 multiplier=excluded.multiplier""",
-            (product.symbol, product.name, product.exchange,
-             product.tick_size, product.multiplier),
-        )
-        self._conn.commit()
-
-    def get_products(self) -> list[Product]:
-        rows = self._conn.execute(
-            "SELECT symbol, name, exchange, tick_size, multiplier FROM products ORDER BY symbol"
-        ).fetchall()
-        return [Product(symbol=r[0], name=r[1], exchange=r[2],
-                        tick_size=r[3], multiplier=r[4]) for r in rows]
 
     # ── Bars 寫入 ─────────────────────────────────────────────
 
     def insert_bars(self, bars: list[Bar]) -> int:
         """批量寫入 M1 K線 (重複時忽略)，回傳實際新增筆數。"""
-        # 依 symbol 分組
         by_symbol: dict[str, list] = {}
         for b in bars:
             by_symbol.setdefault(b.symbol, []).append(
@@ -230,13 +184,151 @@ class Database:
             return datetime.fromtimestamp(ts).isoformat() if ts else ""
         return (_fmt(row[0]), _fmt(row[1]))
 
+    # ── 交易日曆 ───────────────────────────────────────────────
+
+    def build_calendar_from_zip_dir(self, zip_dir: str | Path) -> int:
+        """
+        掃描目錄下的 Daily_YYYY_MM_DD.zip，把每個檔名代表的交易日
+        寫入 trading_calendar 表，回傳新增筆數。
+        """
+        import re
+        pattern = re.compile(r"Daily_(\d{4})_(\d{2})_(\d{2})\.zip", re.IGNORECASE)
+        dates: list[str] = []
+        for f in Path(zip_dir).glob("*.zip"):
+            m = pattern.match(f.name)
+            if m:
+                dates.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+
+        if not dates:
+            return 0
+
+        before = self._conn.total_changes
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO trading_calendar (trade_date, source) VALUES (?, 'zip')",
+            [(d,) for d in dates],
+        )
+        self._conn.commit()
+        added = self._conn.total_changes - before
+        logger.info("[Calendar] 從 ZIP 目錄新增 %d 個交易日", added)
+        return added
+
+    def build_calendar_from_twse(self, years: list[int] | None = None) -> int:
+        """
+        從證交所 API 下載假日清單，推算出交易日，寫入 trading_calendar。
+        years=None 時自動從 DB 最早資料年份到當年。
+        回傳新增筆數。
+        """
+        import re
+        import requests
+        from datetime import date, timedelta
+
+        if years is None:
+            # 從 DB 資料判斷需要哪些年份
+            rows = self._conn.execute(
+                "SELECT MIN(timestamp), MAX(timestamp) FROM TX"
+            ).fetchone()
+            if not rows or not rows[0]:
+                return 0
+            start_year = datetime.fromtimestamp(rows[0]).year
+            end_year = datetime.fromtimestamp(rows[1]).year
+            years = list(range(start_year, end_year + 1))
+
+        # 下載各年假日
+        holidays: set[str] = set()
+        for year in years:
+            url = (
+                "https://www.twse.com.tw/rwd/en/holidaySchedule/holidaySchedule"
+                f"?response=csv&queryYear={year}"
+            )
+            try:
+                resp = requests.get(url, timeout=15)
+                resp.raise_for_status()
+                for line in resp.text.splitlines():
+                    # 格式: "MM-DD (Weekday),Description"
+                    m = re.match(r"(\d{2})-(\d{2})\s*\(", line.strip())
+                    if m:
+                        holidays.add(f"{year}-{m.group(1)}-{m.group(2)}")
+                logger.info("[Calendar] TWSE %d 年假日下載完成 (%d 天)", year, len([h for h in holidays if h.startswith(str(year))]))
+            except Exception as e:
+                logger.warning("[Calendar] TWSE %d 年假日下載失敗: %s", year, e)
+
+        # 產生交易日：週一到週五 且 不在假日清單內
+        all_dates: list[str] = []
+        for year in years:
+            d = date(year, 1, 1)
+            end = date(year, 12, 31)
+            while d <= end:
+                if d.weekday() < 5 and d.strftime("%Y-%m-%d") not in holidays:
+                    all_dates.append(d.strftime("%Y-%m-%d"))
+                d += timedelta(days=1)
+
+        if not all_dates:
+            return 0
+
+        before = self._conn.total_changes
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO trading_calendar (trade_date, source) VALUES (?, 'twse')",
+            [(d,) for d in all_dates],
+        )
+        self._conn.commit()
+        added = self._conn.total_changes - before
+        logger.info("[Calendar] 從 TWSE 新增 %d 個交易日（共查詢 %d 年）", added, len(years))
+        return added
+
+    def get_trading_dates(self) -> list[str]:
+        """回傳所有已知交易日（升冪排列）。"""
+        rows = self._conn.execute(
+            "SELECT trade_date FROM trading_calendar ORDER BY trade_date"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_session_map(self) -> dict[int, str]:
+        """
+        根據交易日曆建立 timestamp → trade_date 的快速查找結構。
+
+        規則：交易日 T 的 session 涵蓋
+          前一個交易日 15:00 ～ 當天 13:44（含）
+
+        回傳：{session_start_unix: trade_date_str, ...}
+        供 _aggregate_bars 使用的有序 list[(session_start_unix, trade_date)]。
+        """
+        from datetime import timedelta
+        dates = self.get_trading_dates()
+        if not dates:
+            return []
+
+        sessions: list[tuple[int, str]] = []
+        for i, trade_date in enumerate(dates):
+            # session 開始 = 前一個交易日 15:00
+            if i == 0:
+                # 第一個交易日：session 從當天 00:00 開始（保守處理）
+                start_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+            else:
+                prev_date = dates[i - 1]
+                start_dt = datetime.strptime(prev_date, "%Y-%m-%d").replace(hour=15)
+            sessions.append((int(start_dt.timestamp()), trade_date))
+
+        return sessions
+
+    def bar_to_trade_date(self, ts: int, sessions: list[tuple[int, str]]) -> str:
+        """
+        給定一個 M1 bar 的 unix timestamp，用二分搜尋找出對應的交易日。
+        sessions 必須是 get_session_map() 的回傳值（已升冪排列）。
+        """
+        import bisect
+        keys = [s[0] for s in sessions]
+        idx = bisect.bisect_right(keys, ts) - 1
+        if idx < 0:
+            # 早於第一個已知 session，用日曆日當 fallback
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        return sessions[idx][1]
+
     # ── 統計 ──────────────────────────────────────────────────
 
     def summary(self) -> list[dict]:
         """回傳每個商品的統計"""
-        products = {p.symbol: p.name for p in self.get_products()}
         results = []
-        for symbol, name in sorted(products.items()):
+        for symbol, name in sorted(KNOWN_PRODUCTS.items()):
             count = self.get_bar_count(symbol)
             start, end = self.get_date_range(symbol)
             results.append({

@@ -129,7 +129,7 @@ function useWebSocket(url) {
 }
 
 // ─── Candlestick Chart Component (K-line only) ──────────────────────
-function CandlestickChart({ data, indicators = [] }) {
+function CandlestickChart({ data, indicators = [], timeframe = "15" }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const [tooltip, setTooltip] = useState(null);
@@ -359,7 +359,9 @@ function CandlestickChart({ data, indicators = [] }) {
           boxShadow: "0 4px 20px rgba(0,0,0,0.5)"
         }}>
           <div style={{ color: COLORS.textDim, marginBottom: 4 }}>
-            {new Date(tooltip.time).toLocaleString("zh-TW", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" })}
+            {["日","周","月"].includes(timeframe)
+  ? new Date(tooltip.time).toLocaleDateString("zh-TW", { month:"2-digit", day:"2-digit" })
+  : new Date(tooltip.time).toLocaleString("zh-TW", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12: false })}
           </div>
           <div>開 <span style={{ color: COLORS.text, fontWeight: 600 }}>{tooltip.open}</span></div>
           <div>高 <span style={{ color: COLORS.up }}>{tooltip.high}</span></div>
@@ -1517,31 +1519,38 @@ export default function TradingPlatform() {
     return () => clearInterval(id);
   }, []);
 
-  // 連線成功或切換商品時拉 M1 原始資料（拉足夠多讓各週期都有資料）
+  // 連線成功、切換商品或切換週期時拉資料
   const [rawM1, setRawM1] = useState([]);
   useEffect(() => {
     if (!connected) return;
-    send("get_history", { symbol: activeSymbol, count: 2000 });
-  }, [connected, activeSymbol]);
+    const isLarge = ["日", "周", "月"].includes(timeframe);
+    send("get_history", {
+      symbol: activeSymbol,
+      timeframe,
+      count: isLarge ? 500 : 2000,
+    });
+  }, [connected, activeSymbol, timeframe]);
 
-  // 後端回傳 M1 原始資料
+  // 後端回傳資料
   useEffect(() => {
     addHandler("history_bars", (msg) => {
       if (msg.bars && msg.bars.length > 0) {
-        setRawM1(msg.bars);
+        if (["日", "周", "月"].includes(msg.timeframe)) {
+          // 後端已聚合，直接使用
+          setKlineData(msg.bars);
+          setRawM1([]);
+        } else {
+          setRawM1(msg.bars);
+        }
       }
     });
   }, [addHandler]);
 
-  // M1 聚合為所選週期
+  // M1 聚合為分鐘週期
   useEffect(() => {
     if (!rawM1.length) return;
     const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
-    if (!minutes) {
-      // 日/周/月 暫不聚合，直接用 M1
-      setKlineData(rawM1.slice(-300));
-      return;
-    }
+    if (!minutes) return;
     const periodMs = minutes * 60 * 1000;
     const buckets = new Map();
     for (const b of rawM1) {
@@ -1677,7 +1686,7 @@ export default function TradingPlatform() {
 
               {/* K-line chart — 60% */}
               <div style={{ ...panelStyle, flex: 6, position: "relative", minHeight: 0 }}>
-                <CandlestickChart data={klineData} indicators={enabledIndicators} />
+                <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} />
               </div>
 
               {/* Volume — 30% */}

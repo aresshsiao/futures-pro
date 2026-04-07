@@ -63,16 +63,6 @@ class ScriptType(str, Enum):
 # ═══════════════════════════════════════════════════════════
 
 @dataclass
-class Product:
-    """商品基本資料"""
-    symbol: str
-    name: str = ""
-    exchange: str = "TAIFEX"
-    tick_size: float = 1.0
-    multiplier: int = 200
-
-
-@dataclass
 class Tick:
     """逐筆成交"""
     symbol: str
