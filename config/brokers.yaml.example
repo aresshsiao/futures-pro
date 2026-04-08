@@ -1,0 +1,9 @@
+# 複製此檔案為 brokers.yaml 並填寫您的真實資料。
+sinopac:
+  api_key: "YOUR_API_KEY_HERE"
+  secret_key: "YOUR_SECRET_KEY_HERE"
+  
+  # 若有需要憑證下單，請提供憑證相關設定：
+  # cert_path: "/path/to/your/cert.pfx"
+  # cert_password: "YOUR_CERT_PASSWORD"
+  # person_id: "YOUR_ID_NUMBER"
