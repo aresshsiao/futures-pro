@@ -97,7 +97,7 @@ function useWebSocket(url) {
           const msg = JSON.parse(e.data);
           const handler = handlersRef.current[msg.type];
           if (handler) handler(msg);
-        } catch (_) {}
+        } catch (_) { }
       };
 
       ws.onclose = () => {
@@ -129,15 +129,11 @@ function useWebSocket(url) {
 }
 
 // ─── Candlestick Chart Component (K-line only) ──────────────────────
-function CandlestickChart({ data, indicators = [], timeframe = "15" }) {
+function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCount, setVisibleCount, offset, setOffset, setTooltip }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
-  const [tooltip, setTooltip] = useState(null);
   const [crosshair, setCrosshair] = useState(null);
 
-  // visibleCount: 畫面顯示幾根K棒；offset: 從右端往左偏移幾根（0=最新）
-  const [visibleCount, setVisibleCount] = useState(60);
-  const [offset, setOffset] = useState(0);
   const dragRef = useRef(null); // { startX, startOffset }
 
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
@@ -152,7 +148,7 @@ function CandlestickChart({ data, indicators = [], timeframe = "15" }) {
   // 鍵盤左右方向鍵
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === "ArrowLeft")  setOffset(o => clamp(o + 5, 0, data.length - 10));
+      if (e.key === "ArrowLeft") setOffset(o => clamp(o + 5, 0, data.length - 10));
       if (e.key === "ArrowRight") setOffset(o => clamp(o - 5, 0, data.length - 10));
     };
     window.addEventListener("keydown", onKey);
@@ -210,21 +206,41 @@ function CandlestickChart({ data, indicators = [], timeframe = "15" }) {
     const candleW = (w - 50) / visibleData.length;
     const bodyW = Math.max(candleW * 0.65, 2);
 
-    // Grid
+    // Grid (Price & Time)
+    const adjPriceRange = adjMax - adjMin;
+    const steps = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].reverse();
+    let step = 10;
+    for (const s of steps) {
+      if (adjPriceRange / s >= 3 && adjPriceRange / s <= 10) {
+        step = s;
+        break;
+      }
+    }
+    const startPrice = Math.ceil(adjMin / step) * step;
+
     ctx.strokeStyle = "#1a2235";
     ctx.lineWidth = 0.5;
-    for (let i = 0; i < 5; i++) {
-      const y = 10 + (h - 20) * (i / 4);
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w - 45, y);
-      ctx.stroke();
-      const priceLabel = (adjMax - (adjMax - adjMin) * (i / 4)).toFixed(0);
-      ctx.fillStyle = COLORS.textMuted;
-      ctx.font = "10px monospace";
-      ctx.textAlign = "right";
-      ctx.fillText(priceLabel, w - 4, y + 3);
+    ctx.fillStyle = COLORS.textMuted;
+    ctx.font = "10px monospace";
+    ctx.textAlign = "right";
+
+    let curP = startPrice;
+    while (curP <= adjMax) {
+      const y = 10 + ((adjMax - curP) / (adjMax - adjMin)) * (h - 20);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
+      ctx.fillText(curP.toFixed(0), w - 4, y + 3);
+      curP += step;
     }
+
+    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:30", "11:00", "12:15", "12:30", "13:30", "13:45", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "02:00", "03:00", "04:00", "05:00"]);
+    visibleData.forEach((d, i) => {
+      const dDate = new Date(d.time);
+      const hhmm = dDate.getHours().toString().padStart(2, '0') + ":" + dDate.getMinutes().toString().padStart(2, '0');
+      if (targetTimes.has(hhmm)) {
+        const x = i * candleW + candleW / 2;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+    });
 
     // Candles
     visibleData.forEach((d, i) => {
@@ -347,49 +363,24 @@ function CandlestickChart({ data, indicators = [], timeframe = "15" }) {
         onMouseDown={handleMouseDown}
         onMouseMove={(e) => { handleDragMove(e); handleMouseMove(e); }}
         onMouseUp={handleMouseUp}
-        onMouseLeave={() => { dragRef.current = null; setTooltip(null); setCrosshair(null); }}
+        onMouseLeave={() => { dragRef.current = null; if (setTooltip) setTooltip(null); setCrosshair(null); }}
         style={{ width: "100%", height: "100%", cursor: dragRef.current ? "grabbing" : "crosshair", display: "block" }}
       />
-      {tooltip && (
-        <div style={{
-          position: "fixed", left: tooltip.x + 12, top: tooltip.y - 80,
-          background: "rgba(17,24,39,0.95)", border: `1px solid ${COLORS.borderLight}`,
-          borderRadius: 6, padding: "8px 12px", fontSize: 11, fontFamily: "monospace",
-          color: COLORS.text, pointerEvents: "none", zIndex: 100, backdropFilter: "blur(8px)",
-          boxShadow: "0 4px 20px rgba(0,0,0,0.5)"
-        }}>
-          <div style={{ color: COLORS.textDim, marginBottom: 4 }}>
-            {["日","周","月"].includes(timeframe)
-  ? new Date(tooltip.time).toLocaleDateString("zh-TW", { month:"2-digit", day:"2-digit" })
-  : new Date(tooltip.time).toLocaleString("zh-TW", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12: false })}
-          </div>
-          <div>開 <span style={{ color: COLORS.text, fontWeight: 600 }}>{tooltip.open}</span></div>
-          <div>高 <span style={{ color: COLORS.up }}>{tooltip.high}</span></div>
-          <div>低 <span style={{ color: COLORS.down }}>{tooltip.low}</span></div>
-          <div>收 <span style={{ color: tooltip.close >= tooltip.open ? COLORS.up : COLORS.down, fontWeight: 600 }}>{tooltip.close}</span></div>
-          <div>量 <span style={{ color: COLORS.accent }}>{tooltip.volume.toLocaleString()}</span></div>
-          {tooltip.indVals && Object.keys(tooltip.indVals).length > 0 && (
-            <>
-              <div style={{ borderTop: `1px solid ${COLORS.border}`, margin: "5px 0" }} />
-              {Object.entries(tooltip.indVals).map(([name, val]) => (
-                <div key={name}>
-                  <span style={{ color: COLORS.textDim }}>{name} </span>
-                  <span style={{ color: COLORS.warn, fontWeight: 600 }}>{val}</span>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 }
 
 // ─── Volume Chart Component ──────────────────────────────────────────
-function VolumeChart({ data }) {
+function VolumeChart({ data, visibleCount, offset, setTooltip }) {
   const canvasRef = useRef(null);
-  const visibleCount = 60;
-  const visibleData = useMemo(() => data.slice(-visibleCount), [data, visibleCount]);
+  const [crosshair, setCrosshair] = useState(null);
+
+  const visibleData = useMemo(() => {
+    if (!data.length) return [];
+    const end = data.length - offset;
+    const start = Math.max(0, end - visibleCount);
+    return data.slice(start, end);
+  }, [data, offset, visibleCount]);
 
   const drawVolume = useCallback(() => {
     const canvas = canvasRef.current;
@@ -403,38 +394,95 @@ function VolumeChart({ data }) {
     ctx.clearRect(0, 0, w, h);
     if (visibleData.length === 0) return;
 
-    const maxVol = Math.max(...visibleData.map(d => d.volume));
+    const maxVol = Math.max(...visibleData.map(d => d.volume), 1);
     const barW = (w - 50) / visibleData.length;
+    const bottomY = h - 14;
 
     // Grid lines
+    const vSteps = [10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000].reverse();
+    let vStep = 100;
+    for (const s of vSteps) {
+      if (maxVol / s >= 2 && maxVol / s <= 6) {
+        vStep = s;
+        break;
+      }
+    }
+    const startV = vStep;
+
     ctx.strokeStyle = "#1a2235";
     ctx.lineWidth = 0.5;
-    for (let i = 0; i < 3; i++) {
-      const y = (h - 6) * (i / 2) + 3;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w - 45, y);
-      ctx.stroke();
-      const label = Math.round(maxVol * (1 - i / 2));
-      ctx.fillStyle = COLORS.textMuted;
-      ctx.font = "9px monospace";
-      ctx.textAlign = "right";
-      ctx.fillText(label.toLocaleString(), w - 4, y + 3);
+    ctx.fillStyle = COLORS.textMuted;
+    ctx.font = "9px monospace";
+    ctx.textAlign = "right";
+
+    let curV = startV;
+    while (curV <= maxVol) {
+      const y = bottomY - (curV / maxVol) * (bottomY - 10);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
+      ctx.fillText(curV.toLocaleString(), w - 4, y + 3);
+      curV += vStep;
     }
+
+    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:30", "11:00", "12:15", "12:30", "13:30", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "04:00"]);
+    ctx.textAlign = "center";
+    ctx.fillStyle = COLORS.textDim;
+    visibleData.forEach((d, i) => {
+      const dDate = new Date(d.time);
+      const hhmm = dDate.getHours().toString().padStart(2, '0') + ":" + dDate.getMinutes().toString().padStart(2, '0');
+      if (targetTimes.has(hhmm)) {
+        const x = i * barW + barW / 2;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, bottomY); ctx.stroke();
+        ctx.fillText(hhmm, x, h - 2);
+      }
+    });
 
     visibleData.forEach((d, i) => {
       const isUp = d.close >= d.open;
-      const volH = (d.volume / maxVol) * (h - 10);
+      const volH = (d.volume / maxVol) * (bottomY - 10);
       ctx.fillStyle = isUp ? "rgba(34,197,94,0.45)" : "rgba(239,68,68,0.45)";
-      ctx.fillRect(i * barW + 1, h - volH, Math.max(barW - 2, 1), volH);
+      ctx.fillRect(i * barW + 1, bottomY - volH, Math.max(barW - 2, 1), volH);
     });
-  }, [visibleData]);
+
+    // Crosshair
+    if (crosshair) {
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(crosshair.x, 0);
+      ctx.lineTo(crosshair.x, h);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, crosshair.y);
+      ctx.lineTo(w, crosshair.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }, [visibleData, crosshair]);
 
   useEffect(() => { drawVolume(); }, [drawVolume]);
 
+  const handleMouseMove = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setCrosshair({ x, y });
+
+    const w = rect.width - 50;
+    const visibleIdx = Math.floor((x / w) * visibleData.length);
+    if (visibleIdx >= 0 && visibleIdx < visibleData.length && setTooltip) {
+      setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY });
+    }
+  };
+
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
-      <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
+      <canvas
+        ref={canvasRef}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => { setCrosshair(null); if (setTooltip) setTooltip(null); }}
+        style={{ width: "100%", height: "100%", cursor: "crosshair", display: "block" }}
+      />
     </div>
   );
 }
@@ -489,10 +537,10 @@ function OrderPanel({ brokerConfig, myBuyOrders, setMyBuyOrders, mySellOrders, s
       const rowHeight = 22; // ROW_H
       const containerHeight = scrollRef.current.clientHeight;
       const headerHeight = 30; // sticky header 高度
-      
+
       // 計算滾動位置：讓成交價顯示在可視區域中間
       const scrollTop = (currentPriceIndex * rowHeight) - (containerHeight / 2) + (rowHeight / 2) + headerHeight;
-      
+
       scrollRef.current.scrollTop = Math.max(0, scrollTop);
     }
   }, [centerOnPrice, currentPrice]);
@@ -615,7 +663,8 @@ function OrderPanel({ brokerConfig, myBuyOrders, setMyBuyOrders, mySellOrders, s
               </div>
 
               {/* 買進 */}
-              <div style={{ ...cellBase, justifyContent: "flex-end", paddingRight: 4,
+              <div style={{
+                ...cellBase, justifyContent: "flex-end", paddingRight: 4,
                 background: isBidZone ? `linear-gradient(to right, transparent ${100 - (row.bidQty / maxQty) * 100}%, rgba(239,147,147,0.2) 100%)` : "transparent",
               }}
                 onClick={e => handleCell(setMyBuyOrders, row.price, e)}
@@ -625,24 +674,28 @@ function OrderPanel({ brokerConfig, myBuyOrders, setMyBuyOrders, mySellOrders, s
               </div>
 
               {/* 委買 */}
-              <div style={{ textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 600,
+              <div style={{
+                textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 600,
                 color: row.bidQty > 0 ? COLORS.text : "transparent"
               }}>{row.bidQty > 0 ? row.bidQty : ""}</div>
 
               {/* 價格 */}
-              <div style={{ textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 700,
+              <div style={{
+                textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 700,
                 color: row.isCurrent ? "#facc15" : COLORS.text,
                 background: row.isCurrent ? "rgba(250,204,21,0.15)" : "transparent",
                 borderRadius: 2, padding: "1px 0"
               }}>{row.price}</div>
 
               {/* 委賣 */}
-              <div style={{ textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 600,
+              <div style={{
+                textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 600,
                 color: row.askQty > 0 ? COLORS.text : "transparent"
               }}>{row.askQty > 0 ? row.askQty : ""}</div>
 
               {/* 賣出 */}
-              <div style={{ ...cellBase, justifyContent: "flex-start", paddingLeft: 4,
+              <div style={{
+                ...cellBase, justifyContent: "flex-start", paddingLeft: 4,
                 background: isAskZone ? `linear-gradient(to left, transparent ${100 - (row.askQty / maxQty) * 100}%, rgba(147,176,239,0.2) 100%)` : "transparent",
               }}
                 onClick={e => handleCell(setMySellOrders, row.price, e)}
@@ -676,11 +729,11 @@ function OrderPanel({ brokerConfig, myBuyOrders, setMyBuyOrders, mySellOrders, s
           </span>
           <span style={{ marginLeft: 3 }}>買委</span>
         </div>
-        <button 
+        <button
           onClick={() => setCenterOnPrice(!centerOnPrice)}
-          style={{ 
-            textAlign: "center", 
-            fontSize: 9, 
+          style={{
+            textAlign: "center",
+            fontSize: 9,
             fontWeight: 600,
             padding: "3px 10px",
             background: centerOnPrice ? "rgba(59,130,246,0.15)" : "transparent",
@@ -870,9 +923,9 @@ function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, s
 function TradeHistoryPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      <div style={{ 
+      <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "6px 10px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 
+        padding: "6px 10px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.text }}>成交明細</span>
         <span style={{ fontSize: 9, color: COLORS.textDim }}>
@@ -1101,7 +1154,7 @@ function DatabasePage({ send, addHandler }) {
   const logsEndRef = useRef(null);
 
   const SYMBOL_OPTIONS = [
-    { id: "TX",  label: "TX",  desc: "臺股期貨（大台）" },
+    { id: "TX", label: "TX", desc: "臺股期貨（大台）" },
     { id: "MTX", label: "MTX", desc: "小型臺指（小台）" },
     { id: "TMF", label: "TMF", desc: "微型臺指期貨" },
   ];
@@ -1130,7 +1183,7 @@ function DatabasePage({ send, addHandler }) {
         if (data.length > 0) {
           addLog(`資料庫已載入 — ${data.length} 個商品/週期`, "info");
           data.forEach(d =>
-            addLog(`  ${d.symbol} ${d.timeframe}: ${d.count.toLocaleString()} 筆　(${d.start?.slice(0,10)} ~ ${d.end?.slice(0,10)})`, "info")
+            addLog(`  ${d.symbol} ${d.timeframe}: ${d.count.toLocaleString()} 筆　(${d.start?.slice(0, 10)} ~ ${d.end?.slice(0, 10)})`, "info")
           );
         } else {
           addLog("資料庫空白，請先匯入期交所 CSV 或從券商同步", "info");
@@ -1327,8 +1380,8 @@ function DatabasePage({ send, addHandler }) {
                   <td style={{ padding: "6px 14px", color: COLORS.warn, fontWeight: 600 }}>{d.symbol}</td>
                   <td style={{ padding: "6px 14px", color: COLORS.textDim }}>{d.timeframe}</td>
                   <td style={{ padding: "6px 14px", color: COLORS.text }}>{d.count.toLocaleString()}</td>
-                  <td style={{ padding: "6px 14px", color: COLORS.textMuted, fontFamily: "monospace" }}>{d.start?.slice(0,10)}</td>
-                  <td style={{ padding: "6px 14px", color: COLORS.textMuted, fontFamily: "monospace" }}>{d.end?.slice(0,10)}</td>
+                  <td style={{ padding: "6px 14px", color: COLORS.textMuted, fontFamily: "monospace" }}>{d.start?.slice(0, 10)}</td>
+                  <td style={{ padding: "6px 14px", color: COLORS.textMuted, fontFamily: "monospace" }}>{d.end?.slice(0, 10)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1349,8 +1402,8 @@ function DatabasePage({ send, addHandler }) {
             <span style={{ color: COLORS.textMuted, flexShrink: 0 }}>{l.time}</span>
             <span style={{
               color: l.type === "success" ? COLORS.up
-                   : l.type === "error"   ? COLORS.down
-                   : COLORS.textDim,
+                : l.type === "error" ? COLORS.down
+                  : COLORS.textDim,
             }}>{l.msg}</span>
           </div>
         ))}
@@ -1509,6 +1562,9 @@ export default function TradingPlatform() {
   const [stopBuys, setStopBuys] = useState({});
   const [stopSells, setStopSells] = useState({});
   const [timeframe, setTimeframe] = useState("15"); // K棒時間週期
+  const [visibleCount, setVisibleCount] = useState(60);
+  const [offset, setOffset] = useState(0);
+  const [globalTooltip, setGlobalTooltip] = useState(null);
 
   const enabledIndicators = scripts.filter(s => s.type === "indicator" && s.enabled).map(s => s.name);
 
@@ -1524,10 +1580,17 @@ export default function TradingPlatform() {
   useEffect(() => {
     if (!connected) return;
     const isLarge = ["日", "周", "月"].includes(timeframe);
+    let reqCount = 2000;
+    if (!isLarge) {
+      const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe] || 1;
+      reqCount = 1500 * minutes;
+    } else {
+      reqCount = 500;
+    }
     send("get_history", {
       symbol: activeSymbol,
       timeframe,
-      count: isLarge ? 500 : 2000,
+      count: reqCount,
     });
   }, [connected, activeSymbol, timeframe]);
 
@@ -1565,7 +1628,7 @@ export default function TradingPlatform() {
         c.volume += b.volume;
       }
     }
-    setKlineData([...buckets.values()].sort((a, b) => a.time - b.time).slice(-300));
+    setKlineData([...buckets.values()].sort((a, b) => a.time - b.time).slice(-1500));
   }, [rawM1, timeframe]);
 
   const panelStyle = {
@@ -1686,12 +1749,12 @@ export default function TradingPlatform() {
 
               {/* K-line chart — 60% */}
               <div style={{ ...panelStyle, flex: 6, position: "relative", minHeight: 0 }}>
-                <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} />
+                <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} visibleCount={visibleCount} setVisibleCount={setVisibleCount} offset={offset} setOffset={setOffset} setTooltip={setGlobalTooltip} />
               </div>
 
               {/* Volume — 30% */}
               <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
-                <VolumeChart data={klineData} />
+                <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} />
               </div>
 
               {/* Positions — 10% */}
@@ -1775,6 +1838,39 @@ export default function TradingPlatform() {
           <span>v0.1.0-alpha</span>
         </div>
       </div>
+
+      {/* Global Tooltip */}
+      {globalTooltip && (
+        <div style={{
+          position: "fixed", left: globalTooltip.x + 12, top: globalTooltip.y - 80,
+          background: "rgba(17,24,39,0.95)", border: `1px solid ${COLORS.borderLight}`,
+          borderRadius: 6, padding: "8px 12px", fontSize: 11, fontFamily: "monospace",
+          color: COLORS.text, pointerEvents: "none", zIndex: 1000, backdropFilter: "blur(8px)",
+          boxShadow: "0 4px 20px rgba(0,0,0,0.5)"
+        }}>
+          <div style={{ color: COLORS.textDim, marginBottom: 4 }}>
+            {["日", "周", "月"].includes(timeframe)
+              ? new Date(globalTooltip.time).toLocaleDateString("zh-TW", { month: "2-digit", day: "2-digit" })
+              : new Date(globalTooltip.time).toLocaleString("zh-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })}
+          </div>
+          <div>開 <span style={{ color: COLORS.text, fontWeight: 600 }}>{globalTooltip.open}</span></div>
+          <div>高 <span style={{ color: COLORS.up }}>{globalTooltip.high}</span></div>
+          <div>低 <span style={{ color: COLORS.down }}>{globalTooltip.low}</span></div>
+          <div>收 <span style={{ color: globalTooltip.close >= globalTooltip.open ? COLORS.up : COLORS.down, fontWeight: 600 }}>{globalTooltip.close}</span></div>
+          <div>量 <span style={{ color: COLORS.accent }}>{globalTooltip.volume.toLocaleString()}</span></div>
+          {globalTooltip.indVals && Object.keys(globalTooltip.indVals).length > 0 && (
+            <>
+              <div style={{ borderTop: `1px solid ${COLORS.border}`, margin: "5px 0" }} />
+              {Object.entries(globalTooltip.indVals).map(([name, val]) => (
+                <div key={name}>
+                  <span style={{ color: COLORS.textDim }}>{name} </span>
+                  <span style={{ color: COLORS.warn, fontWeight: 600 }}>{val}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Broker Config Modal */}
       {showBrokerConfig && (
