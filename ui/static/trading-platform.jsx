@@ -212,11 +212,12 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
     const startIdx = visibleCount - visibleData.length;
 
     // Grid (Price & Time)
+    // 目標顯示 15~25 條水平線，選最接近的步距
     const adjPriceRange = adjMax - adjMin;
-    const steps = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].reverse();
-    let step = 10;
+    const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].reverse();
+    let step = 5;
     for (const s of steps) {
-      if (adjPriceRange / s >= 3 && adjPriceRange / s <= 10) {
+      if (adjPriceRange / s >= 12 && adjPriceRange / s <= 20) {
         step = s;
         break;
       }
@@ -413,7 +414,7 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
     const vSteps = [10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000].reverse();
     let vStep = 100;
     for (const s of vSteps) {
-      if (maxVol / s >= 2 && maxVol / s <= 6) {
+      if (maxVol / s >= 3 && maxVol / s <= 6) {
         vStep = s;
         break;
       }
