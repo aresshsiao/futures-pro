@@ -155,17 +155,21 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
     return () => window.removeEventListener("keydown", onKey);
   }, [data.length]);
 
-  // 滾輪縮放 K 棒數量
+  // 滾輪縮放/平移 K 棒
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const onWheel = (e) => {
       e.preventDefault();
-      setVisibleCount(c => clamp(c + (e.deltaY > 0 ? 5 : -5), 10, 1800));
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        setOffset(o => clamp(o + (e.deltaX > 0 ? 3 : -3), 0, Math.max(0, data.length - 10)));
+      } else {
+        setVisibleCount(c => clamp(c + (e.deltaY > 0 ? 5 : -5), 10, 1800));
+      }
     };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+    return () => window.removeEventListener("wheel", onWheel);
+  }, [data.length, setOffset, setVisibleCount]);
 
   // 拖拉平移
   const handleMouseDown = (e) => {
@@ -203,8 +207,9 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
     const adjMin = minP - padding;
     const adjMax = maxP + padding;
 
-    const candleW = (w - 50) / visibleData.length;
+    const candleW = (w - 50) / visibleCount;
     const bodyW = Math.max(candleW * 0.65, 2);
+    const startIdx = visibleCount - visibleData.length;
 
     // Grid (Price & Time)
     const adjPriceRange = adjMax - adjMin;
@@ -232,19 +237,19 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
       curP += step;
     }
 
-    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:30", "11:00", "12:15", "12:30", "13:30", "13:45", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "02:00", "03:00", "04:00", "05:00"]);
+    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:15", "11:00", "12:00", "12:30", "13:00", "13:30", "13:45", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "02:00", "03:00", "04:00", "05:00"]);
     visibleData.forEach((d, i) => {
       const dDate = new Date(d.time);
       const hhmm = dDate.getHours().toString().padStart(2, '0') + ":" + dDate.getMinutes().toString().padStart(2, '0');
       if (targetTimes.has(hhmm)) {
-        const x = i * candleW + candleW / 2;
+        const x = (startIdx + i) * candleW + candleW / 2;
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
       }
     });
 
     // Candles
     visibleData.forEach((d, i) => {
-      const x = i * candleW + candleW / 2;
+      const x = (startIdx + i) * candleW + candleW / 2;
       const isUp = d.close >= d.open;
       const color = isUp ? COLORS.up : COLORS.down;
 
@@ -286,7 +291,7 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
           let sum = 0;
           for (let j = gi - period + 1; j <= gi; j++) sum += data[j].close;
           const ma = sum / period;
-          const x = i * candleW + candleW / 2;
+          const x = (startIdx + i) * candleW + candleW / 2;
           const y = 10 + ((adjMax - ma) / (adjMax - adjMin)) * (h - 20);
           if (!started) { ctx.moveTo(x, y); started = true; }
           else ctx.lineTo(x, y);
@@ -347,12 +352,17 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
     setCrosshair({ x, y });
 
     const w = rect.width - 50;
-    const visibleIdx = Math.floor((x / w) * visibleData.length);
+    const candleW = w / visibleCount;
+    const startIdx = visibleCount - visibleData.length;
+    const visibleIdx = Math.floor(x / candleW) - startIdx;
+
     if (visibleIdx >= 0 && visibleIdx < visibleData.length) {
       // visibleData 是 data 的最後 visibleCount 筆，換算全域索引
       const globalIdx = data.length - visibleData.length + visibleIdx;
       const indVals = calcIndicatorValues(globalIdx);
-      setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, indVals });
+      if (setTooltip) setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, indVals });
+    } else if (setTooltip) {
+      setTooltip(null);
     }
   };
 
@@ -395,7 +405,8 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
     if (visibleData.length === 0) return;
 
     const maxVol = Math.max(...visibleData.map(d => d.volume), 1);
-    const barW = (w - 50) / visibleData.length;
+    const barW = (w - 50) / visibleCount;
+    const startIdx = visibleCount - visibleData.length;
     const bottomY = h - 14;
 
     // Grid lines
@@ -423,14 +434,14 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
       curV += vStep;
     }
 
-    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:30", "11:00", "12:15", "12:30", "13:30", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "04:00"]);
+    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:30", "11:15", "12:00", "12:30", "13:00", "13:30", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "04:00"]);
     ctx.textAlign = "center";
     ctx.fillStyle = COLORS.textDim;
     visibleData.forEach((d, i) => {
       const dDate = new Date(d.time);
       const hhmm = dDate.getHours().toString().padStart(2, '0') + ":" + dDate.getMinutes().toString().padStart(2, '0');
       if (targetTimes.has(hhmm)) {
-        const x = i * barW + barW / 2;
+        const x = (startIdx + i) * barW + barW / 2;
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, bottomY); ctx.stroke();
         ctx.fillText(hhmm, x, h - 2);
       }
@@ -440,7 +451,7 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
       const isUp = d.close >= d.open;
       const volH = (d.volume / maxVol) * (bottomY - 10);
       ctx.fillStyle = isUp ? "rgba(34,197,94,0.45)" : "rgba(239,68,68,0.45)";
-      ctx.fillRect(i * barW + 1, bottomY - volH, Math.max(barW - 2, 1), volH);
+      ctx.fillRect((startIdx + i) * barW + 1, bottomY - volH, Math.max(barW - 2, 1), volH);
     });
 
     // Crosshair
@@ -469,9 +480,14 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
     setCrosshair({ x, y });
 
     const w = rect.width - 50;
-    const visibleIdx = Math.floor((x / w) * visibleData.length);
+    const barW = w / visibleCount;
+    const startIdx = visibleCount - visibleData.length;
+    const visibleIdx = Math.floor(x / barW) - startIdx;
+
     if (visibleIdx >= 0 && visibleIdx < visibleData.length && setTooltip) {
       setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY });
+    } else if (setTooltip) {
+      setTooltip(null);
     }
   };
 
@@ -483,6 +499,100 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
         onMouseLeave={() => { setCrosshair(null); if (setTooltip) setTooltip(null); }}
         style={{ width: "100%", height: "100%", cursor: "crosshair", display: "block" }}
       />
+    </div>
+  );
+}
+
+// ─── Timeline Navigator Component ─────────────────────────────────────────
+function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOffset }) {
+  const containerRef = useRef(null);
+  const dragRef = useRef(null);
+
+  const pathData = useMemo(() => {
+    if (!data || data.length === 0) return "";
+    const minP = Math.min(...data.map(d => d.close));
+    const maxP = Math.max(...data.map(d => d.close));
+    const range = maxP - minP || 1;
+    let path = "";
+    for (let i = 0; i < data.length; i++) {
+      const x = (i / (data.length - 1)) * 100;
+      const y = 90 - ((data[i].close - minP) / range) * 80;
+      path += `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)} `;
+    }
+    return path;
+  }, [data]);
+
+  const handleMouseDown = (e, type) => {
+    e.stopPropagation();
+    dragRef.current = { type, startX: e.clientX, startOffset: offset, startVisibleCount: visibleCount };
+  };
+
+  useEffect(() => {
+    const clampData = (v, min, max) => Math.max(min, Math.min(max, v));
+    const handleMouseMove = (e) => {
+      if (!dragRef.current) return;
+      const { type, startX, startOffset, startVisibleCount } = dragRef.current;
+      const rect = containerRef.current.getBoundingClientRect();
+      const dx = e.clientX - startX;
+      const deltaBars = Math.round((dx / rect.width) * data.length);
+
+      if (type === "pan") {
+        const maxOffset = Math.max(0, data.length - startVisibleCount);
+        setOffset(clampData(startOffset - deltaBars, 0, maxOffset));
+      } else if (type === "resize-left") {
+        const newVisibleCount = clampData(startVisibleCount - deltaBars, 10, data.length - startOffset);
+        setVisibleCount(newVisibleCount);
+      } else if (type === "resize-right") {
+        const startIdx = data.length - startOffset - startVisibleCount;
+        let newOffset = startOffset - deltaBars;
+        newOffset = clampData(newOffset, 0, Math.max(0, data.length - startIdx - 10));
+        const newVisibleCount = data.length - newOffset - startIdx;
+        setOffset(newOffset);
+        setVisibleCount(clampData(newVisibleCount, 10, 1800));
+      }
+    };
+    const handleMouseUp = () => { dragRef.current = null; };
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => { window.removeEventListener("mousemove", handleMouseMove); window.removeEventListener("mouseup", handleMouseUp); };
+  }, [data.length, setOffset, setVisibleCount, offset, visibleCount]);
+
+  if (!data.length) return null;
+
+  const clampData = (v, min, max) => Math.max(min, Math.min(max, v));
+  const leftPerc = clampData((data.length - offset - visibleCount) / data.length * 100, 0, 100);
+  const rightPerc = clampData((data.length - offset) / data.length * 100, 0, 100);
+  const widthPerc = rightPerc - leftPerc;
+
+  return (
+    <div ref={containerRef} style={{ height: 32, position: "relative", backgroundColor: COLORS.bgCard, borderRadius: 4, overflow: "hidden", border: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
+      {/* Background Micro Chart */}
+      <svg width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 100 100" style={{ position: "absolute", top: 0, left: 0 }}>
+        <path d={pathData} fill="none" stroke="rgba(59,130,246,0.3)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      </svg>
+      {/* Background Dimmer (Left of window) */}
+      <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: `${leftPerc}%`, backgroundColor: "rgba(0,0,0,0.4)" }} />
+      {/* Background Dimmer (Right of window) */}
+      <div style={{ position: "absolute", top: 0, bottom: 0, left: `${rightPerc}%`, right: 0, backgroundColor: "rgba(0,0,0,0.4)" }} />
+
+      {/* Draggable Window Pane */}
+      <div
+        style={{
+          position: "absolute", top: 0, bottom: 0,
+          left: `${leftPerc}%`, width: `${widthPerc}%`,
+          backgroundColor: "rgba(59,130,246,0.15)",
+          borderTop: `1px solid ${COLORS.accentDim}`,
+          borderBottom: `1px solid ${COLORS.accentDim}`,
+          cursor: "grab",
+          boxSizing: "border-box"
+        }}
+        onMouseDown={(e) => handleMouseDown(e, "pan")}
+      >
+        {/* Left Resize Handle */}
+        <div style={{ position: "absolute", left: 0, width: 6, top: 0, bottom: 0, cursor: "ew-resize", backgroundColor: COLORS.accent, borderRadius: "2px 0 0 2px", opacity: 0.8 }} onMouseDown={(e) => handleMouseDown(e, "resize-left")} />
+        {/* Right Resize Handle */}
+        <div style={{ position: "absolute", right: 0, width: 6, top: 0, bottom: 0, cursor: "ew-resize", backgroundColor: COLORS.accent, borderRadius: "0 2px 2px 0", opacity: 0.8 }} onMouseDown={(e) => handleMouseDown(e, "resize-right")} />
+      </div>
     </div>
   );
 }
@@ -1757,6 +1867,17 @@ export default function TradingPlatform() {
                 <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} />
               </div>
 
+              {/* Timeline Navigator */}
+              {klineData.length > 0 && (
+                <TimelineNavigator
+                  data={klineData}
+                  visibleCount={visibleCount}
+                  setVisibleCount={setVisibleCount}
+                  offset={offset}
+                  setOffset={setOffset}
+                />
+              )}
+
               {/* Positions — 10% */}
               <div style={{ ...panelStyle, flex: 1, minHeight: 0, overflowY: "auto" }}>
                 <div style={{
@@ -1789,7 +1910,6 @@ export default function TradingPlatform() {
                 </div>
               </div>
             </div>
-
             {/* Right: 閃電下單 (10/5) + 倉位/委託 (10/2) + 成交明細 (10/3) */}
             <div style={{ width: 330, display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
               {/* 閃電下單 - 50% */}
