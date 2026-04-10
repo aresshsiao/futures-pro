@@ -399,25 +399,50 @@ class TaifexImporter:
         logger.info("[Taifex] %s 聚合為 %d 筆 M1 K 線", source_name, len(result_bars))
         return result_bars
 
-    def download_recent(self, symbols: list[str] | None = None) -> list[Bar]:
+    def download_zips(self, on_progress=None) -> tuple[int, int]:
         """
-        從期交所網站下載近 30 個交易日所有 CSV ZIP，
-        解析並回傳指定商品的 Bar（ZIP 快取在本地）。
-        symbols=None 表示匯入全部支援商品。
+        從期交所網站下載近 30 個交易日的 CSV ZIP 到本地 raw_dir，
+        不做任何解析。以檔案大小判斷是否已是最新版本，相同則跳過。
+
+        on_progress(current, total, filename, skipped):
+            每處理完一個 URL 後呼叫。skipped=True 表示快取命中略過。
+
+        回傳 (downloaded, skipped) — 實際下載數 / 已快取略過數。
         """
         urls = self.fetch_download_urls()
         if not urls:
-            return []
+            return (0, 0)
 
-        all_bars: list[Bar] = []
-        for url in urls:
-            zip_bytes = self._load_zip_bytes(url)
-            if zip_bytes is None:
+        total = len(urls)
+        downloaded = 0
+        skipped = 0
+        for i, url in enumerate(urls, 1):
+            filename = url.split("/")[-1].split("?")[0] or "taifex.zip"
+            cache = self._zip_cache_path(url)
+            remote_size = self._get_remote_size(url)
+
+            if cache.exists() and remote_size > 0 and cache.stat().st_size == remote_size:
+                logger.info("[Taifex] 快取命中 (大小一致 %d bytes): %s", remote_size, cache.name)
+                skipped += 1
+                if on_progress:
+                    on_progress(i, total, filename, True)
                 continue
-            bars = self._parse_zip_bytes(zip_bytes, url.split("/")[-1])
-            all_bars.extend(bars)
 
-        return self._filter_symbols(all_bars, symbols)
+            reason = "首次下載" if not cache.exists() else f"大小不符 (本地 {cache.stat().st_size} / 遠端 {remote_size})"
+            logger.info("[Taifex] %s — 下載: %s", reason, url)
+            try:
+                resp = requests.get(url, timeout=60)
+                resp.raise_for_status()
+                cache.write_bytes(resp.content)
+                logger.info("[Taifex] 已儲存: %s (%d bytes)", cache.name, len(resp.content))
+                downloaded += 1
+            except requests.RequestException as e:
+                logger.error("[Taifex] 下載失敗 %s: %s", url, e)
+
+            if on_progress:
+                on_progress(i, total, filename, False)
+
+        return (downloaded, skipped)
 
     # ── 從本地目錄匯入 ────────────────────────────
 
@@ -425,10 +450,14 @@ class TaifexImporter:
         self,
         directory: str | Path = None,
         symbols: list[str] | None = None,
+        on_progress=None,
     ) -> list[Bar]:
         """
         批量匯入整個目錄下的 CSV 和 ZIP 檔案（ZIP 在記憶體中解壓）。
         symbols=None 表示匯入全部支援商品。
+
+        on_progress(current, total, filename, bars_so_far):
+            每處理完一個檔案後呼叫，供呼叫端顯示進度。
         """
         dir_path = Path(directory) if directory else self._raw_dir
         all_bars: list[Bar] = []
@@ -440,11 +469,17 @@ class TaifexImporter:
             dir_path, len(csv_files), len(zip_files),
         )
 
-        for f in csv_files:
-            all_bars.extend(self.parse_daily_csv(f))
+        all_files = csv_files + zip_files
+        total = len(all_files)
 
-        for f in zip_files:
-            all_bars.extend(self._parse_zip_bytes(f.read_bytes(), f.name))
+        for i, f in enumerate(all_files, 1):
+            if f.suffix.lower() == ".csv":
+                bars = self.parse_daily_csv(f)
+            else:
+                bars = self._parse_zip_bytes(f.read_bytes(), f.name)
+            all_bars.extend(bars)
+            if on_progress:
+                on_progress(i, total, f.name, len(all_bars))
 
         result = self._filter_symbols(all_bars, symbols)
         logger.info("[Taifex] 匯入完成: 共 %d 筆 K 線 (過濾後 %d 筆)", len(all_bars), len(result))

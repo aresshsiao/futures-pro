@@ -208,31 +208,95 @@ async def handle_broker_config(ws, data: dict):
 
 
 async def handle_import_taifex(ws, data: dict):
-    """前端: 匯入期交所資料
-    data.source = "download" → 從期交所網站下載近 30 天
-    data.source = "local"    → 從本地目錄匯入 CSV（預設）
+    """前端: 期交所相關資料操作
+    data.source = "download" → 僅從期交所網站下載 ZIP 到 raw_dir，不解析不入庫
+    data.source = "local"    → 解析 raw_dir 內的 ZIP/CSV 並匯入資料庫
+
+    進度推送透過 asyncio.Queue + 50ms polling 實作，
+    確保所有 ws.send_json 都在同一個協程上下文執行，避免並發衝突。
     """
     source = data.get("source", "local")
-    symbols = data.get("symbols") or None  # None = 全部商品
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def on_progress(current, total, filename, extra):
+        """從 executor 執行緒安全地把進度推入 queue。"""
+        loop.call_soon_threadsafe(queue.put_nowait, (current, total, filename, extra))
+
+    extra_key = "skipped" if source == "download" else "bars_so_far"
 
     if source == "download":
-        loop = asyncio.get_event_loop()
-        bars = await loop.run_in_executor(
-            None, lambda: taifex.download_recent(symbols)
+        fut = loop.run_in_executor(
+            None, lambda: taifex.download_zips(on_progress=on_progress)
         )
     else:
+        symbols = data.get("symbols") or None
         directory = data.get("directory", "data/raw/taifex")
-        bars = taifex.import_directory(directory, symbols)
+        fut = loop.run_in_executor(
+            None, lambda: taifex.import_directory(directory, symbols, on_progress=on_progress)
+        )
 
-    parsed = len(bars)
-    inserted = db.insert_bars(bars)
-    await ws.send_json({
-        "type": "import_result",
-        "source": source,
-        "parsed": parsed,
-        "inserted": inserted,
-        "summary": db.summary(),
-    })
+    ws_alive = True
+
+    async def flush_queue():
+        nonlocal ws_alive
+        while not queue.empty():
+            current, total, filename, extra = queue.get_nowait()
+            if not ws_alive:
+                continue
+            try:
+                await ws.send_json({
+                    "type": "import_progress",
+                    "current": current,
+                    "total": total,
+                    "filename": filename,
+                    extra_key: extra,
+                })
+            except Exception:
+                ws_alive = False
+
+    # 等待 executor 完成，每 50ms 排空一次 queue
+    while not fut.done():
+        await asyncio.sleep(0.05)
+        await flush_queue()
+    await flush_queue()  # 排空最後殘留的項目
+
+    try:
+        result = await fut
+    except Exception as e:
+        logger.error("[import_taifex] 執行錯誤: %s", e)
+        if ws_alive:
+            try:
+                await ws.send_json({"type": "import_result", "source": source, "error": str(e)})
+            except Exception:
+                pass
+        return
+
+    if not ws_alive:
+        return
+
+    try:
+        if source == "download":
+            downloaded, skipped = result
+            await ws.send_json({
+                "type": "import_result",
+                "source": "download",
+                "downloaded": downloaded,
+                "skipped": skipped,
+                "save_dir": str(taifex._raw_dir),
+            })
+        else:
+            parsed = len(result)
+            inserted = db.insert_bars(result)
+            await ws.send_json({
+                "type": "import_result",
+                "source": "local",
+                "parsed": parsed,
+                "inserted": inserted,
+                "summary": db.summary(),
+            })
+    except Exception as e:
+        logger.warning("[import_taifex] WebSocket 已關閉，無法發送結果: %s", e)
 
 
 async def handle_broker_sync(ws, data: dict):

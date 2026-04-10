@@ -1258,6 +1258,7 @@ function DatabasePage({ send, addHandler }) {
   const [downloading, setDownloading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [progress, setProgress] = useState(null); // { current, total, filename, bars_so_far }
   const [logs, setLogs] = useState([]);
   const [summary, setSummary] = useState([]);
   const [importDir, setImportDir] = useState("data/raw/taifex");
@@ -1301,18 +1302,35 @@ function DatabasePage({ send, addHandler }) {
         }
       }),
 
+      addHandler("import_progress", (msg) => {
+        setProgress({
+          current: msg.current,
+          total: msg.total,
+          filename: msg.filename,
+          bars_so_far: msg.bars_so_far,   // 匯入模式
+          skipped: msg.skipped,           // 下載模式
+        });
+      }),
+
       addHandler("import_result", (msg) => {
         setDownloading(false);
         setImporting(false);
-        const action = msg.source === "download" ? "下載" : "匯入";
-        if (msg.parsed !== undefined) {
+        setProgress(null);
+        if (msg.source === "download") {
+          const total = (msg.downloaded ?? 0) + (msg.skipped ?? 0);
+          addLog(
+            `下載完成 ✓ — 共 ${total} 個 ZIP，新下載 ${msg.downloaded ?? 0} 個，已快取略過 ${msg.skipped ?? 0} 個`,
+            "success"
+          );
+          addLog(`儲存位置: ${msg.save_dir}`, "info");
+        } else if (msg.parsed !== undefined) {
           const dupNote = msg.inserted < msg.parsed
             ? `（${(msg.parsed - msg.inserted).toLocaleString()} 筆已存在略過）`
             : "";
-          addLog(`${action}完成 ✓ — 解析 ${msg.parsed.toLocaleString()} 筆，新增 ${msg.inserted.toLocaleString()} 筆 ${dupNote}`, "success");
+          addLog(`匯入完成 ✓ — 解析 ${msg.parsed.toLocaleString()} 筆，新增 ${msg.inserted.toLocaleString()} 筆 ${dupNote}`, "success");
           setSummary(msg.summary || []);
         } else {
-          addLog(`${action}失敗，請確認來源是否正確`, "error");
+          addLog(`操作失敗，請確認來源是否正確`, "error");
         }
       }),
 
@@ -1414,6 +1432,45 @@ function DatabasePage({ send, addHandler }) {
           </button>
         ))}
       </div>
+
+      {/* ─── 進度條 ─── */}
+      {(downloading || importing) && (
+        <div style={{
+          marginBottom: 12, padding: "10px 14px",
+          background: COLORS.bgCard, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ color: COLORS.textDim, fontSize: 11 }}>
+              {progress
+                ? `處理中: ${progress.filename}`
+                : downloading ? "連線期交所網站，取得下載清單..." : "掃描目錄..."}
+            </span>
+            <span style={{ color: COLORS.textMuted, fontSize: 11 }}>
+              {progress ? `${progress.current} / ${progress.total}` : ""}
+            </span>
+          </div>
+          <div style={{ height: 6, background: COLORS.border, borderRadius: 3, overflow: "hidden" }}>
+            <div style={{
+              height: "100%", borderRadius: 3,
+              background: downloading ? COLORS.warn : COLORS.accent,
+              width: progress && progress.total > 0
+                ? `${Math.round((progress.current / progress.total) * 100)}%`
+                : "0%",
+              transition: "width 0.3s ease",
+            }} />
+          </div>
+          {progress && progress.bars_so_far !== undefined && (
+            <div style={{ marginTop: 4, fontSize: 10, color: COLORS.textMuted }}>
+              已解析 {progress.bars_so_far.toLocaleString()} 筆 K 線
+            </div>
+          )}
+          {progress && progress.skipped !== undefined && (
+            <div style={{ marginTop: 4, fontSize: 10, color: COLORS.textMuted }}>
+              {progress.skipped ? "已下載，略過" : "下載中..."}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─── 商品選擇 ─── */}
       <div style={{
