@@ -13,7 +13,7 @@ import uvicorn
 from core.event_bus import EventBus
 from core.quote_module import QuoteModule
 from core.trade_module import TradeModule
-from core.models import Direction, OrderType
+from core.models import Direction, OrderType, Timeframe
 from data.database import Database
 from data.bar_builder import BarBuilder
 from data.sources.taifex import TaifexImporter
@@ -27,6 +27,8 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+# sinopac adapter 的 tick debug log（確認 callback 有被觸發）
+logging.getLogger("brokers.adapters.sinopac").setLevel(logging.DEBUG)
 logger = logging.getLogger("main")
 
 # ── 全域模塊實例 ──────────────────────────────────────
@@ -75,26 +77,36 @@ async def handle_subscribe(ws, data: dict):
 
 
 async def handle_get_history(ws, data: dict):
-    """前端: 取得歷史K線 (從DB查詢)"""
-    symbol = data["symbol"]
+    """前端: 取得歷史K線
+    - 券商已連線 → 從 API 即時查詢
+    - 未連線      → fallback 到本地 DB
+    """
+    symbol    = data["symbol"]
     timeframe = data.get("timeframe", "1")  # "1","3","15","60","日","周","月"
-    count = data.get("count", 300)
+    count     = data.get("count", 300)
 
-    if timeframe in ("日", "周", "月"):
-        bars_raw = db.get_bars(symbol, limit=999_999)
-        bars_out = _aggregate_bars(bars_raw, timeframe, count)
-    else:
-        bars_raw = db.get_bars(symbol, limit=count)
-        bars_out = [
-            {
-                "time": int(b.timestamp.timestamp()) * 1000,
-                "open": b.open, "high": b.high,
-                "low": b.low, "close": b.close,
-                "volume": b.volume,
-                "delivery": b.delivery,
-            }
-            for b in bars_raw
-        ]
+    bars_out: list[dict] = []
+
+    if quote.is_connected:
+        bars_out = await _get_bars_from_broker(symbol, timeframe, count)
+
+    if not bars_out:
+        # Fallback: 從 DB 讀取
+        if timeframe in ("日", "周", "月"):
+            bars_raw = db.get_bars(symbol, limit=999_999)
+            bars_out = _aggregate_bars(bars_raw, timeframe, count)
+        else:
+            bars_raw = db.get_bars(symbol, limit=count)
+            bars_out = [
+                {
+                    "time": int(b.timestamp.timestamp()) * 1000,
+                    "open": b.open, "high": b.high,
+                    "low": b.low, "close": b.close,
+                    "volume": b.volume,
+                    "delivery": b.delivery,
+                }
+                for b in bars_raw
+            ]
 
     await ws.send_json({
         "type": "history_bars",
@@ -102,6 +114,82 @@ async def handle_get_history(ws, data: dict):
         "timeframe": timeframe,
         "bars": bars_out,
     })
+
+
+# 前端 timeframe 字串 → 分鐘數
+_TF_MINUTES = {"1": 1, "3": 3, "15": 15, "60": 60, "日": 1440, "周": 10080, "月": 43200}
+# 台指期含夜盤約 1200 分鐘/交易日
+_TRADING_MINUTES_PER_DAY = 1200
+
+
+async def _get_bars_from_broker(symbol: str, timeframe: str, count: int) -> list[dict]:
+    """
+    從券商 API 抓 M1 K棒，在後端聚合成目標週期後回傳。
+    日/周/月 回傳已聚合格式；分鐘K 回傳 M1 原始格式（前端再聚合）。
+    """
+    import math
+
+    tf_minutes = _TF_MINUTES.get(timeframe, 1)
+
+    # 需要多少根 M1（加 20% 緩衝）
+    m1_needed = int(count * tf_minutes * 1.2)
+    # 轉換成日數，最多抓 2 年
+    trading_days  = max(3, math.ceil(m1_needed / _TRADING_MINUTES_PER_DAY))
+    calendar_days = min(int(trading_days * 1.6) + 5, 730)
+
+    try:
+        m1_bars = await quote.get_history(symbol, Timeframe.M1, calendar_days * _TRADING_MINUTES_PER_DAY)
+    except Exception as e:
+        logger.warning("[get_history] API 查詢失敗: %s", e)
+        return []
+
+    if not m1_bars:
+        return []
+
+    logger.info("[get_history] API 回傳 %d 根 M1，目標週期=%s count=%d", len(m1_bars), timeframe, count)
+
+    if timeframe == "1":
+        # M1 直接回傳，前端不再聚合
+        return [
+            {
+                "time": int(b.timestamp.timestamp()) * 1000,
+                "open": b.open, "high": b.high,
+                "low": b.low, "close": b.close,
+                "volume": b.volume, "delivery": b.delivery,
+            }
+            for b in m1_bars[-count:]
+        ]
+
+    if timeframe in ("3", "15", "60"):
+        # 分鐘K：回傳 M1 讓前端聚合（與 DB 路徑一致）
+        return [
+            {
+                "time": int(b.timestamp.timestamp()) * 1000,
+                "open": b.open, "high": b.high,
+                "low": b.low, "close": b.close,
+                "volume": b.volume, "delivery": b.delivery,
+            }
+            for b in m1_bars
+        ]
+
+    # 日/周/月：後端聚合後回傳
+    tf_sec = tf_minutes * 60
+    buckets: dict[int, dict] = {}
+    for b in m1_bars:
+        ts = int(b.timestamp.timestamp())
+        key = (ts // tf_sec) * tf_sec * 1000  # ms
+        if key not in buckets:
+            buckets[key] = {"time": key, "open": b.open, "high": b.high,
+                            "low": b.low, "close": b.close, "volume": b.volume}
+        else:
+            c = buckets[key]
+            c["high"]   = max(c["high"], b.high)
+            c["low"]    = min(c["low"],  b.low)
+            c["close"]  = b.close
+            c["volume"] += b.volume
+
+    result = sorted(buckets.values(), key=lambda x: x["time"])
+    return result[-count:]
 
 
 def _aggregate_bars(bars, timeframe: str, limit: int) -> list[dict]:
@@ -201,10 +289,93 @@ async def handle_get_orders(ws, data: dict):
     })
 
 
+def _load_broker_credentials(broker_id: str) -> dict:
+    """從 config/brokers.yaml 讀取指定券商的 credentials。"""
+    import yaml
+    path = "config/brokers.yaml"
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg.get(broker_id, {})
+    except FileNotFoundError:
+        logger.warning("[BrokerConfig] 找不到 %s，請複製 brokers.yaml.example 並填入金鑰", path)
+        return {}
+
+
+async def handle_broker_status(ws, data: dict):
+    """前端: 查詢各券商目前連線狀態"""
+    await ws.send_json({
+        "type": "broker_status",
+        "quote": {
+            "broker_id": getattr(quote._adapter, "broker_id", None) if quote._adapter else None,
+            "name":      quote.broker_name,
+            "connected": quote.is_connected,
+        },
+        "trade": {
+            "broker_id": getattr(trade._adapter, "broker_id", None) if trade._adapter else None,
+            "name":      trade.broker_name,
+            "connected": trade.is_connected,
+        }
+    })
+
+
 async def handle_broker_config(ws, data: dict):
-    """前端: 設定問價/交易券商"""
-    # TODO: 根據 data["module"] 和 data["broker_id"] 切換 adapter
-    await ws.send_json({"type": "broker_config_result", "success": True})
+    """前端: 連線或斷線指定券商
+    data.action    = "connect" | "disconnect"
+    data.broker_id = "sinopac" | ...
+    """
+    action    = data.get("action", "connect")
+    broker_id = data.get("broker_id", "")
+
+    if action == "disconnect":
+        await quote.disconnect()
+        await ws.send_json({
+            "type": "broker_config_result",
+            "success": True,
+            "connected": False,
+            "broker_id": broker_id,
+            "message": "已斷線",
+        })
+        return
+
+    # action == "connect"
+    ADAPTERS = {
+        "sinopac": lambda: __import__(
+            "brokers.adapters.sinopac", fromlist=["SinoPacQuoteAdapter"]
+        ).SinoPacQuoteAdapter(),
+    }
+
+    factory = ADAPTERS.get(broker_id)
+    if not factory:
+        await ws.send_json({
+            "type": "broker_config_result",
+            "success": False,
+            "broker_id": broker_id,
+            "message": f"不支援的券商: {broker_id}",
+        })
+        return
+
+    credentials = _load_broker_credentials(broker_id)
+    if not credentials:
+        await ws.send_json({
+            "type": "broker_config_result",
+            "success": False,
+            "broker_id": broker_id,
+            "message": "找不到 credentials，請檢查 config/brokers.yaml",
+        })
+        return
+
+    adapter = factory()
+    adapter.broker_id = broker_id  # 方便 handle_broker_status 讀取
+    ok = await quote.set_adapter(adapter, **credentials)
+
+    await ws.send_json({
+        "type": "broker_config_result",
+        "success": ok,
+        "connected": ok,
+        "broker_id": broker_id,
+        "message": "連線成功" if ok else "連線失敗，請確認 API Key 是否正確",
+    })
 
 
 async def handle_import_taifex(ws, data: dict):
@@ -381,6 +552,9 @@ async def on_strategy_signal(signal):
 
 def setup():
     """註冊所有 Action Handler 和事件監聽"""
+    # 把主 event loop 存入 EventBus，確保 Shioaji callback 執行緒可以安全排程事件
+    bus.set_main_loop(asyncio.get_event_loop())
+
     # WebSocket action handlers
     register_action("place_order", handle_place_order)
     register_action("cancel_order", handle_cancel_order)
@@ -388,6 +562,7 @@ def setup():
     register_action("get_history", handle_get_history)
     register_action("get_positions", handle_get_positions)
     register_action("get_orders", handle_get_orders)
+    register_action("broker_status", handle_broker_status)
     register_action("broker_config", handle_broker_config)
     register_action("import_taifex", handle_import_taifex)
     register_action("broker_sync", handle_broker_sync)

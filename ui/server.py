@@ -143,6 +143,20 @@ def setup_event_bridge():
     bus.on("order_filled", forward_fill)
     bus.on("position_update", forward_position)
 
+    async def forward_quote_con(name):
+        await manager.broadcast({"type": "broker_status_update", "kind": "quote", "connected": True, "name": name})
+    async def forward_quote_dis(name):
+        await manager.broadcast({"type": "broker_status_update", "kind": "quote", "connected": False, "name": name})
+    async def forward_trade_con(name):
+        await manager.broadcast({"type": "broker_status_update", "kind": "trade", "connected": True, "name": name})
+    async def forward_trade_dis(name):
+        await manager.broadcast({"type": "broker_status_update", "kind": "trade", "connected": False, "name": name})
+
+    bus.on("quote_connected", forward_quote_con)
+    bus.on("quote_disconnected", forward_quote_dis)
+    bus.on("trade_connected", forward_trade_con)
+    bus.on("trade_disconnected", forward_trade_dis)
+
 
 # ═══════════════════════════════════════════════════════════
 #  WebSocket 端點

@@ -29,13 +29,13 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         self._connected = False
         self._tick_callbacks: dict[str, Callable] = {}
         self._book_callbacks: dict[str, Callable] = {}
+        self._subscribed: set[str] = set()  # 已訂閱的 symbol，避免重複呼叫 Shioaji
 
     async def connect(self, **credentials) -> bool:
         """
         credentials:
             api_key: str
             secret_key: str
-            person_id: str (可選, 憑證登入用)
         """
         try:
             import shioaji as sj
@@ -45,6 +45,53 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 api_key=credentials.get("api_key", ""),
                 secret_key=credentials.get("secret_key", ""),
             )
+
+            # 全域 tick callback 在 connect 時設定一次，避免每次 subscribe 覆蓋
+            @self._api.on_tick_fop_v1()
+            def _on_tick(exchange, tick):
+                if tick.simtrade:
+                    return  # 過濾模擬成交（收盤後的測試資料）
+                symbol = self._code_to_symbol(tick.code)
+                if symbol is None:
+                    return
+                logger.debug("[SinoPac] tick %s price=%.0f vol=%d", symbol, float(tick.close), int(tick.volume))
+                cb = self._tick_callbacks.get(symbol)
+                if cb is None:
+                    return
+                t = Tick(
+                    symbol=symbol,
+                    price=float(tick.close),
+                    volume=int(tick.volume),
+                    timestamp=tick.datetime,   # 已是 datetime 物件
+                    buy_price=float(tick.close),
+                    sell_price=float(tick.close),
+                )
+                cb(t)
+
+            @self._api.on_bidask_fop_v1()
+            def _on_bidask(exchange, bidask):
+                symbol = self._code_to_symbol(bidask.code)
+                if symbol is None:
+                    return
+                cb = self._book_callbacks.get(symbol)
+                if cb is None:
+                    return
+                book = OrderBook(
+                    symbol=symbol,
+                    timestamp=datetime.now(),
+                    bids=[
+                        OrderBookLevel(price=float(getattr(bidask, f"bid_price_{i+1}", 0)),
+                                       qty=int(getattr(bidask, f"bid_volume_{i+1}", 0)))
+                        for i in range(5)
+                    ],
+                    asks=[
+                        OrderBookLevel(price=float(getattr(bidask, f"ask_price_{i+1}", 0)),
+                                       qty=int(getattr(bidask, f"ask_volume_{i+1}", 0)))
+                        for i in range(5)
+                    ],
+                )
+                cb(book)
+
             self._connected = True
             logger.info("[SinoPac Quote] 登入成功")
             return True
@@ -61,60 +108,22 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         return self._connected
 
     async def subscribe_tick(self, symbol: str, callback: Callable[[Tick], None]) -> None:
-        """訂閱逐筆成交"""
+        """訂閱逐筆成交（同一 symbol 只發一次訂閱請求）"""
         self._tick_callbacks[symbol] = callback
+        if symbol in self._subscribed:
+            return
         contract = self._get_contract(symbol)
         if contract:
-            self._api.quote.subscribe(
-                contract,
-                quote_type="tick",
-                version="v1",
-            )
-
-            @self._api.on_tick_fop_v1()
-            def on_tick(exchange, tick):
-                t = Tick(
-                    symbol=symbol,
-                    price=tick.close,
-                    volume=tick.volume,
-                    timestamp=datetime.fromtimestamp(tick.datetime / 1e9),
-                    buy_price=tick.bid_price,
-                    sell_price=tick.ask_price,
-                )
-                cb = self._tick_callbacks.get(symbol)
-                if cb:
-                    cb(t)
+            self._api.quote.subscribe(contract, quote_type="tick", version="v1")
+            self._subscribed.add(symbol)
+            logger.info("[SinoPac] 已訂閱 tick: %s", symbol)
 
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBook], None]) -> None:
-        """訂閱五檔"""
+        """訂閱五檔（同一 symbol 只發一次訂閱請求）"""
         self._book_callbacks[symbol] = callback
         contract = self._get_contract(symbol)
         if contract:
-            self._api.quote.subscribe(
-                contract,
-                quote_type="bidask",
-                version="v1",
-            )
-
-            @self._api.on_bidask_fop_v1()
-            def on_bidask(exchange, bidask):
-                book = OrderBook(
-                    symbol=symbol,
-                    timestamp=datetime.now(),
-                    bids=[
-                        OrderBookLevel(price=getattr(bidask, f"bid_price_{i+1}", 0),
-                                       qty=getattr(bidask, f"bid_volume_{i+1}", 0))
-                        for i in range(5)
-                    ],
-                    asks=[
-                        OrderBookLevel(price=getattr(bidask, f"ask_price_{i+1}", 0),
-                                       qty=getattr(bidask, f"ask_volume_{i+1}", 0))
-                        for i in range(5)
-                    ],
-                )
-                cb = self._book_callbacks.get(symbol)
-                if cb:
-                    cb(book)
+            self._api.quote.subscribe(contract, quote_type="bidask", version="v1")
 
     async def unsubscribe(self, symbol: str) -> None:
         contract = self._get_contract(symbol)
@@ -125,33 +134,83 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         self._book_callbacks.pop(symbol, None)
 
     async def get_history_bars(self, symbol: str, timeframe: Timeframe, count: int = 200) -> list[Bar]:
-        """從永豐金取得歷史K線"""
+        """
+        從永豐金取得歷史K線。
+
+        kbars() 回傳的是 M1 分鐘K（奈秒時間戳），
+        在此聚合成目標週期後回傳。
+        台指期含夜盤約 1200 分鐘/日，估算所需日曆天數。
+        """
+        import math
+        from datetime import date, timedelta
+
         contract = self._get_contract(symbol)
         if not contract:
             return []
 
+        today = date.today()
+
+        TF_MINUTES: dict[Timeframe, int] = {
+            Timeframe.M1:  1,
+            Timeframe.M5:  5,
+            Timeframe.M15: 15,
+            Timeframe.M30: 30,
+            Timeframe.H1:  60,
+            Timeframe.D1:  1440,
+        }
+        tf_minutes = TF_MINUTES.get(timeframe, 1)
+        tf_seconds = tf_minutes * 60
+
+        # 估算需要幾個日曆天（台指期含夜盤約 1200 分鐘/日）
+        TRADING_MINUTES_PER_DAY = 1200
+        trading_days = max(2, math.ceil(count * tf_minutes / TRADING_MINUTES_PER_DAY))
+        calendar_days = int(trading_days * 1.6) + 5
+
+        start = (today - timedelta(days=calendar_days)).strftime("%Y-%m-%d")
+        # TAIFEX 交易日規則：週五 15:00 ~ 週六 05:00 屬於「週一」的交易日。
+        # 若在週末使用 today 作為 end，會導致週五夜盤被過濾掉，因此加上 3 天。
+        end = (today + timedelta(days=3)).strftime("%Y-%m-%d")
+
         try:
-            kbars = self._api.kbars(
-                contract=contract,
-                start="2024-01-01",  # TODO: 動態計算起始日期
-                end=datetime.now().strftime("%Y-%m-%d"),
-            )
-            bars = []
-            for i in range(len(kbars.Close)):
-                bars.append(Bar(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    timestamp=datetime.fromtimestamp(kbars.ts[i] / 1e9),
-                    open=kbars.Open[i],
-                    high=kbars.High[i],
-                    low=kbars.Low[i],
-                    close=kbars.Close[i],
-                    volume=kbars.Volume[i],
+            kbars = self._api.kbars(contract=contract, start=start, end=end)
+            if not kbars or not kbars.ts:
+                logger.warning("[SinoPac] kbars 無資料: %s %s", symbol, timeframe)
+                return []
+
+            logger.info("[SinoPac] kbars %s 取得 %d 根 M1，start=%s", symbol, len(kbars.ts), start)
+
+            # 聚合成目標週期
+            buckets: dict[int, list] = {}
+            for i in range(len(kbars.ts)):
+                # Shioaji 歷史 K 棒的 ts 欄位，是將台灣時間直接視為 UTC 所算出的 epoch，
+                # 這會導致瀏覽器轉換時多加了 8 小時。因此需要將其減去 8 小時 (28800 秒) 
+                # 使其成為標準的絕對 UTC epoch。
+                ts_sec = int(kbars.ts[i] / 1e9) - 28800
+                aligned = (ts_sec // tf_seconds) * tf_seconds
+                o, h, l, c, v = kbars.Open[i], kbars.High[i], kbars.Low[i], kbars.Close[i], kbars.Volume[i]
+                if aligned not in buckets:
+                    buckets[aligned] = [o, h, l, c, v]
+                else:
+                    b = buckets[aligned]
+                    b[1] = max(b[1], h)
+                    b[2] = min(b[2], l)
+                    b[3] = c
+                    b[4] += v
+
+            result: list[Bar] = [
+                Bar(
+                    symbol=symbol, timeframe=timeframe,
+                    timestamp=datetime.fromtimestamp(ts),
+                    open=b[0], high=b[1], low=b[2], close=b[3], volume=b[4],
                     is_closed=True,
-                ))
-            return bars[-count:]
+                )
+                for ts, b in sorted(buckets.items())
+            ]
+            logger.info("[SinoPac] 聚合後 %s %s: %d 根", symbol, timeframe.value, len(result))
+            return result[-count:]
+
         except Exception:
-            logger.exception("[SinoPac] 取得歷史K線失敗")
+            logger.exception("[SinoPac] 取得歷史K線失敗 %s %s", symbol, timeframe)
             return []
 
     def _get_contract(self, symbol: str):
@@ -159,10 +218,20 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TE": "EXF", "TF": "FXF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:
-            return self._api.Contracts.Futures[sj_symbol]["HOT"]
+            return self._api.Contracts.Futures[sj_symbol][sj_symbol + "R1"]  # 近月主力, e.g. TXFR1
         except (KeyError, AttributeError):
             logger.warning(f"[SinoPac] 找不到合約: {symbol} → {sj_symbol}")
             return None
+
+    # Shioaji tick 的 code 欄位格式如 "TXFR1"、"MXFR1"，轉回系統代碼
+    _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "EXF": "TE", "FXF": "TF"}
+
+    def _code_to_symbol(self, code: str) -> str | None:
+        """將 Shioaji code（如 TXFR1）轉回系統商品代碼（如 TX）"""
+        for prefix, symbol in self._CODE_PREFIX_MAP.items():
+            if code.startswith(prefix):
+                return symbol
+        return None
 
 
 class SinoPacTradeAdapter(TradeAdapter):
@@ -290,6 +359,6 @@ class SinoPacTradeAdapter(TradeAdapter):
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TE": "EXF", "TF": "FXF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:
-            return self._api.Contracts.Futures[sj_symbol]["HOT"]
+            return self._api.Contracts.Futures[sj_symbol][sj_symbol + "R1"]
         except (KeyError, AttributeError):
             return None

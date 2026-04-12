@@ -67,9 +67,10 @@ class QuoteModule:
     # ── 訂閱管理 ──────────────────────────────────────
 
     async def subscribe(self, symbol: str) -> None:
-        """訂閱商品的即時報價"""
+        """訂閱商品的即時報價（已訂閱則跳過）"""
+        already = symbol in self._subscriptions
         self._subscriptions.add(symbol)
-        if self.is_connected:
+        if self.is_connected and not already:
             await self._subscribe_internal(symbol)
 
     async def unsubscribe(self, symbol: str) -> None:

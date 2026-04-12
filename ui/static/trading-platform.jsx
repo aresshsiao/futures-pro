@@ -1071,14 +1071,52 @@ function TradeHistoryPanel() {
 }
 
 // ─── Broker Config Panel ──────────────────────────────────────────────
-function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose }) {
-  const [brokers, setBrokers] = useState(BROKER_LIST);
+function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHandler }) {
+  // 以 BROKER_LIST 為基礎，connected 由後端實際狀態決定
+  const [brokers, setBrokers] = useState(
+    BROKER_LIST.map(b => ({ ...b, status: "disconnected" }))
+  );
+  const [pending, setPending] = useState(null); // 正在連線/斷線的 broker_id
+  const [message, setMessage] = useState(null); // { text, ok }
 
-  const toggleConnect = (id) => {
-    setBrokers(bs => bs.map(b => b.id === id
-      ? { ...b, status: b.status === "connected" ? "disconnected" : "connected" }
-      : b
-    ));
+  // 初始化：查詢後端目前連線狀態
+  useEffect(() => {
+    const cleanup = addHandler("broker_status", (msg) => {
+      const connectedId = msg.quote?.broker_id;
+      setBrokers(bs => bs.map(b => ({
+        ...b,
+        status: b.id === connectedId && msg.quote?.connected ? "connected" : "disconnected",
+      })));
+    });
+    send("broker_status", {});
+    return cleanup;
+  }, [send, addHandler]);
+
+  // 連線/斷線結果回調
+  useEffect(() => {
+    const cleanup = addHandler("broker_config_result", (msg) => {
+      setPending(null);
+      setMessage({ text: msg.message, ok: msg.success });
+      if (msg.success) {
+        setBrokers(bs => bs.map(b => ({
+          ...b,
+          status: b.id === msg.broker_id
+            ? (msg.connected ? "connected" : "disconnected")
+            : b.status,
+        })));
+      }
+    });
+    return cleanup;
+  }, [addHandler]);
+
+  const toggleConnect = (id, currentStatus) => {
+    setPending(id);
+    setMessage(null);
+    if (currentStatus === "connected") {
+      send("broker_config", { action: "disconnect", broker_id: id });
+    } else {
+      send("broker_config", { action: "connect", broker_id: id });
+    }
   };
 
   return (
@@ -1102,30 +1140,56 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose }) {
           問價與交易是獨立模塊 — 可以使用不同券商的 API 分別處理問價與下單
         </div>
 
+        {/* 操作回饋訊息 */}
+        {message && (
+          <div style={{
+            marginBottom: 12, padding: "8px 12px", borderRadius: 6, fontSize: 11,
+            background: message.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+            border: `1px solid ${message.ok ? COLORS.up : COLORS.down}`,
+            color: message.ok ? COLORS.up : COLORS.down,
+          }}>{message.text}</div>
+        )}
+
         {/* Broker List */}
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 12, color: COLORS.textDim, fontWeight: 600, marginBottom: 8 }}>已設定券商</div>
-          {brokers.map(b => (
-            <div key={b.id} style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "10px 12px", background: COLORS.bgCard, borderRadius: 6, marginBottom: 6,
-              border: `1px solid ${b.status === "connected" ? "rgba(34,197,94,0.3)" : COLORS.border}`
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{
-                  width: 8, height: 8, borderRadius: "50%",
-                  background: b.status === "connected" ? COLORS.up : COLORS.textMuted,
-                  boxShadow: b.status === "connected" ? `0 0 8px ${COLORS.up}` : "none"
-                }} />
-                <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{b.name}</span>
+          {brokers.map(b => {
+            const isConnected = b.status === "connected";
+            const isLoading = pending === b.id;
+            return (
+              <div key={b.id} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "10px 12px", background: COLORS.bgCard, borderRadius: 6, marginBottom: 6,
+                border: `1px solid ${isConnected ? "rgba(34,197,94,0.3)" : COLORS.border}`
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{
+                    width: 8, height: 8, borderRadius: "50%",
+                    background: isLoading ? COLORS.warn : isConnected ? COLORS.up : COLORS.textMuted,
+                    boxShadow: isConnected ? `0 0 8px ${COLORS.up}` : "none",
+                    animation: isLoading ? "pulse 1s infinite" : "none",
+                  }} />
+                  <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{b.name}</span>
+                  {isConnected && (
+                    <span style={{ fontSize: 10, color: COLORS.up, background: "rgba(34,197,94,0.1)", padding: "1px 6px", borderRadius: 3 }}>已連線</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => toggleConnect(b.id, b.status)}
+                  disabled={isLoading || (pending !== null && pending !== b.id)}
+                  style={{
+                    padding: "4px 14px",
+                    border: `1px solid ${isConnected ? COLORS.down : COLORS.up}`,
+                    background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
+                    color: isConnected ? COLORS.down : COLORS.up,
+                    opacity: (pending !== null && pending !== b.id) ? 0.4 : 1,
+                  }}
+                >
+                  {isLoading ? "處理中..." : isConnected ? "斷線" : "連線"}
+                </button>
               </div>
-              <button onClick={() => toggleConnect(b.id)} style={{
-                padding: "4px 14px", border: `1px solid ${b.status === "connected" ? COLORS.down : COLORS.up}`,
-                background: "transparent", borderRadius: 4, cursor: "pointer", fontSize: 11,
-                color: b.status === "connected" ? COLORS.down : COLORS.up
-              }}>{b.status === "connected" ? "斷線" : "連線"}</button>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Module Assignment */}
@@ -1721,7 +1785,33 @@ export default function TradingPlatform() {
   const wsUrl = `ws://${window.location.host}/ws`;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
   const [showBrokerConfig, setShowBrokerConfig] = useState(false);
-  const [brokerConfig, setBrokerConfig] = useState({ quoteBroker: "永豐金", tradeBroker: "永豐金" });
+  const [brokerConfig, setBrokerConfig] = useState({ 
+    quote: { name: "未連線", connected: false }, 
+    trade: { name: "未連線", connected: false } 
+  });
+
+  useEffect(() => {
+    if (!connected) return;
+    send("broker_status", {});
+  }, [connected, send]);
+
+  useEffect(() => {
+    const handle1 = addHandler("broker_status", (msg) => {
+      setBrokerConfig({
+        quote: { name: msg.quote?.name || "未連線", connected: msg.quote?.connected || false },
+        trade: { name: msg.trade?.name || "未連線", connected: msg.trade?.connected || false },
+      });
+    });
+    const handle2 = addHandler("broker_status_update", (msg) => {
+      if (msg.kind === "quote" || msg.kind === "trade") {
+        setBrokerConfig(prev => ({
+          ...prev,
+          [msg.kind]: { name: msg.name, connected: msg.connected }
+        }));
+      }
+    });
+    return () => { handle1(); handle2(); };
+  }, [addHandler]);
   const [clock, setClock] = useState("");
 
   // Lifted order state (shared between OrderPanel and PositionOrdersPanel)
@@ -1743,10 +1833,13 @@ export default function TradingPlatform() {
     return () => clearInterval(id);
   }, []);
 
-  // 連線成功、切換商品或切換週期時拉資料
+  // 連線成功、切換商品或切換週期時拉資料 + 訂閱即時報價
   const [rawM1, setRawM1] = useState([]);
   useEffect(() => {
     if (!connected) return;
+    // 訂閱即時報價（後端 QuoteModule 已連線才有效，未連線也不影響）
+    send("subscribe", { symbol: activeSymbol });
+
     const isLarge = ["日", "周", "月"].includes(timeframe);
     let reqCount = 2000;
     if (!isLarge) {
@@ -1762,12 +1855,11 @@ export default function TradingPlatform() {
     });
   }, [connected, activeSymbol, timeframe]);
 
-  // 後端回傳資料
+  // 後端回傳歷史資料
   useEffect(() => {
-    addHandler("history_bars", (msg) => {
+    return addHandler("history_bars", (msg) => {
       if (msg.bars && msg.bars.length > 0) {
         if (["日", "周", "月"].includes(msg.timeframe)) {
-          // 後端已聚合，直接使用
           setKlineData(msg.bars);
           setRawM1([]);
         } else {
@@ -1776,6 +1868,108 @@ export default function TradingPlatform() {
       }
     });
   }, [addHandler]);
+
+  // 即時 bar 事件（BarBuilder 推送已收完的 K 棒）
+  useEffect(() => {
+    return addHandler("bar", (msg) => {
+      if (msg.symbol !== activeSymbol) return;
+
+      const barTimeMs = new Date(msg.timestamp).getTime();
+
+      // 換算成目前顯示週期的 bucket 起始時間
+      const tfMinutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
+      const periodMs = tfMinutes ? tfMinutes * 60 * 1000 : null;
+      const bucketTime = periodMs
+        ? Math.floor(barTimeMs / periodMs) * periodMs
+        : barTimeMs;
+
+      const newBar = {
+        time: bucketTime,
+        open: msg.open, high: msg.high, low: msg.low, close: msg.close,
+        volume: msg.volume, delivery: msg.delivery ?? "",
+      };
+
+      if (["日", "周", "月"].includes(timeframe)) {
+        if (!["1d", "1w", "1M"].includes(msg.timeframe)) return;
+        // 日/周/月K 直接更新最後一根或新增
+        setKlineData(prev => {
+          if (!prev.length) return [newBar];
+          const last = prev[prev.length - 1];
+          if (last.time === bucketTime) {
+            const updated = [...prev];
+            updated[updated.length - 1] = {
+              ...last,
+              high: Math.max(last.high, newBar.high),
+              low: Math.min(last.low, newBar.low),
+              close: newBar.close,
+              volume: Math.max(last.volume, newBar.volume),
+            };
+            return updated;
+          }
+          return [...prev, newBar].slice(-1500);
+        });
+      } else {
+        // 分鐘K 先更新 rawM1，讓聚合 useEffect 重算
+        // 必須過濾，只接收 M1，避免不同週期的 K 棒混雜導致重複加總！
+        if (msg.timeframe !== "1m") return;
+        setRawM1(prev => {
+          const lastMs = prev.length ? prev[prev.length - 1].time : 0;
+          if (barTimeMs <= lastMs) return prev; // 舊資料忽略
+          return [...prev, { time: barTimeMs, ...newBar }].slice(-5000);
+        });
+      }
+    });
+  }, [addHandler, activeSymbol, timeframe]);
+
+  // 即時 tick 事件：更新最後一根 K 棒的收盤價（未收完的 bar）
+  useEffect(() => {
+    return addHandler("tick", (msg) => {
+      if (msg.symbol !== activeSymbol) return;
+      setKlineData(prev => {
+        if (!prev.length) return prev;
+        const last = prev[prev.length - 1];
+
+        const barTimeMs = new Date(msg.timestamp).getTime();
+        let bucketTime = last.time;
+        const tfSec = { "1": 60, "3": 180, "15": 900, "60": 3600, "日": 86400, "周": 604800, "月": 2592000 }[timeframe];
+        
+        if (tfSec) {
+          if (timeframe === "周" || timeframe === "月" || timeframe === "日") {
+              // 簡化：日週月由歷史和報價補充，這裡只更新當前棒
+              bucketTime = last.time; 
+          } else {
+              bucketTime = Math.floor(barTimeMs / (tfSec * 1000)) * (tfSec * 1000);
+          }
+        }
+
+        if (bucketTime > last.time) {
+          // 進入新的一根K棒！
+          const newBar = {
+            time: bucketTime,
+            open: msg.price,
+            high: msg.price,
+            low: msg.price,
+            close: msg.price,
+            volume: msg.volume ?? 0,
+            delivery: last.delivery
+          };
+          return [...prev, newBar].slice(-1500);
+        } else if (bucketTime === last.time) {
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            ...last,
+            high: Math.max(last.high, msg.price),
+            low: Math.min(last.low, msg.price),
+            close: msg.price,
+            volume: last.volume + (msg.volume ?? 0),
+          };
+          return updated;
+        } else {
+          return prev;
+        }
+      });
+    });
+  }, [addHandler, activeSymbol, timeframe]);
 
   // M1 聚合為分鐘週期
   useEffect(() => {
@@ -1796,7 +1990,31 @@ export default function TradingPlatform() {
         c.volume += b.volume;
       }
     }
-    setKlineData([...buckets.values()].sort((a, b) => a.time - b.time).slice(-1500));
+    
+    // 計算完的基底 history
+    const aggregated = [...buckets.values()].sort((a, b) => a.time - b.time).slice(-1500);
+    
+    setKlineData(prev => {
+        if (!prev.length) return aggregated;
+        const lastFromPrev = prev[prev.length - 1];
+        const newLast = aggregated[aggregated.length - 1];
+        
+        // 如果 prev 中已經有較新的即時 tick bar，將其保留
+        if (lastFromPrev.time > newLast.time) {
+            aggregated.push(lastFromPrev);
+        } else if (lastFromPrev.time === newLast.time) {
+            aggregated[aggregated.length - 1] = {
+                ...newLast,
+                high: Math.max(newLast.high, lastFromPrev.high),
+                low: Math.min(newLast.low, lastFromPrev.low),
+                close: lastFromPrev.close, // 最新價格以 tick 為準
+                // 注意：這裡如果用 lastFromPrev.volume 會導致每次 M1 close 都加上所有累積的 tick，
+                // 但因為新加入的 rawM1 本身就包含那些 tick，我們直接用 aggregated 的為主，或取 max。
+                volume: Math.max(newLast.volume, lastFromPrev.volume)
+            };
+        }
+        return aggregated;
+    });
   }, [rawM1, timeframe]);
 
   const panelStyle = {
@@ -1843,10 +2061,12 @@ export default function TradingPlatform() {
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
             <span style={{ color: COLORS.textDim }}>問價:</span>
-            <span style={{ color: COLORS.up, fontWeight: 600 }}>{brokerConfig.quoteBroker}</span>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.quote.connected ? COLORS.up : COLORS.down }} title={brokerConfig.quote.connected ? "已連線" : "未連線"} />
+            <span style={{ color: brokerConfig.quote.connected ? COLORS.text : COLORS.warn, fontWeight: 600 }}>{brokerConfig.quote.name}</span>
             <span style={{ color: COLORS.textMuted, margin: "0 2px" }}>|</span>
             <span style={{ color: COLORS.textDim }}>交易:</span>
-            <span style={{ color: COLORS.warn, fontWeight: 600 }}>{brokerConfig.tradeBroker}</span>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.trade.connected ? COLORS.up : COLORS.down }} title={brokerConfig.trade.connected ? "已連線" : "未連線"} />
+            <span style={{ color: brokerConfig.trade.connected ? COLORS.text : COLORS.warn, fontWeight: 600 }}>{brokerConfig.trade.name}</span>
           </div>
           <button onClick={() => setShowBrokerConfig(true)} style={{
             padding: "4px 12px", background: "rgba(59,130,246,0.1)", border: `1px solid ${COLORS.accentDim}`,
@@ -2056,6 +2276,8 @@ export default function TradingPlatform() {
           brokerConfig={brokerConfig}
           setBrokerConfig={setBrokerConfig}
           onClose={() => setShowBrokerConfig(false)}
+          send={send}
+          addHandler={addHandler}
         />
       )}
     </div>
