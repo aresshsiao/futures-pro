@@ -76,6 +76,12 @@ const COLORS = {
   downBg: "rgba(239,68,68,0.12)",
   warn: "#f59e0b",
   warnBg: "rgba(245,158,11,0.12)",
+  // 狀態用顏色（連線中/成功＝綠、斷線/失敗＝紅），跟漲跌色「up/down」是兩件事，
+  // 不會被 CANDLE_COLOR_SCHEME（紅漲/綠漲）影響
+  success: "#22c55e",
+  successBg: "rgba(34,197,94,0.12)",
+  danger: "#ef4444",
+  dangerBg: "rgba(239,68,68,0.12)",
 };
 
 // 漲跌顏色慣例（由 config/settings.py 的 CANDLE_COLOR_SCHEME 設定，經 /api/config 傳入）
@@ -1041,7 +1047,7 @@ function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, s
                         <td style={{ padding: "4px", textAlign: "center" }}>
                           <button onClick={() => deleteOrder(o)} style={{
                             padding: "1px 8px", border: `1px solid rgba(239,68,68,0.3)`,
-                            background: "rgba(239,68,68,0.08)", color: COLORS.down,
+                            background: "rgba(239,68,68,0.08)", color: COLORS.danger,
                             fontSize: 9, borderRadius: 3, cursor: "pointer"
                           }}>刪</button>
                         </td>
@@ -1173,8 +1179,8 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
           <div style={{
             marginBottom: 12, padding: "8px 12px", borderRadius: 6, fontSize: 11,
             background: message.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-            border: `1px solid ${message.ok ? COLORS.up : COLORS.down}`,
-            color: message.ok ? COLORS.up : COLORS.down,
+            border: `1px solid ${message.ok ? COLORS.success : COLORS.danger}`,
+            color: message.ok ? COLORS.success : COLORS.danger,
           }}>{message.text}</div>
         )}
 
@@ -1193,13 +1199,13 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{
                     width: 8, height: 8, borderRadius: "50%",
-                    background: isLoading ? COLORS.warn : isConnected ? COLORS.up : COLORS.textMuted,
-                    boxShadow: isConnected ? `0 0 8px ${COLORS.up}` : "none",
+                    background: isLoading ? COLORS.warn : isConnected ? COLORS.success : COLORS.textMuted,
+                    boxShadow: isConnected ? `0 0 8px ${COLORS.success}` : "none",
                     animation: isLoading ? "pulse 1s infinite" : "none",
                   }} />
                   <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{b.name}</span>
                   {isConnected && (
-                    <span style={{ fontSize: 10, color: COLORS.up, background: "rgba(34,197,94,0.1)", padding: "1px 6px", borderRadius: 3 }}>已連線</span>
+                    <span style={{ fontSize: 10, color: COLORS.success, background: "rgba(34,197,94,0.1)", padding: "1px 6px", borderRadius: 3 }}>已連線</span>
                   )}
                 </div>
                 <button
@@ -1207,9 +1213,9 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
                   disabled={isLoading || (pending !== null && pending !== b.id)}
                   style={{
                     padding: "4px 14px",
-                    border: `1px solid ${isConnected ? COLORS.down : COLORS.up}`,
+                    border: `1px solid ${isConnected ? COLORS.danger : COLORS.success}`,
                     background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
-                    color: isConnected ? COLORS.down : COLORS.up,
+                    color: isConnected ? COLORS.danger : COLORS.success,
                     opacity: (pending !== null && pending !== b.id) ? 0.4 : 1,
                   }}
                 >
@@ -1286,7 +1292,7 @@ function ScriptsPanel({ scripts, send, activeView }) {
                   send("toggle_script", { id: s.id }); // 後端切換 enabled 後會回傳 script_toggled 事件來更新畫面
                 }} style={{
                   width: 36, height: 18, borderRadius: 9, cursor: "pointer", position: "relative",
-                  background: s.enabled ? COLORS.up : COLORS.textMuted, transition: "all .2s"
+                  background: s.enabled ? COLORS.success : COLORS.textMuted, transition: "all .2s"
                 }}>
                   <div style={{
                     width: 14, height: 14, borderRadius: "50%", background: "#fff",
@@ -1316,8 +1322,8 @@ function ScriptsPanel({ scripts, send, activeView }) {
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <button style={{
-                  padding: "4px 14px", background: "rgba(34,197,94,0.1)", border: `1px solid ${COLORS.up}`,
-                  color: COLORS.up, borderRadius: 4, fontSize: 11, cursor: "pointer"
+                  padding: "4px 14px", background: "rgba(34,197,94,0.1)", border: `1px solid ${COLORS.success}`,
+                  color: COLORS.success, borderRadius: 4, fontSize: 11, cursor: "pointer"
                 }}>▶ 執行</button>
                 <button style={{
                   padding: "4px 14px", background: "rgba(59,130,246,0.1)", border: `1px solid ${COLORS.accent}`,
@@ -1505,7 +1511,7 @@ function DatabasePage({ send, addHandler }) {
             desc: "重新讀取資料庫統計",
             action: refreshSummary,
             active: false,
-            color: COLORS.up,
+            color: COLORS.success,
           },
         ].map((item) => (
           <button key={item.label} onClick={item.action} disabled={busy} style={{
@@ -1661,8 +1667,8 @@ function DatabasePage({ send, addHandler }) {
           <div key={i} style={{ padding: "2px 0", display: "flex", gap: 10 }}>
             <span style={{ color: COLORS.textMuted, flexShrink: 0 }}>{l.time}</span>
             <span style={{
-              color: l.type === "success" ? COLORS.up
-                : l.type === "error" ? COLORS.down
+              color: l.type === "success" ? COLORS.success
+                : l.type === "error" ? COLORS.danger
                   : COLORS.textDim,
             }}>{l.msg}</span>
           </div>
@@ -1870,28 +1876,6 @@ export default function TradingPlatform() {
     return cleanup;
   }, [addHandler]);
 
-  // 成交量語音提示：當前棒的量跨越設定的水平線時播報一次
-  // （同一根棒內每個門檻只播一次，新的一根棒開始後重新計算）
-  const volumeAlertRef = useRef({ time: null, levels: new Set() });
-
-  useEffect(() => {
-    if (!klineData.length || !volumeRefLines.length) return;
-    const last = klineData[klineData.length - 1];
-    if (!last) return;
-
-    if (volumeAlertRef.current.time !== last.time) {
-      volumeAlertRef.current = { time: last.time, levels: new Set() };
-    }
-
-    // 由小到大檢查，量持續攀升時依序播報「大量」→「爆大量」
-    [...volumeRefLines].sort((a, b) => a.level - b.level).forEach(({ level, label }) => {
-      if (last.volume >= level && !volumeAlertRef.current.levels.has(level)) {
-        volumeAlertRef.current.levels.add(level);
-        speakVolumeAlert(label);
-      }
-    });
-  }, [klineData, volumeRefLines]);
-
   useEffect(() => {
     if (!connected) return;
     send("broker_status", {});
@@ -1942,6 +1926,32 @@ export default function TradingPlatform() {
   useEffect(() => { liveM1BarRef.current = liveM1Bar; }, [liveM1Bar]);
   // 切換商品時重置即時棒
   useEffect(() => { setLiveM1Bar(null); }, [activeSymbol]);
+
+  // 成交量語音提示：當前棒的量跨越設定的水平線時播報一次
+  // （同一根棒內每個門檻只播一次，新的一根棒開始後重新計算）
+  // 限定 liveM1Bar 有值（代表正在收即時報價、追蹤的是目前進行中的這根K棒）才檢查，
+  // 避免剛切換商品/週期、或頁面剛拉到歷史資料時，對著早已收完的舊K棒誤報「爆量」。
+  const volumeAlertRef = useRef({ time: null, levels: new Set() });
+
+  useEffect(() => {
+    if (!liveM1Bar) return;
+    if (!klineData.length || !volumeRefLines.length) return;
+    const last = klineData[klineData.length - 1];
+    if (!last) return;
+
+    if (volumeAlertRef.current.time !== last.time) {
+      volumeAlertRef.current = { time: last.time, levels: new Set() };
+    }
+
+    // 由小到大檢查，量持續攀升時依序播報「大量」→「爆大量」
+    [...volumeRefLines].sort((a, b) => a.level - b.level).forEach(({ level, label }) => {
+      if (last.volume >= level && !volumeAlertRef.current.levels.has(level)) {
+        volumeAlertRef.current.levels.add(level);
+        speakVolumeAlert(label);
+      }
+    });
+  }, [klineData, volumeRefLines, liveM1Bar]);
+
   useEffect(() => {
     if (!connected) return;
     // 訂閱即時報價（後端 QuoteModule 已連線才有效，未連線也不影響）
@@ -2185,11 +2195,11 @@ export default function TradingPlatform() {
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
             <span style={{ color: COLORS.textDim }}>問價:</span>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.quote.connected ? COLORS.up : COLORS.down }} title={brokerConfig.quote.connected ? "已連線" : "未連線"} />
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.quote.connected ? COLORS.success : COLORS.danger }} title={brokerConfig.quote.connected ? "已連線" : "未連線"} />
             <span style={{ color: brokerConfig.quote.connected ? COLORS.text : COLORS.warn, fontWeight: 600 }}>{brokerConfig.quote.name}</span>
             <span style={{ color: COLORS.textMuted, margin: "0 2px" }}>|</span>
             <span style={{ color: COLORS.textDim }}>交易:</span>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.trade.connected ? COLORS.up : COLORS.down }} title={brokerConfig.trade.connected ? "已連線" : "未連線"} />
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.trade.connected ? COLORS.success : COLORS.danger }} title={brokerConfig.trade.connected ? "已連線" : "未連線"} />
             <span style={{ color: brokerConfig.trade.connected ? COLORS.text : COLORS.warn, fontWeight: 600 }}>{brokerConfig.trade.name}</span>
           </div>
           <button onClick={() => setShowBrokerConfig(true)} style={{
@@ -2349,7 +2359,7 @@ export default function TradingPlatform() {
       }}>
         <div style={{ display: "flex", gap: 16 }}>
           <span>
-            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: connected ? COLORS.up : COLORS.down, marginRight: 4, boxShadow: `0 0 6px ${connected ? COLORS.up : COLORS.down}` }} />
+            <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: connected ? COLORS.success : COLORS.danger, marginRight: 4, boxShadow: `0 0 6px ${connected ? COLORS.success : COLORS.danger}` }} />
             {connected ? "後端連線正常" : "後端未連線"}
           </span>
           <span>延遲: 3ms</span>
