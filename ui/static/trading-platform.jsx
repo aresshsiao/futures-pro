@@ -1,5 +1,15 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
+// ─── 語音提示 ────────────────────────────────────────────────────────
+function speakVolumeAlert(text) {
+  if (!("speechSynthesis" in window)) return;
+  // 用瀏覽器內建的語音佇列依序播放（同一根棒最多 400/1500 兩則，不會堆積太多）
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = "zh-TW";
+  utter.rate = 1.1;
+  window.speechSynthesis.speak(utter);
+}
+
 // ─── Mock Data ───────────────────────────────────────────────────────
 const generateKlineData = (count = 120) => {
   const data = [];
@@ -40,13 +50,6 @@ const MOCK_TRADES = [
   { id: 6, time: "11:22:09", symbol: "TX", direction: "買", price: 17380, qty: 2, status: "已取消", fee: 0 },
 ];
 
-const MOCK_SCRIPTS = [
-  { id: 1, name: "MA_Cross", type: "indicator", desc: "均線交叉指標 (5/20)", enabled: true, code: `# MA Cross Indicator\ndef calc(data, fast=5, slow=20):\n    ma_fast = data['close'].rolling(fast).mean()\n    ma_slow = data['close'].rolling(slow).mean()\n    return {'ma_fast': ma_fast, 'ma_slow': ma_slow}` },
-  { id: 2, name: "RSI_Signal", type: "indicator", desc: "RSI 超買超賣", enabled: true, code: `# RSI Indicator\ndef calc(data, period=14):\n    delta = data['close'].diff()\n    gain = delta.where(delta > 0, 0).rolling(period).mean()\n    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()\n    rs = gain / loss\n    return {'rsi': 100 - (100 / (1 + rs))}` },
-  { id: 3, name: "Breakout_Strategy", type: "strategy", desc: "突破策略 (20K高低)", enabled: false, code: `# Breakout Strategy\ndef on_bar(data, ctx):\n    high_20 = data['high'].rolling(20).max()\n    low_20 = data['low'].rolling(20).min()\n    if data['close'].iloc[-1] > high_20.iloc[-2]:\n        ctx.buy(1)\n    elif data['close'].iloc[-1] < low_20.iloc[-2]:\n        ctx.sell(1)` },
-  { id: 4, name: "MACD_Strategy", type: "strategy", desc: "MACD 交叉策略", enabled: false, code: `# MACD Strategy\ndef on_bar(data, ctx):\n    ema12 = data['close'].ewm(span=12).mean()\n    ema26 = data['close'].ewm(span=26).mean()\n    macd = ema12 - ema26\n    signal = macd.ewm(span=9).mean()\n    if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] <= signal.iloc[-2]:\n        ctx.buy(1)` },
-];
-
 const BROKER_LIST = [
   { id: "sinopac", name: "永豐金", status: "connected", type: "both" },
   { id: "fubon", name: "富邦期貨", status: "disconnected", type: "both" },
@@ -74,6 +77,22 @@ const COLORS = {
   warn: "#f59e0b",
   warnBg: "rgba(245,158,11,0.12)",
 };
+
+// 漲跌顏色慣例（由 config/settings.py 的 CANDLE_COLOR_SCHEME 設定，經 /api/config 傳入）
+// "green-up"：漲＝綠、跌＝紅（國際慣例）；"red-up"：漲＝紅、跌＝綠（台股慣例）
+function applyCandleColorScheme(scheme) {
+  if (scheme === "red-up") {
+    COLORS.up = "#ef4444";
+    COLORS.upBg = "rgba(239,68,68,0.12)";
+    COLORS.down = "#22c55e";
+    COLORS.downBg = "rgba(34,197,94,0.12)";
+  } else {
+    COLORS.up = "#22c55e";
+    COLORS.upBg = "rgba(34,197,94,0.12)";
+    COLORS.down = "#ef4444";
+    COLORS.downBg = "rgba(239,68,68,0.12)";
+  }
+}
 
 // ─── WebSocket Hook ───────────────────────────────────────────────────
 function useWebSocket(url) {
@@ -268,14 +287,8 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
 
       const top = Math.min(oY, cY);
       const bodyH = Math.max(Math.abs(oY - cY), 1);
-      if (isUp) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x - bodyW / 2, top, bodyW, bodyH);
-      } else {
-        ctx.fillStyle = color;
-        ctx.fillRect(x - bodyW / 2, top, bodyW, bodyH);
-      }
+      ctx.fillStyle = color;
+      ctx.fillRect(x - bodyW / 2, top, bodyW, bodyH);
     });
 
     // MA lines (from indicators) — 用全域索引回溯計算
@@ -382,7 +395,7 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
 }
 
 // ─── Volume Chart Component ──────────────────────────────────────────
-function VolumeChart({ data, visibleCount, offset, setTooltip }) {
+function VolumeChart({ data, visibleCount, offset, setTooltip, refLines = [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }] }) {
   const canvasRef = useRef(null);
   const [crosshair, setCrosshair] = useState(null);
 
@@ -455,6 +468,21 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
       ctx.fillRect((startIdx + i) * barW + 1, bottomY - volH, Math.max(barW - 2, 1), volH);
     });
 
+    // 成交量水平參考線（由 config/settings.py 的 VOLUME_REFERENCE_LINES 設定）
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 2]);
+    ctx.textAlign = "right";
+    ctx.font = "9px monospace";
+    refLines.forEach(({ level, label }) => {
+      if (level > maxVol) return; // 量太小、超出目前範圍時不畫，不去撐大縱軸
+      const y = bottomY - (level / maxVol) * (bottomY - 10);
+      ctx.strokeStyle = "#f59e0b";
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
+      ctx.fillStyle = "#f59e0b";
+      ctx.fillText(`${label} ${level.toLocaleString()}`, w - 4, y + 3);
+    });
+    ctx.setLineDash([]);
+
     // Crosshair
     if (crosshair) {
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
@@ -470,7 +498,7 @@ function VolumeChart({ data, visibleCount, offset, setTooltip }) {
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [visibleData, crosshair]);
+  }, [visibleData, crosshair, refLines]);
 
   useEffect(() => { drawVolume(); }, [drawVolume]);
 
@@ -1217,7 +1245,7 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
 }
 
 // ─── Scripts Manager ──────────────────────────────────────────────────
-function ScriptsPanel({ scripts, setScripts, activeView }) {
+function ScriptsPanel({ scripts, send, activeView }) {
   const [selectedScript, setSelectedScript] = useState(null);
   const [editCode, setEditCode] = useState("");
 
@@ -1255,7 +1283,7 @@ function ScriptsPanel({ scripts, setScripts, activeView }) {
                 </div>
                 <div onClick={e => {
                   e.stopPropagation();
-                  setScripts(ss => ss.map(x => x.id === s.id ? { ...x, enabled: !x.enabled } : x));
+                  send("toggle_script", { id: s.id }); // 後端切換 enabled 後會回傳 script_toggled 事件來更新畫面
                 }} style={{
                   width: 36, height: 18, borderRadius: 9, cursor: "pointer", position: "relative",
                   background: s.enabled ? COLORS.up : COLORS.textMuted, transition: "all .2s"
@@ -1781,14 +1809,88 @@ export default function TradingPlatform() {
   const [page, setPage] = useState("trading");
   const [klineData, setKlineData] = useState([]);
   const [activeSymbol, setActiveSymbol] = useState("TX");
-  const [scripts, setScripts] = useState(MOCK_SCRIPTS);
+  const [scripts, setScripts] = useState([]);
   const wsUrl = `ws://${window.location.host}/ws`;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
   const [showBrokerConfig, setShowBrokerConfig] = useState(false);
-  const [brokerConfig, setBrokerConfig] = useState({ 
-    quote: { name: "未連線", connected: false }, 
-    trade: { name: "未連線", connected: false } 
+  const [brokerConfig, setBrokerConfig] = useState({
+    quote: { name: "未連線", connected: false },
+    trade: { name: "未連線", connected: false }
   });
+  // 各 Script 即時運算結果（由後端 ScriptEngine 算完透過 ws "indicator_output" 廣播），用 name 當 key
+  const [indicatorOutputs, setIndicatorOutputs] = useState({});
+  const [candleColorScheme, setCandleColorScheme] = useState("green-up");
+
+  // 成交量水平警示線：來自 Volume_Alert Script 的運算結果（取代舊版 /api/config 的寫死設定）
+  // 後端尚未回傳前先用預設值，避免圖表開頭沒有參考線
+  const volumeRefLines = useMemo(() => {
+    const output = indicatorOutputs["Volume_Alert"];
+    if (!output) {
+      return [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }];
+    }
+    return Object.entries(output.series)
+      .map(([label, values]) => ({ level: values[values.length - 1], label }))
+      .sort((a, b) => b.level - a.level);
+  }, [indicatorOutputs]);
+
+  useEffect(() => {
+    fetch("/api/scripts")
+      .then(r => r.json())
+      .then(cfg => {
+        if (Array.isArray(cfg.scripts)) setScripts(cfg.scripts);
+      })
+      .catch(() => {}); // 取不到就維持空清單
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then(r => r.json())
+      .then(cfg => {
+        if (cfg.candle_color_scheme) {
+          setCandleColorScheme(cfg.candle_color_scheme);
+        }
+      })
+      .catch(() => {}); // 取不到設定就沿用預設值
+  }, []);
+
+  // 在每次渲染前套用漲跌顏色慣例，讓所有子元件（K棒、損益、多空標籤…）讀到一致的顏色
+  applyCandleColorScheme(candleColorScheme);
+
+  useEffect(() => {
+    const cleanup = addHandler("script_toggled", (msg) => {
+      setScripts(ss => ss.map(s => s.id === msg.id ? { ...s, enabled: msg.enabled } : s));
+    });
+    return cleanup;
+  }, [addHandler]);
+
+  useEffect(() => {
+    const cleanup = addHandler("indicator_output", (msg) => {
+      setIndicatorOutputs(prev => ({ ...prev, [msg.name]: msg }));
+    });
+    return cleanup;
+  }, [addHandler]);
+
+  // 成交量語音提示：當前棒的量跨越設定的水平線時播報一次
+  // （同一根棒內每個門檻只播一次，新的一根棒開始後重新計算）
+  const volumeAlertRef = useRef({ time: null, levels: new Set() });
+
+  useEffect(() => {
+    if (!klineData.length || !volumeRefLines.length) return;
+    const last = klineData[klineData.length - 1];
+    if (!last) return;
+
+    if (volumeAlertRef.current.time !== last.time) {
+      volumeAlertRef.current = { time: last.time, levels: new Set() };
+    }
+
+    // 由小到大檢查，量持續攀升時依序播報「大量」→「爆大量」
+    [...volumeRefLines].sort((a, b) => a.level - b.level).forEach(({ level, label }) => {
+      if (last.volume >= level && !volumeAlertRef.current.levels.has(level)) {
+        volumeAlertRef.current.levels.add(level);
+        speakVolumeAlert(label);
+      }
+    });
+  }, [klineData, volumeRefLines]);
 
   useEffect(() => {
     if (!connected) return;
@@ -1835,6 +1937,11 @@ export default function TradingPlatform() {
 
   // 連線成功、切換商品或切換週期時拉資料 + 訂閱即時報價
   const [rawM1, setRawM1] = useState([]);
+  const [liveM1Bar, setLiveM1Bar] = useState(null);
+  const liveM1BarRef = useRef(null);
+  useEffect(() => { liveM1BarRef.current = liveM1Bar; }, [liveM1Bar]);
+  // 切換商品時重置即時棒
+  useEffect(() => { setLiveM1Bar(null); }, [activeSymbol]);
   useEffect(() => {
     if (!connected) return;
     // 訂閱即時報價（後端 QuoteModule 已連線才有效，未連線也不影響）
@@ -1869,33 +1976,28 @@ export default function TradingPlatform() {
     });
   }, [addHandler]);
 
-  // 即時 bar 事件（BarBuilder 推送已收完的 K 棒）
+  // 即時 bar 事件（BarBuilder 推送 K 棒）
+  // is_closed=true  → 已收完的 K 棒，更新歷史資料
+  // is_closed=false → 正在成形的 M1 即時棒，更新 liveM1Bar
   useEffect(() => {
     return addHandler("bar", (msg) => {
       if (msg.symbol !== activeSymbol) return;
 
       const barTimeMs = new Date(msg.timestamp).getTime();
 
-      // 換算成目前顯示週期的 bucket 起始時間
-      const tfMinutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
-      const periodMs = tfMinutes ? tfMinutes * 60 * 1000 : null;
-      const bucketTime = periodMs
-        ? Math.floor(barTimeMs / periodMs) * periodMs
-        : barTimeMs;
-
-      const newBar = {
-        time: bucketTime,
-        open: msg.open, high: msg.high, low: msg.low, close: msg.close,
-        volume: msg.volume, delivery: msg.delivery ?? "",
-      };
-
       if (["日", "周", "月"].includes(timeframe)) {
+        // 日/周/月K 只接收已收完的大週期棒
         if (!["1d", "1w", "1M"].includes(msg.timeframe)) return;
-        // 日/周/月K 直接更新最後一根或新增
+        if (!msg.is_closed) return;
+        const newBar = {
+          time: barTimeMs,
+          open: msg.open, high: msg.high, low: msg.low, close: msg.close,
+          volume: msg.volume, delivery: msg.delivery ?? "",
+        };
         setKlineData(prev => {
           if (!prev.length) return [newBar];
           const last = prev[prev.length - 1];
-          if (last.time === bucketTime) {
+          if (last.time === barTimeMs) {
             const updated = [...prev];
             updated[updated.length - 1] = {
               ...last,
@@ -1909,69 +2011,91 @@ export default function TradingPlatform() {
           return [...prev, newBar].slice(-1500);
         });
       } else {
-        // 分鐘K 先更新 rawM1，讓聚合 useEffect 重算
-        // 必須過濾，只接收 M1，避免不同週期的 K 棒混雜導致重複加總！
+        // 分鐘K 只處理 M1 棒
         if (msg.timeframe !== "1m") return;
+
+        if (!msg.is_closed) {
+          // 即時棒：更新 liveM1Bar，供 liveM1Bar effect 更新 klineData
+          setLiveM1Bar({
+            time: barTimeMs,
+            open: msg.open, high: msg.high, low: msg.low,
+            close: msg.close, volume: msg.volume,
+          });
+          return;
+        }
+
+        // 已收完的 M1 棒：加入 rawM1，觸發聚合 useEffect 重算
         setRawM1(prev => {
           const lastMs = prev.length ? prev[prev.length - 1].time : 0;
-          if (barTimeMs <= lastMs) return prev; // 舊資料忽略
-          return [...prev, { time: barTimeMs, ...newBar }].slice(-5000);
+          if (barTimeMs <= lastMs) return prev;
+          return [...prev, {
+            time: barTimeMs,
+            open: msg.open, high: msg.high, low: msg.low, close: msg.close,
+            volume: msg.volume, delivery: msg.delivery ?? "",
+          }].slice(-5000);
         });
       }
     });
   }, [addHandler, activeSymbol, timeframe]);
 
-  // 即時 tick 事件：更新最後一根 K 棒的收盤價（未收完的 bar）
+  // liveM1Bar 變化時更新 klineData 當前棒（取代舊的 tick handler）
+  // liveM1Bar 來自 BarBuilder 推送的 is_closed=false M1 棒，OHLCV 完全正確
   useEffect(() => {
-    return addHandler("tick", (msg) => {
-      if (msg.symbol !== activeSymbol) return;
+    if (!liveM1Bar) return;
+
+    if (["日", "周", "月"].includes(timeframe)) {
+      // 日週月：用最新 M1 棒的收盤更新當前棒
       setKlineData(prev => {
         if (!prev.length) return prev;
-        const last = prev[prev.length - 1];
-
-        const barTimeMs = new Date(msg.timestamp).getTime();
-        let bucketTime = last.time;
-        const tfSec = { "1": 60, "3": 180, "15": 900, "60": 3600, "日": 86400, "周": 604800, "月": 2592000 }[timeframe];
-        
-        if (tfSec) {
-          if (timeframe === "周" || timeframe === "月" || timeframe === "日") {
-              // 簡化：日週月由歷史和報價補充，這裡只更新當前棒
-              bucketTime = last.time; 
-          } else {
-              bucketTime = Math.floor(barTimeMs / (tfSec * 1000)) * (tfSec * 1000);
-          }
-        }
-
-        if (bucketTime > last.time) {
-          // 進入新的一根K棒！
-          const newBar = {
-            time: bucketTime,
-            open: msg.price,
-            high: msg.price,
-            low: msg.price,
-            close: msg.price,
-            volume: msg.volume ?? 0,
-            delivery: last.delivery
-          };
-          return [...prev, newBar].slice(-1500);
-        } else if (bucketTime === last.time) {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            ...last,
-            high: Math.max(last.high, msg.price),
-            low: Math.min(last.low, msg.price),
-            close: msg.price,
-            volume: last.volume + (msg.volume ?? 0),
-          };
-          return updated;
-        } else {
-          return prev;
-        }
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        updated[updated.length - 1] = {
+          ...last,
+          high: Math.max(last.high, liveM1Bar.high),
+          low: Math.min(last.low, liveM1Bar.low),
+          close: liveM1Bar.close,
+        };
+        return updated;
       });
-    });
-  }, [addHandler, activeSymbol, timeframe]);
+      return;
+    }
 
-  // M1 聚合為分鐘週期
+    const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
+    if (!minutes) return;
+    const periodMs = minutes * 60 * 1000;
+    const bucketTime = Math.floor(liveM1Bar.time / periodMs) * periodMs;
+
+    setKlineData(prev => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+
+      if (bucketTime === last.time) {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...last,
+          high: Math.max(last.high, liveM1Bar.high),
+          low: Math.min(last.low, liveM1Bar.low),
+          close: liveM1Bar.close,
+          volume: Math.max(last.volume, liveM1Bar.volume),
+        };
+        return updated;
+      } else if (bucketTime > last.time) {
+        // 新週期開始
+        return [...prev, {
+          time: bucketTime,
+          open: liveM1Bar.open,
+          high: liveM1Bar.high,
+          low: liveM1Bar.low,
+          close: liveM1Bar.close,
+          volume: liveM1Bar.volume,
+          delivery: last.delivery,
+        }].slice(-1500);
+      }
+      return prev;
+    });
+  }, [liveM1Bar, timeframe]);
+
+  // M1 聚合為分鐘週期（rawM1 或 timeframe 變化時才重算，避免每個 tick 都觸發）
   useEffect(() => {
     if (!rawM1.length) return;
     const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
@@ -1990,31 +2114,31 @@ export default function TradingPlatform() {
         c.volume += b.volume;
       }
     }
-    
-    // 計算完的基底 history
+
     const aggregated = [...buckets.values()].sort((a, b) => a.time - b.time).slice(-1500);
-    
-    setKlineData(prev => {
-        if (!prev.length) return aggregated;
-        const lastFromPrev = prev[prev.length - 1];
-        const newLast = aggregated[aggregated.length - 1];
-        
-        // 如果 prev 中已經有較新的即時 tick bar，將其保留
-        if (lastFromPrev.time > newLast.time) {
-            aggregated.push(lastFromPrev);
-        } else if (lastFromPrev.time === newLast.time) {
-            aggregated[aggregated.length - 1] = {
-                ...newLast,
-                high: Math.max(newLast.high, lastFromPrev.high),
-                low: Math.min(newLast.low, lastFromPrev.low),
-                close: lastFromPrev.close, // 最新價格以 tick 為準
-                // 注意：這裡如果用 lastFromPrev.volume 會導致每次 M1 close 都加上所有累積的 tick，
-                // 但因為新加入的 rawM1 本身就包含那些 tick，我們直接用 aggregated 的為主，或取 max。
-                volume: Math.max(newLast.volume, lastFromPrev.volume)
-            };
-        }
-        return aggregated;
-    });
+
+    // 透過 ref 讀取最新的 liveM1Bar，不將其加入 deps（避免每個 tick 重新跑完整聚合）
+    const live = liveM1BarRef.current;
+    if (live) {
+      const liveBucket = Math.floor(live.time / periodMs) * periodMs;
+      const lastAgg = aggregated[aggregated.length - 1];
+      if (lastAgg && liveBucket === lastAgg.time) {
+        aggregated[aggregated.length - 1] = {
+          ...lastAgg,
+          high: Math.max(lastAgg.high, live.high),
+          low: Math.min(lastAgg.low, live.low),
+          close: live.close,
+          volume: Math.max(lastAgg.volume, live.volume),
+        };
+      } else if (!lastAgg || liveBucket > lastAgg.time) {
+        aggregated.push({
+          time: liveBucket, open: live.open, high: live.high,
+          low: live.low, close: live.close, volume: live.volume, delivery: "",
+        });
+      }
+    }
+
+    setKlineData(aggregated);
   }, [rawM1, timeframe]);
 
   const panelStyle = {
@@ -2082,7 +2206,7 @@ export default function TradingPlatform() {
         {page === "backtest" && <BacktestPage scripts={scripts} />}
         {page === "scripts" && (
           <div style={{ height: "100%", ...panelStyle, margin: 8, borderRadius: 8 }}>
-            <ScriptsPanel scripts={scripts} setScripts={setScripts} activeView="scripts" />
+            <ScriptsPanel scripts={scripts} send={send} activeView="scripts" />
           </div>
         )}
         {page === "trading" && (
@@ -2142,7 +2266,7 @@ export default function TradingPlatform() {
 
               {/* Volume — 30% */}
               <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
-                <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} />
+                <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
               </div>
 
               {/* Timeline Navigator */}

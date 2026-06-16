@@ -10,15 +10,15 @@ import sys
 
 import uvicorn
 
+from config import settings
 from core.event_bus import EventBus
 from core.quote_module import QuoteModule
 from core.trade_module import TradeModule
-from core.models import Direction, OrderType, Timeframe
+from core.models import Direction, OrderType, ScriptMeta, ScriptType, Timeframe
 from data.database import Database
 from data.bar_builder import BarBuilder
 from data.sources.taifex import TaifexImporter
-from scripts.engine import ScriptEngine
-from ui.server import app, register_action
+from ui.server import app, register_action, script_engine
 
 # ── Logging ───────────────────────────────────────────
 
@@ -38,8 +38,35 @@ db = Database()
 quote = QuoteModule()
 trade = TradeModule()
 bar_builder = BarBuilder()
-script_engine = ScriptEngine()
 taifex = TaifexImporter()
+# script_engine 定義在 ui/server.py（理由見該檔案註解），這裡直接重用同一個實例
+
+# 內建 Script 清單（啟動時載入到 script_engine）。
+# Volume_Alert 的水平線數值直接沿用 config/settings.py 的 VOLUME_REFERENCE_LINES，
+# 讓「爆大量」設定維持單一來源，但實際運算/廣播改走 Script 引擎。
+BUILTIN_SCRIPTS = [
+    ScriptMeta(
+        id="ma_cross", name="MA_Cross", script_type=ScriptType.INDICATOR,
+        description="均線交叉指標 (5/20)", enabled=True,
+        file_path="scripts/builtin/ma_cross.py",
+    ),
+    ScriptMeta(
+        id="rsi", name="RSI_Signal", script_type=ScriptType.INDICATOR,
+        description="RSI 超買超賣", enabled=True,
+        file_path="scripts/builtin/rsi.py",
+    ),
+    ScriptMeta(
+        id="volume_alert", name="Volume_Alert", script_type=ScriptType.INDICATOR,
+        description="成交量爆量水平線", enabled=True,
+        file_path="scripts/builtin/volume_alert.py",
+        parameters={"levels": settings.VOLUME_REFERENCE_LINES},
+    ),
+    ScriptMeta(
+        id="breakout", name="Breakout_Strategy", script_type=ScriptType.STRATEGY,
+        description="突破策略 (20K高低)", enabled=False,
+        file_path="scripts/builtin/breakout.py",
+    ),
+]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -534,6 +561,26 @@ def on_bar_complete(bar):
         bus.emit_sync("indicator_output", output)
 
 
+async def handle_toggle_script(ws, data: dict):
+    """前端: 啟用/停用 Script（Scripts 面板的開關）"""
+    script_id = data["id"]
+    meta = script_engine._scripts.get(script_id)
+    if not meta:
+        await ws.send_json({"type": "error", "message": f"找不到 script: {script_id}"})
+        return
+
+    if meta.enabled:
+        script_engine.disable_script(script_id)
+    else:
+        script_engine.enable_script(script_id)
+
+    await ws.send_json({
+        "type": "script_toggled",
+        "id": script_id,
+        "enabled": meta.enabled,
+    })
+
+
 async def on_strategy_signal(signal):
     """Script 策略產生訊號 → 自動下單"""
     await trade.place_order(
@@ -552,8 +599,10 @@ async def on_strategy_signal(signal):
 
 def setup():
     """註冊所有 Action Handler 和事件監聽"""
-    # 把主 event loop 存入 EventBus，確保 Shioaji callback 執行緒可以安全排程事件
-    bus.set_main_loop(asyncio.get_event_loop())
+    # 注意：main loop 改在 ui/server.py 的 FastAPI startup event 中設定
+    # （asyncio.get_running_loop()），因為這裡 uvicorn 尚未啟動，
+    # 此時呼叫 asyncio.get_event_loop() 拿到的不是 uvicorn 實際運行的 loop，
+    # 會導致 EventBus.emit_sync() 從子執行緒排程時找不到正確的 running loop。
 
     # WebSocket action handlers
     register_action("place_order", handle_place_order)
@@ -567,10 +616,15 @@ def setup():
     register_action("import_taifex", handle_import_taifex)
     register_action("broker_sync", handle_broker_sync)
     register_action("db_summary", handle_db_summary)
+    register_action("toggle_script", handle_toggle_script)
 
     # 事件接線
     bus.on("bar", on_bar_complete)
     bus.on("script_signal", on_strategy_signal)
+
+    # 載入內建 Script（指標 / 策略）
+    for meta in BUILTIN_SCRIPTS:
+        script_engine.load_script(meta)
 
     # 資料庫
     db.connect()

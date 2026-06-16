@@ -46,9 +46,14 @@ class BarBuilder:
         self.bus.on("tick", self.on_tick)
 
     def on_tick(self, tick: Tick) -> None:
-        """收到 Tick → 更新所有週期的 Bar"""
+        """收到 Tick → 更新所有週期的 Bar，並推送最新 M1 即時棒給前端"""
         for tf in self._timeframes:
             self._update_bar(tick, tf)
+
+        # 每次 tick 後推送最新 M1 即時棒（is_closed=False），讓前端可即時取得完整 OHLCV
+        m1_bar = self._building.get((tick.symbol, Timeframe.M1))
+        if m1_bar is not None and not m1_bar.is_closed:
+            self.bus.emit_sync("bar", m1_bar)
 
     def _update_bar(self, tick: Tick, tf: Timeframe) -> None:
         key = (tick.symbol, tf)
