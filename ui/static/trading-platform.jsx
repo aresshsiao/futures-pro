@@ -633,13 +633,11 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 }
 
 // ─── Order Panel (Lightning Order — Price Ladder) ───────────────────
-function OrderPanel({ brokerConfig, myBuyOrders, setMyBuyOrders, mySellOrders, setMySellOrders, stopBuys, setStopBuys, stopSells, setStopSells }) {
+function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, myBuyOrders, setMyBuyOrders, mySellOrders, setMySellOrders, stopBuys, setStopBuys, stopSells, setStopSells }) {
   const [qty, setQty] = useState(1);
-  const [symbol, setSymbol] = useState("TX");
   const [centerOnPrice, setCenterOnPrice] = useState(true); // 成交置中 toggle
   const scrollRef = useRef(null);
 
-  const currentPrice = 17535;
   const tickSize = 1;
 
   const ladderData = useMemo(() => {
@@ -722,12 +720,12 @@ function OrderPanel({ brokerConfig, myBuyOrders, setMyBuyOrders, mySellOrders, s
         borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
         <div style={{ display: "flex", gap: 2 }}>
-          {["TX", "MTX", "TE", "TF"].map(s => (
-            <button key={s} onClick={() => setSymbol(s)} style={{
-              padding: "3px 8px", fontSize: 10, fontWeight: symbol === s ? 700 : 400,
-              background: symbol === s ? "rgba(59,130,246,0.15)" : "transparent",
-              border: `1px solid ${symbol === s ? COLORS.accent : COLORS.border}`,
-              color: symbol === s ? COLORS.accent : COLORS.textDim, borderRadius: 3, cursor: "pointer"
+          {["TX", "MTX", "TMF"].map(s => (
+            <button key={s} onClick={() => setActiveSymbol(s)} style={{
+              padding: "3px 8px", fontSize: 10, fontWeight: activeSymbol === s ? 700 : 400,
+              background: activeSymbol === s ? "rgba(59,130,246,0.15)" : "transparent",
+              border: `1px solid ${activeSymbol === s ? COLORS.accent : COLORS.border}`,
+              color: activeSymbol === s ? COLORS.accent : COLORS.textDim, borderRadius: 3, cursor: "pointer"
             }}>{s}</button>
           ))}
         </div>
@@ -1814,7 +1812,9 @@ function BacktestPage({ scripts }) {
 export default function TradingPlatform() {
   const [page, setPage] = useState("trading");
   const [klineData, setKlineData] = useState([]);
-  const [activeSymbol, setActiveSymbol] = useState("TX");
+  const [chartSymbol, setChartSymbol] = useState("TX");
+  const [orderSymbol, setOrderSymbol] = useState("TX");
+  const [latestPrices, setLatestPrices] = useState({});
   const [scripts, setScripts] = useState([]);
   const wsUrl = `ws://${window.location.host}/ws`;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
@@ -1845,7 +1845,7 @@ export default function TradingPlatform() {
       .then(cfg => {
         if (Array.isArray(cfg.scripts)) setScripts(cfg.scripts);
       })
-      .catch(() => {}); // 取不到就維持空清單
+      .catch(() => { }); // 取不到就維持空清單
   }, []);
 
   useEffect(() => {
@@ -1856,7 +1856,7 @@ export default function TradingPlatform() {
           setCandleColorScheme(cfg.candle_color_scheme);
         }
       })
-      .catch(() => {}); // 取不到設定就沿用預設值
+      .catch(() => { }); // 取不到設定就沿用預設值
   }, []);
 
   // 在每次渲染前套用漲跌顏色慣例，讓所有子元件（K棒、損益、多空標籤…）讀到一致的顏色
@@ -1925,7 +1925,7 @@ export default function TradingPlatform() {
   const liveM1BarRef = useRef(null);
   useEffect(() => { liveM1BarRef.current = liveM1Bar; }, [liveM1Bar]);
   // 切換商品時重置即時棒
-  useEffect(() => { setLiveM1Bar(null); }, [activeSymbol]);
+  useEffect(() => { setLiveM1Bar(null); }, [chartSymbol]);
 
   // 成交量語音提示：當前棒的量跨越設定的水平線時播報一次
   // （同一根棒內每個門檻只播一次，新的一根棒開始後重新計算）
@@ -1955,7 +1955,7 @@ export default function TradingPlatform() {
   useEffect(() => {
     if (!connected) return;
     // 訂閱即時報價（後端 QuoteModule 已連線才有效，未連線也不影響）
-    send("subscribe", { symbol: activeSymbol });
+    send("subscribe", { symbol: chartSymbol });
 
     const isLarge = ["日", "周", "月"].includes(timeframe);
     let reqCount = 2000;
@@ -1966,23 +1966,41 @@ export default function TradingPlatform() {
       reqCount = 500;
     }
     send("get_history", {
-      symbol: activeSymbol,
+      symbol: chartSymbol,
       timeframe,
       count: reqCount,
     });
-  }, [connected, activeSymbol, timeframe]);
+  }, [connected, chartSymbol, timeframe]);
+
+  useEffect(() => {
+    if (!connected) return;
+    send("subscribe", { symbol: orderSymbol });
+    send("get_history", { symbol: orderSymbol, timeframe: "1", count: 1 });
+  }, [connected, orderSymbol]);
 
   // 後端回傳歷史資料
   useEffect(() => {
     return addHandler("history_bars", (msg) => {
       if (msg.bars && msg.bars.length > 0) {
-        if (["日", "周", "月"].includes(msg.timeframe)) {
-          setKlineData(msg.bars);
-          setRawM1([]);
-        } else {
-          setRawM1(msg.bars);
+        const lastClose = msg.bars[msg.bars.length - 1].close;
+        setLatestPrices(prev => ({ ...prev, [msg.symbol]: lastClose }));
+
+        if (msg.symbol === chartSymbol) {
+          if (["日", "周", "月"].includes(msg.timeframe)) {
+            setKlineData(msg.bars);
+            setRawM1([]);
+          } else {
+            setRawM1(msg.bars);
+          }
         }
       }
+    });
+  }, [addHandler, chartSymbol]);
+
+  // 即時 tick 事件（券商原始即時報價，更新最新價格）
+  useEffect(() => {
+    return addHandler("tick", (msg) => {
+      setLatestPrices(prev => ({ ...prev, [msg.symbol]: msg.price }));
     });
   }, [addHandler]);
 
@@ -1991,7 +2009,8 @@ export default function TradingPlatform() {
   // is_closed=false → 正在成形的 M1 即時棒，更新 liveM1Bar
   useEffect(() => {
     return addHandler("bar", (msg) => {
-      if (msg.symbol !== activeSymbol) return;
+      setLatestPrices(prev => ({ ...prev, [msg.symbol]: msg.close }));
+      if (msg.symbol !== chartSymbol) return;
 
       const barTimeMs = new Date(msg.timestamp).getTime();
 
@@ -2046,7 +2065,7 @@ export default function TradingPlatform() {
         });
       }
     });
-  }, [addHandler, activeSymbol, timeframe]);
+  }, [addHandler, chartSymbol, timeframe]);
 
   // liveM1Bar 變化時更新 klineData 當前棒（取代舊的 tick handler）
   // liveM1Bar 來自 BarBuilder 推送的 is_closed=false M1 棒，OHLCV 完全正確
@@ -2256,8 +2275,16 @@ export default function TradingPlatform() {
                   )}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <select value={chartSymbol} onChange={(e) => setChartSymbol(e.target.value)} style={{
+                    background: COLORS.bgCard, border: `1px solid ${COLORS.border}`, borderRadius: 4,
+                    color: COLORS.text, fontSize: 14, fontWeight: 700, padding: "2px 4px", outline: "none", cursor: "pointer"
+                  }}>
+                    <option value="TX">TX</option>
+                    <option value="MTX">MTX</option>
+                    <option value="TMF">TMF</option>
+                  </select>
                   <span style={{ color: COLORS.text, fontWeight: 700, fontFamily: "monospace", fontSize: 16 }}>
-                    {activeSymbol} {klineData[klineData.length - 1]?.close ?? "--"}
+                    {latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? "--"}
                   </span>
                   <span style={{
                     color: klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? COLORS.up : COLORS.down,
@@ -2327,6 +2354,8 @@ export default function TradingPlatform() {
               {/* 閃電下單 - 50% */}
               <div style={{ ...panelStyle, flex: 5, display: "flex", flexDirection: "column", minHeight: 0 }}>
                 <OrderPanel brokerConfig={brokerConfig}
+                  currentPrice={latestPrices[orderSymbol] ?? 17535}
+                  activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
                   myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
                   mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
                   stopBuys={stopBuys} setStopBuys={setStopBuys}
