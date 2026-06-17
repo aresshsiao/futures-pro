@@ -633,7 +633,7 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 }
 
 // ─── Order Panel (Lightning Order — Price Ladder) ───────────────────
-function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, myBuyOrders, setMyBuyOrders, mySellOrders, setMySellOrders, stopBuys, setStopBuys, stopSells, setStopSells }) {
+function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, myBuyOrders, setMyBuyOrders, mySellOrders, setMySellOrders, stopBuys, setStopBuys, stopSells, setStopSells }) {
   const [qty, setQty] = useState(1);
   const [centerOnPrice, setCenterOnPrice] = useState(true); // 成交置中 toggle
   const scrollRef = useRef(null);
@@ -644,31 +644,27 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
     const rows = [];
     // 成交價往上200 tick, 往下200 tick = 總共401個價格
     const topPrice = currentPrice + 200 * tickSize;
+
+    const bidMap = {};
+    const askMap = {};
+    if (orderbook) {
+      orderbook.bids.forEach(b => { bidMap[b.price] = b.qty; });
+      orderbook.asks.forEach(a => { askMap[a.price] = a.qty; });
+    }
+
     for (let i = 0; i < 401; i++) {
       const price = topPrice - i * tickSize;
       const isBid = price < currentPrice;
       const isAsk = price > currentPrice;
       const isCurrent = price === currentPrice;
-      let bidQty = 0, askQty = 0;
-      // 只在成交價附近顯示委買委賣數量
-      if (isAsk && price <= currentPrice + 10) {
-        if (price === currentPrice + 1) askQty = 5;
-        else if (price === currentPrice + 2) askQty = 10;
-        else if (price === currentPrice + 3) askQty = 1;
-        else if (price <= currentPrice + 6) askQty = Math.floor(Math.random() * 15) + 1;
-      }
-      if (isBid && price >= currentPrice - 10) {
-        if (price === currentPrice - 1) bidQty = 3;
-        else if (price === currentPrice - 2) bidQty = 8;
-        else if (price === currentPrice - 3) bidQty = 8;
-        else if (price === currentPrice - 4) bidQty = 7;
-        else if (price === currentPrice - 5) bidQty = 5;
-        else if (price >= currentPrice - 10) bidQty = Math.floor(Math.random() * 6);
-      }
+      
+      let bidQty = bidMap[price] || 0;
+      let askQty = askMap[price] || 0;
+
       rows.push({ price, bidQty, askQty, isBid, isAsk, isCurrent });
     }
     return rows;
-  }, [currentPrice]);
+  }, [currentPrice, orderbook]);
 
   const maxQty = Math.max(...ladderData.map(r => Math.max(r.bidQty, r.askQty)), 1);
 
@@ -1815,6 +1811,7 @@ export default function TradingPlatform() {
   const [chartSymbol, setChartSymbol] = useState("TX");
   const [orderSymbol, setOrderSymbol] = useState("TX");
   const [latestPrices, setLatestPrices] = useState({});
+  const [orderbooks, setOrderbooks] = useState({});
   const [scripts, setScripts] = useState([]);
   const wsUrl = `ws://${window.location.host}/ws`;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
@@ -2001,6 +1998,14 @@ export default function TradingPlatform() {
   useEffect(() => {
     return addHandler("tick", (msg) => {
       setLatestPrices(prev => ({ ...prev, [msg.symbol]: msg.price }));
+    });
+  }, [addHandler]);
+
+  // 五檔報價
+  useEffect(() => {
+    return addHandler("orderbook", (msg) => {
+      console.log("orderbook received", msg);
+      setOrderbooks(prev => ({ ...prev, [msg.symbol]: msg }));
     });
   }, [addHandler]);
 
@@ -2355,6 +2360,7 @@ export default function TradingPlatform() {
               <div style={{ ...panelStyle, flex: 5, display: "flex", flexDirection: "column", minHeight: 0 }}>
                 <OrderPanel brokerConfig={brokerConfig}
                   currentPrice={latestPrices[orderSymbol] ?? 17535}
+                  orderbook={orderbooks[orderSymbol]}
                   activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
                   myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
                   mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}

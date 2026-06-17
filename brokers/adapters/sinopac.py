@@ -76,19 +76,27 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 cb = self._book_callbacks.get(symbol)
                 if cb is None:
                     return
+                logger.debug("[SinoPac] bidask %s: %s", symbol, bidask)
+                try:
+                    bids_list = []
+                    if hasattr(bidask, "bid_price") and hasattr(bidask, "bid_volume"):
+                        for i in range(min(5, len(bidask.bid_price))):
+                            bids_list.append(OrderBookLevel(price=float(bidask.bid_price[i]), qty=int(bidask.bid_volume[i])))
+                    
+                    asks_list = []
+                    if hasattr(bidask, "ask_price") and hasattr(bidask, "ask_volume"):
+                        for i in range(min(5, len(bidask.ask_price))):
+                            asks_list.append(OrderBookLevel(price=float(bidask.ask_price[i]), qty=int(bidask.ask_volume[i])))
+                except Exception as e:
+                    logger.error("Error parsing bidask: %s", e)
+                    bids_list = []
+                    asks_list = []
+
                 book = OrderBook(
                     symbol=symbol,
                     timestamp=datetime.now(),
-                    bids=[
-                        OrderBookLevel(price=float(getattr(bidask, f"bid_price_{i+1}", 0)),
-                                       qty=int(getattr(bidask, f"bid_volume_{i+1}", 0)))
-                        for i in range(5)
-                    ],
-                    asks=[
-                        OrderBookLevel(price=float(getattr(bidask, f"ask_price_{i+1}", 0)),
-                                       qty=int(getattr(bidask, f"ask_volume_{i+1}", 0)))
-                        for i in range(5)
-                    ],
+                    bids=bids_list,
+                    asks=asks_list,
                 )
                 cb(book)
 
@@ -215,7 +223,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
 
     def _get_contract(self, symbol: str):
         """將系統代碼轉換為 Shioaji contract"""
-        SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TE": "EXF", "TF": "FXF"}
+        SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:
             return self._api.Contracts.Futures[sj_symbol][sj_symbol + "R1"]  # 近月主力, e.g. TXFR1
@@ -224,7 +232,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             return None
 
     # Shioaji tick 的 code 欄位格式如 "TXFR1"、"MXFR1"，轉回系統代碼
-    _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "EXF": "TE", "FXF": "TF"}
+    _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "TMF": "TMF"}
 
     def _code_to_symbol(self, code: str) -> str | None:
         """將 Shioaji code（如 TXFR1）轉回系統商品代碼（如 TX）"""
@@ -356,7 +364,7 @@ class SinoPacTradeAdapter(TradeAdapter):
         return []
 
     def _get_contract(self, symbol):
-        SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TE": "EXF", "TF": "FXF"}
+        SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:
             return self._api.Contracts.Futures[sj_symbol][sj_symbol + "R1"]
