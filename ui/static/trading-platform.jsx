@@ -545,12 +545,13 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 
   const pathData = useMemo(() => {
     if (!data || data.length === 0) return "";
+    const len = data.length;
     const minP = Math.min(...data.map(d => d.close));
     const maxP = Math.max(...data.map(d => d.close));
     const range = maxP - minP || 1;
     let path = "";
-    for (let i = 0; i < data.length; i++) {
-      const x = (i / (data.length - 1)) * 100;
+    for (let i = 0; i < len; i++) {
+      const x = len > 1 ? (i / (len - 1)) * 100 : 50;
       const y = 90 - ((data[i].close - minP) / range) * 80;
       path += `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)} `;
     }
@@ -1100,39 +1101,18 @@ function TradeHistoryPanel() {
 
 // ─── Broker Config Panel ──────────────────────────────────────────────
 function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHandler }) {
-  // 以 BROKER_LIST 為基礎，connected 由後端實際狀態決定
-  const [brokers, setBrokers] = useState(
-    BROKER_LIST.map(b => ({ ...b, status: "disconnected" }))
-  );
+  const brokers = BROKER_LIST.map(b => ({
+    ...b,
+    status: (brokerConfig.quote.connected && brokerConfig.quote.name === b.name) ? "connected" : "disconnected"
+  }));
   const [pending, setPending] = useState(null); // 正在連線/斷線的 broker_id
   const [message, setMessage] = useState(null); // { text, ok }
-
-  // 初始化：查詢後端目前連線狀態
-  useEffect(() => {
-    const cleanup = addHandler("broker_status", (msg) => {
-      const connectedId = msg.quote?.broker_id;
-      setBrokers(bs => bs.map(b => ({
-        ...b,
-        status: b.id === connectedId && msg.quote?.connected ? "connected" : "disconnected",
-      })));
-    });
-    send("broker_status", {});
-    return cleanup;
-  }, [send, addHandler]);
 
   // 連線/斷線結果回調
   useEffect(() => {
     const cleanup = addHandler("broker_config_result", (msg) => {
       setPending(null);
       setMessage({ text: msg.message, ok: msg.success });
-      if (msg.success) {
-        setBrokers(bs => bs.map(b => ({
-          ...b,
-          status: b.id === msg.broker_id
-            ? (msg.connected ? "connected" : "disconnected")
-            : b.status,
-        })));
-      }
     });
     return cleanup;
   }, [addHandler]);
@@ -1778,24 +1758,30 @@ function BacktestPage({ scripts }) {
               {[0, 1, 2, 3, 4].map(i => (
                 <line key={i} x1="0" y1={i * 55} x2="800" y2={i * 55} stroke={COLORS.border} strokeWidth="0.5" />
               ))}
-              <path d={
-                result.equity.map((p, i) => {
-                  const x = (i / (result.equity.length - 1)) * 800;
-                  const minY = Math.min(...result.equity.map(e => e.y));
-                  const maxY = Math.max(...result.equity.map(e => e.y));
-                  const y = 210 - ((p.y - minY) / (maxY - minY)) * 200;
-                  return `${i === 0 ? "M" : "L"} ${x} ${y}`;
-                }).join(" ")
-              } fill="none" stroke={COLORS.up} strokeWidth="2" />
-              <path d={
-                result.equity.map((p, i) => {
-                  const x = (i / (result.equity.length - 1)) * 800;
-                  const minY = Math.min(...result.equity.map(e => e.y));
-                  const maxY = Math.max(...result.equity.map(e => e.y));
-                  const y = 210 - ((p.y - minY) / (maxY - minY)) * 200;
-                  return `${i === 0 ? "M" : "L"} ${x} ${y}`;
-                }).join(" ") + " L 800 220 L 0 220 Z"
-              } fill="url(#eqGrad)" />
+              <path d={(() => {
+                if (!result.equity || result.equity.length === 0) return "";
+                const len = result.equity.length;
+                const minY = Math.min(...result.equity.map(e => e.y));
+                const maxY = Math.max(...result.equity.map(e => e.y));
+                const yRange = maxY - minY || 1;
+                return result.equity.map((p, i) => {
+                  const x = len > 1 ? (i / (len - 1)) * 800 : 400;
+                  const y = 210 - ((p.y - minY) / yRange) * 200;
+                  return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+                }).join(" ");
+              })()} fill="none" stroke={COLORS.up} strokeWidth="2" />
+              <path d={(() => {
+                if (!result.equity || result.equity.length === 0) return "";
+                const len = result.equity.length;
+                const minY = Math.min(...result.equity.map(e => e.y));
+                const maxY = Math.max(...result.equity.map(e => e.y));
+                const yRange = maxY - minY || 1;
+                return result.equity.map((p, i) => {
+                  const x = len > 1 ? (i / (len - 1)) * 800 : 400;
+                  const y = 210 - ((p.y - minY) / yRange) * 200;
+                  return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+                }).join(" ") + " L 800 220 L 0 220 Z";
+              })()} fill="url(#eqGrad)" />
             </svg>
           </div>
         </>
@@ -2054,6 +2040,12 @@ export default function TradingPlatform() {
   useEffect(() => {
     if (!connected) return;
     send("broker_status", {});
+
+    // 自動登入上次成功連線的券商
+    const autoBroker = localStorage.getItem("autoConnectBrokerId");
+    if (autoBroker) {
+      send("broker_config", { action: "connect", broker_id: autoBroker });
+    }
   }, [connected, send]);
 
   useEffect(() => {
@@ -2071,7 +2063,16 @@ export default function TradingPlatform() {
         }));
       }
     });
-    return () => { handle1(); handle2(); };
+    const handle3 = addHandler("broker_config_result", (msg) => {
+      if (msg.success) {
+        if (msg.connected) {
+          localStorage.setItem("autoConnectBrokerId", msg.broker_id);
+        } else {
+          localStorage.removeItem("autoConnectBrokerId");
+        }
+      }
+    });
+    return () => { handle1(); handle2(); handle3(); };
   }, [addHandler]);
   const [clock, setClock] = useState("");
 
@@ -2182,7 +2183,6 @@ export default function TradingPlatform() {
   // 五檔報價
   useEffect(() => {
     return addHandler("orderbook", (msg) => {
-      console.log("orderbook received", msg);
       setOrderbooks(prev => ({ ...prev, [msg.symbol]: msg }));
     });
   }, [addHandler]);
