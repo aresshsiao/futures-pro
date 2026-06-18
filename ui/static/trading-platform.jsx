@@ -1791,16 +1791,16 @@ function BacktestPage({ scripts }) {
 }
 
 // ─── Options T-Quote Component ───────────────────────────────────────
-function OptionsTQuote({ brokerConfig, currentPrice = 0, onClose, send, addHandler }) {
+function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, send, addHandler }) {
   const scrollRef = useRef(null);
   const [months, setMonths] = useState([]);
   const [selectedContract, setSelectedContract] = useState("");
   const [quoteData, setQuoteData] = useState([]);
 
-  // Fetch months on mount
+  // Fetch months on mount or when connection is established
   useEffect(() => {
-    if (send) send("get_options_months", { symbol: "TXO" });
-  }, [send]);
+    if (send && connected) send("get_options_months", { symbol: "TXO" });
+  }, [send, connected]);
 
   // Handle WebSocket messages
   useEffect(() => {
@@ -2424,6 +2424,7 @@ export default function TradingPlatform() {
             <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}>
               <OptionsTQuote
                 brokerConfig={brokerConfig}
+                connected={connected}
                 currentPrice={latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? 46465}
                 onClose={() => setShowTQuote(false)}
                 send={send}

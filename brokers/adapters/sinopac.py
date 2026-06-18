@@ -251,8 +251,9 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             if symbol != "TXO":
                 return []
             contracts = self._api.Contracts.Options.TXO
-            # 過濾掉已經到期或是異常的月份
+            # 過濾掉已經到期或是異常的月份 (Shioaji 的 delivery_month 包含週選例如 202606W1)
             months = sorted(list(set([c.delivery_month for c in contracts if c.delivery_month])))
+            logger.info("[SinoPac] get_options_months found %d contracts, %d unique delivery_months", len(contracts), len(months))
             return months
         except Exception as e:
             logger.error("[SinoPac] get_options_months error: %s", e)
@@ -268,10 +269,13 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             
             contracts = [c for c in self._api.Contracts.Options.TXO if c.delivery_month == month]
             if not contracts:
+                logger.warning("[SinoPac] get_options_t_quote found NO contracts for month %s", month)
                 return []
             
+            logger.info("[SinoPac] get_options_t_quote fetching snapshots for %d contracts (month: %s)...", len(contracts), month)
             # Snapshots
             snapshots = self._api.snapshots(contracts)
+            logger.info("[SinoPac] get_options_t_quote received %d snapshots", len(snapshots))
             # Organise by strike price
             strikes = {}
             for contract, snap in zip(contracts, snapshots):
@@ -279,10 +283,10 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 if s not in strikes:
                     strikes[s] = {"strike": s, "callPrice": 0, "callChange": 0, "putPrice": 0, "putChange": 0}
                 
-                # 如果還沒有成交，使用參考價
-                price = snap.close if snap.close > 0 else snap.reference
-                # 漲跌
-                change = snap.close - snap.reference if snap.close > 0 else 0
+                # 如果還沒有成交，則預設為 0
+                price = snap.close if snap.close > 0 else 0
+                # 漲跌 (因為 Snapshot 沒有 reference，先計算相對於開盤價的漲跌或直接放 0)
+                change = 0 # 暫時先放 0，後續有需要可以算 snap.close - snap.previous_close 等
                 
                 if contract.option_right == sj.constant.CallPut.Call:
                     strikes[s]["callPrice"] = price
