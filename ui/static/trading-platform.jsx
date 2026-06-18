@@ -657,7 +657,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       const isBid = price < currentPrice;
       const isAsk = price > currentPrice;
       const isCurrent = price === currentPrice;
-      
+
       let bidQty = bidMap[price] || 0;
       let askQty = askMap[price] || 0;
 
@@ -1804,6 +1804,118 @@ function BacktestPage({ scripts }) {
   );
 }
 
+// ─── Options T-Quote Component ───────────────────────────────────────
+const MOCK_OPTIONS_DATA = [
+  { strike: 46200, callPrice: 710, callChange: 25, putPrice: 185, putChange: -55 },
+  { strike: 46250, callPrice: 670, callChange: 20, putPrice: 205, putChange: -52 },
+  { strike: 46300, callPrice: 630, callChange: 15, putPrice: 230, putChange: -50 },
+  { strike: 46350, callPrice: 590, callChange: 10, putPrice: 260, putChange: -48 },
+  { strike: 46400, callPrice: 550, callChange: 5, putPrice: 290, putChange: -45 },
+  { strike: 46450, callPrice: 510, callChange: 0, putPrice: 327, putChange: -44 },
+  { strike: 46500, callPrice: 470, callChange: -5, putPrice: 347, putChange: -41 },
+  { strike: 46550, callPrice: 435, callChange: -9, putPrice: 364, putChange: -46 },
+  { strike: 46600, callPrice: 400, callChange: -12, putPrice: 383, putChange: -47 },
+  { strike: 46650, callPrice: 365, callChange: -15, putPrice: 404, putChange: -50 },
+  { strike: 46700, callPrice: 330, callChange: -18, putPrice: 427, putChange: -48 },
+  { strike: 46750, callPrice: 300, callChange: -20, putPrice: 451, putChange: -49 },
+  { strike: 46800, callPrice: 270, callChange: -22, putPrice: 479, putChange: -46 },
+  { strike: 46850, callPrice: 245, callChange: -25, putPrice: 500, putChange: -50 },
+  { strike: 46900, callPrice: 220, callChange: -28, putPrice: 565, putChange: -20 },
+  { strike: 46950, callPrice: 200, callChange: -30, putPrice: 595, putChange: -10 },
+  { strike: 47000, callPrice: 180, callChange: -32, putPrice: 590, putChange: -45 },
+];
+
+function OptionsTQuote({ currentPrice = 46465, onClose }) {
+  const scrollRef = useRef(null);
+
+  // Auto-scroll to ATM
+  useEffect(() => {
+    if (scrollRef.current && MOCK_OPTIONS_DATA.length > 0) {
+      const atmIndex = MOCK_OPTIONS_DATA.reduce((closestIdx, row, idx) => {
+        const closestDiff = Math.abs(MOCK_OPTIONS_DATA[closestIdx].strike - currentPrice);
+        const currentDiff = Math.abs(row.strike - currentPrice);
+        return currentDiff < closestDiff ? idx : closestIdx;
+      }, 0);
+      
+      const rowHeight = 26;
+      const headerHeight = 28;
+      const containerHeight = scrollRef.current.clientHeight;
+      const scrollTop = (atmIndex * rowHeight) - (containerHeight / 2) + (rowHeight / 2) + headerHeight;
+      scrollRef.current.scrollTop = Math.max(0, scrollTop);
+    }
+  }, [currentPrice]);
+
+  const T_GRID = "45px 55px 60px 55px 45px";
+
+  const renderValue = (val) => {
+    if (val === undefined || val === null) return "--";
+    return val.toFixed(1);
+  };
+
+  const renderChange = (change) => {
+    if (change === undefined || change === null) return "--";
+    const color = change > 0 ? COLORS.up : change < 0 ? COLORS.down : COLORS.text;
+    return <span style={{ color }}>{change > 0 ? `+${change}` : change}</span>;
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: COLORS.bgCard, borderRadius: 8, border: `1px solid ${COLORS.border}` }}>
+      {/* Header Info */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>台指選擇權 (TXO)</span>
+          <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>剩 5 天</span>
+        </div>
+        {onClose && (
+          <button onClick={onClose} style={{ background: "none", border: "none", color: COLORS.textDim, cursor: "pointer", fontSize: 14 }}>✕</button>
+        )}
+      </div>
+      
+      {/* Underlying Info */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "6px", background: COLORS.bgPanel, borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, fontSize: 11 }}>
+        <span style={{ color: COLORS.textMuted }}>加權指數</span>
+        <span style={{ color: COLORS.up, fontWeight: 700 }}>46465.20</span>
+        <span style={{ color: COLORS.up }}>587.81 ▲</span>
+        <span style={{ color: COLORS.up }}>1.28%</span>
+      </div>
+
+      {/* Main Headers */}
+      <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, background: COLORS.bgPanel }}>
+        <div style={{ width: "40%", textAlign: "center", color: COLORS.up, fontWeight: 700, fontSize: 12 }}>買權 Call</div>
+        <div style={{ width: "20%", textAlign: "center", color: "#facc15", fontWeight: 700, fontSize: 11, border: `1px solid rgba(250,204,21,0.5)`, borderRadius: 4, background: "rgba(250,204,21,0.1)" }}>202606</div>
+        <div style={{ width: "40%", textAlign: "center", color: COLORS.down, fontWeight: 700, fontSize: 12 }}>賣權 Put</div>
+      </div>
+
+      {/* Column Headers */}
+      <div style={{ display: "grid", gridTemplateColumns: T_GRID, borderBottom: `1px solid ${COLORS.border}`, padding: "4px 0", flexShrink: 0, background: COLORS.bgPanel, fontSize: 10, color: COLORS.textMuted, fontWeight: 600 }}>
+        <div style={{ textAlign: "center" }}>漲跌</div>
+        <div style={{ textAlign: "center" }}>成交價</div>
+        <div style={{ textAlign: "center" }}>履約價</div>
+        <div style={{ textAlign: "center" }}>成交價</div>
+        <div style={{ textAlign: "center" }}>漲跌</div>
+      </div>
+
+      {/* Rows */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+        {MOCK_OPTIONS_DATA.map((row) => {
+          const diffToAtm = Math.abs(row.strike - currentPrice);
+          const isAtm = diffToAtm < 25;
+          
+          return (
+            <div key={row.strike} style={{ display: "grid", gridTemplateColumns: T_GRID, alignItems: "center", height: 26, borderBottom: `1px solid ${COLORS.border}15`, fontSize: 11, fontFamily: "monospace", fontWeight: 600 }}>
+              <div style={{ textAlign: "center", paddingRight: 4 }}>{renderChange(row.callChange)}</div>
+              <div style={{ textAlign: "center", color: COLORS.up }}>{renderValue(row.callPrice)}</div>
+              <div style={{ textAlign: "center", background: isAtm ? "rgba(250,204,21,0.15)" : "rgba(255,255,255,0.03)", color: isAtm ? "#facc15" : COLORS.text, borderLeft: `1px solid ${COLORS.border}`, borderRight: `1px solid ${COLORS.border}` }}>{row.strike}</div>
+              <div style={{ textAlign: "center", color: COLORS.down }}>{renderValue(row.putPrice)}</div>
+              <div style={{ textAlign: "center", paddingLeft: 4 }}>{renderChange(row.putChange)}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ────────────────────────────────────────────────────────
 export default function TradingPlatform() {
   const [page, setPage] = useState("trading");
@@ -1816,6 +1928,7 @@ export default function TradingPlatform() {
   const wsUrl = `ws://${window.location.host}/ws`;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
   const [showBrokerConfig, setShowBrokerConfig] = useState(false);
+  const [showTQuote, setShowTQuote] = useState(true);
   const [brokerConfig, setBrokerConfig] = useState({
     quote: { name: "未連線", connected: false },
     trade: { name: "未連線", connected: false }
@@ -2245,6 +2358,13 @@ export default function TradingPlatform() {
         )}
         {page === "trading" && (
           <div style={{ display: "flex", height: "100%", padding: 8, gap: 8 }}>
+            {/* 選擇權 T字報價表 - 放在左側 */}
+            {showTQuote && (
+              <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+                <OptionsTQuote currentPrice={latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? 46465} onClose={() => setShowTQuote(false)} />
+              </div>
+            )}
+
             {/* Left: Technical Analysis — stacked vertically */}
             <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
               {/* Header bar with price info and timeframe selector */}
@@ -2253,6 +2373,15 @@ export default function TradingPlatform() {
                 padding: "0 12px", height: 34, flexShrink: 0
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {/* T字報價切換按鈕 */}
+                  <button onClick={() => setShowTQuote(!showTQuote)} style={{
+                    padding: "3px 8px", fontSize: 10, fontWeight: showTQuote ? 700 : 400,
+                    background: showTQuote ? "rgba(59,130,246,0.15)" : "transparent",
+                    border: `1px solid ${showTQuote ? COLORS.accent : COLORS.border}`,
+                    color: showTQuote ? COLORS.accent : COLORS.textDim, borderRadius: 3, cursor: "pointer", marginRight: 8,
+                    transition: "all 0.15s"
+                  }}>📊 T字報價</button>
+
                   {/* Timeframe selector */}
                   <div style={{ display: "flex", gap: 2, background: COLORS.bgCard, borderRadius: 4, padding: 2, border: `1px solid ${COLORS.border}` }}>
                     {["1", "3", "15", "60", "日", "周", "月"].map(tf => (
