@@ -23,12 +23,14 @@ from ui.server import app, register_action, script_engine
 # ── Logging ───────────────────────────────────────────
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, getattr(settings, "LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
 # sinopac adapter 的 tick debug log（確認 callback 有被觸發）
-logging.getLogger("brokers.adapters.sinopac").setLevel(logging.DEBUG)
+logging.getLogger("brokers.adapters.sinopac").setLevel(
+    getattr(logging, getattr(settings, "BROKER_LOG_LEVEL", "DEBUG").upper(), logging.DEBUG)
+)
 logger = logging.getLogger("main")
 
 # ── 全域模塊實例 ──────────────────────────────────────

@@ -2423,6 +2423,7 @@ export default function TradingPlatform() {
           {showTQuote && (
             <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}>
               <OptionsTQuote
+                brokerConfig={brokerConfig}
                 currentPrice={latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? 46465}
                 onClose={() => setShowTQuote(false)}
                 send={send}

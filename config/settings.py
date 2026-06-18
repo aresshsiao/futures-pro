@@ -15,6 +15,12 @@ SCRIPTS_BUILTIN_DIR = BASE_DIR / "scripts" / "builtin"
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8888
 
+# ── 日誌 Logging ─────────────────────────────────────
+# 系統預設的輸出等級 (INFO, DEBUG, WARNING, ERROR)
+LOG_LEVEL = "INFO"
+# 個別券商底層 API 的日誌等級（因報價跳動頻繁，若不想看到洗版可改為 INFO 或 WARNING）
+BROKER_LOG_LEVEL = "INFO"
+
 # ── 交易 ─────────────────────────────────────────────
 DEFAULT_SYMBOL = "TX"
 TICK_SIZE = {
