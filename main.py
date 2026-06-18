@@ -581,6 +581,32 @@ async def handle_toggle_script(ws, data: dict):
     })
 
 
+# ── 選擇權報價 (Options) ──────────────────────────
+
+async def handle_get_options_months(ws, data: dict):
+    """前端: 取得選擇權到期月份清單"""
+    symbol = data.get("symbol", "TXO")
+    months = await quote.get_options_months(symbol)
+    await ws.send_json({
+        "type": "options_months",
+        "symbol": symbol,
+        "months": months,
+    })
+
+
+async def handle_get_options_t_quote(ws, data: dict):
+    """前端: 取得選擇權 T 字報價快照"""
+    symbol = data.get("symbol", "TXO")
+    month = data.get("month", "")
+    t_quote_data = await quote.get_options_t_quote(symbol, month)
+    await ws.send_json({
+        "type": "options_t_quote",
+        "symbol": symbol,
+        "month": month,
+        "data": t_quote_data,
+    })
+
+
 async def on_strategy_signal(signal):
     """Script 策略產生訊號 → 自動下單"""
     await trade.place_order(
@@ -617,6 +643,8 @@ def setup():
     register_action("broker_sync", handle_broker_sync)
     register_action("db_summary", handle_db_summary)
     register_action("toggle_script", handle_toggle_script)
+    register_action("get_options_months", handle_get_options_months)
+    register_action("get_options_t_quote", handle_get_options_t_quote)
 
     # 事件接線
     bus.on("bar", on_bar_complete)

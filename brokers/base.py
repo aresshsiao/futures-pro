@@ -72,6 +72,18 @@ class QuoteAdapter(ABC):
         """取得歷史K線 (從券商API)"""
         ...
 
+    # ── 選擇權資料 (Options) ──────────────────────────
+
+    @abstractmethod
+    async def get_options_months(self, symbol: str = "TXO") -> list[str]:
+        """取得可交易的選擇權到期月份清單"""
+        ...
+
+    @abstractmethod
+    async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
+        """取得指定月份的所有選擇權 T 字報價 (含 Call/Put 快照)"""
+        ...
+
 
 class TradeAdapter(ABC):
     """

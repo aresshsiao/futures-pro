@@ -241,6 +241,62 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 return symbol
         return None
 
+    # ── 選擇權資料 ────────────────────────────────────
+
+    async def get_options_months(self, symbol: str = "TXO") -> list[str]:
+        if not self._api:
+            return []
+        try:
+            # 支援 TXO
+            if symbol != "TXO":
+                return []
+            contracts = self._api.Contracts.Options.TXO
+            # 過濾掉已經到期或是異常的月份
+            months = sorted(list(set([c.delivery_month for c in contracts if c.delivery_month])))
+            return months
+        except Exception as e:
+            logger.error("[SinoPac] get_options_months error: %s", e)
+            return []
+
+    async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
+        if not self._api:
+            return []
+        try:
+            import shioaji as sj
+            if symbol != "TXO":
+                return []
+            
+            contracts = [c for c in self._api.Contracts.Options.TXO if c.delivery_month == month]
+            if not contracts:
+                return []
+            
+            # Snapshots
+            snapshots = self._api.snapshots(contracts)
+            # Organise by strike price
+            strikes = {}
+            for contract, snap in zip(contracts, snapshots):
+                s = contract.strike_price
+                if s not in strikes:
+                    strikes[s] = {"strike": s, "callPrice": 0, "callChange": 0, "putPrice": 0, "putChange": 0}
+                
+                # 如果還沒有成交，使用參考價
+                price = snap.close if snap.close > 0 else snap.reference
+                # 漲跌
+                change = snap.close - snap.reference if snap.close > 0 else 0
+                
+                if contract.option_right == sj.constant.CallPut.Call:
+                    strikes[s]["callPrice"] = price
+                    strikes[s]["callChange"] = change
+                else:
+                    strikes[s]["putPrice"] = price
+                    strikes[s]["putChange"] = change
+                    
+            result = [strikes[s] for s in sorted(strikes.keys())]
+            return result
+        except Exception as e:
+            logger.exception("[SinoPac] get_options_t_quote error")
+            return []
+
 
 class SinoPacTradeAdapter(TradeAdapter):
     """永豐金 — 交易 Adapter"""

@@ -1825,15 +1825,61 @@ const MOCK_OPTIONS_DATA = [
   { strike: 47000, callPrice: 180, callChange: -32, putPrice: 590, putChange: -45 },
 ];
 
-function OptionsTQuote({ currentPrice = 46465, onClose }) {
+function OptionsTQuote({ currentPrice = 46465, onClose, send, addHandler }) {
   const scrollRef = useRef(null);
-  const [selectedContract, setSelectedContract] = useState("2026/06F3");
+  const [months, setMonths] = useState([]);
+  const [selectedContract, setSelectedContract] = useState("");
+  const [quoteData, setQuoteData] = useState([]);
+
+  // Fetch months on mount
+  useEffect(() => {
+    if (send) send("get_options_months", { symbol: "TXO" });
+  }, [send]);
+
+  // Handle WebSocket messages
+  useEffect(() => {
+    if (!addHandler) return;
+    const clean1 = addHandler("options_months", (msg) => {
+      if (msg.symbol === "TXO" && msg.months.length > 0) {
+        setMonths(msg.months);
+        if (!selectedContract) {
+          setSelectedContract(msg.months[0]);
+        }
+      }
+    });
+
+    const clean2 = addHandler("options_t_quote", (msg) => {
+      // Check if it's for the currently selected contract to avoid race conditions
+      setQuoteData(prev => {
+        // If the message is for the currently selected month, update it
+        return msg.data;
+      });
+    });
+
+    return () => { clean1(); clean2(); };
+  }, [addHandler, selectedContract]);
+
+  // When selectedContract changes, fetch data and poll every 3 seconds
+  useEffect(() => {
+    if (!selectedContract || !send) return;
+
+    // reset data when changing contract
+    setQuoteData([]);
+
+    const fetchQuotes = () => send("get_options_t_quote", { symbol: "TXO", month: selectedContract });
+    fetchQuotes();
+
+    const interval = setInterval(fetchQuotes, 3000);
+    return () => clearInterval(interval);
+  }, [selectedContract, send]);
+
+  const displayData = quoteData.length > 0 ? quoteData : MOCK_OPTIONS_DATA;
 
   // Auto-scroll to ATM
   useEffect(() => {
-    if (scrollRef.current && MOCK_OPTIONS_DATA.length > 0) {
-      const atmIndex = MOCK_OPTIONS_DATA.reduce((closestIdx, row, idx) => {
-        const closestDiff = Math.abs(MOCK_OPTIONS_DATA[closestIdx].strike - currentPrice);
+    if (scrollRef.current && displayData.length > 0) {
+      const atmIndex = displayData.reduce((closestIdx, row, idx) => {
+        const closestDiff = Math.abs(displayData[closestIdx].strike - currentPrice);
         const currentDiff = Math.abs(row.strike - currentPrice);
         return currentDiff < closestDiff ? idx : closestIdx;
       }, 0);
@@ -1844,17 +1890,17 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
       const scrollTop = (atmIndex * rowHeight) - (containerHeight / 2) + (rowHeight / 2) + headerHeight;
       scrollRef.current.scrollTop = Math.max(0, scrollTop);
     }
-  }, [currentPrice]);
+  }, [currentPrice, displayData.length]);
 
   const T_GRID = "45px 55px 60px 55px 45px";
 
   const renderValue = (val) => {
-    if (val === undefined || val === null) return "--";
+    if (val === undefined || val === null || val === 0) return "--";
     return val.toFixed(1);
   };
 
   const renderChange = (change) => {
-    if (change === undefined || change === null) return "--";
+    if (change === undefined || change === null || change === 0) return "--";
     const color = change > 0 ? COLORS.up : change < 0 ? COLORS.down : COLORS.text;
     return <span style={{ color }}>{change > 0 ? `+${change}` : change}</span>;
   };
@@ -1865,7 +1911,7 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>台指選擇權</span>
-          <select 
+          <select
             value={selectedContract}
             onChange={(e) => setSelectedContract(e.target.value)}
             style={{
@@ -1873,20 +1919,21 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
               fontSize: 12, fontWeight: 600, padding: "2px 4px", borderRadius: 4, outline: "none", cursor: "pointer"
             }}
           >
-            <option value="2026/06F3">2026/06F3</option>
-            <option value="2026/06W4">2026/06W4</option>
-            <option value="2026/06F4">2026/06F4</option>
-            <option value="2026/07W1">2026/07W1</option>
-            <option value="2026/07">2026/07</option>
-            <option value="2026/08">2026/08</option>
+            {months.length > 0 ? months.map(m => (
+              <option key={m} value={m}>{m}</option>
+            )) : (
+              <option value="2026/06F3">載入中...</option>
+            )}
           </select>
-          <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>剩 5 天</span>
+          <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>
+            {months.length > 0 ? "即時報價" : "模擬資料"}
+          </span>
         </div>
         {onClose && (
           <button onClick={onClose} style={{ background: "none", border: "none", color: COLORS.textDim, cursor: "pointer", fontSize: 14 }}>✕</button>
         )}
       </div>
-      
+
       {/* Underlying Info */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "6px", background: COLORS.bgPanel, borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, fontSize: 11 }}>
         <span style={{ color: COLORS.textMuted }}>加權指數</span>
@@ -1915,7 +1962,7 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
 
       {/* Rows */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-        {MOCK_OPTIONS_DATA.map((row) => {
+        {displayData.map((row) => {
           const diffToAtm = Math.abs(row.strike - currentPrice);
           const isAtm = diffToAtm < 25;
 
@@ -2366,175 +2413,184 @@ export default function TradingPlatform() {
       </div>
 
       {/* ─── Content ──────────────────────────────── */}
-      <div style={{ flex: 1, overflow: "hidden" }}>
-        {page === "database" && <DatabasePage send={send} addHandler={addHandler} />}
-        {page === "backtest" && <BacktestPage scripts={scripts} />}
-        {page === "scripts" && (
-          <div style={{ height: "100%", ...panelStyle, margin: 8, borderRadius: 8 }}>
-            <ScriptsPanel scripts={scripts} send={send} activeView="scripts" />
-          </div>
-        )}
-        {page === "trading" && (
-          <div style={{ display: "flex", height: "100%", padding: 8, gap: 8 }}>
-            {/* 選擇權 T字報價表 - 放在左側 */}
-            {showTQuote && (
-              <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}>
-                <OptionsTQuote currentPrice={latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? 46465} onClose={() => setShowTQuote(false)} />
-              </div>
-            )}
+      <div style={{ flex: 1, overflow: "hidden", position: "relative", display: "flex", flexDirection: "column" }}>
 
-            {/* Left: Technical Analysis — stacked vertically */}
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
-              {/* Header bar with price info and timeframe selector */}
-              <div style={{
-                ...panelStyle, display: "flex", justifyContent: "space-between", alignItems: "center",
-                padding: "0 12px", height: 34, flexShrink: 0
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {/* T字報價切換按鈕 */}
-                  <button onClick={() => setShowTQuote(!showTQuote)} style={{
-                    display: "flex", alignItems: "center", gap: 4,
-                    padding: "4px 8px", fontSize: 11, fontWeight: showTQuote ? 700 : 500,
-                    background: showTQuote ? "rgba(59,130,246,0.15)" : "transparent",
-                    border: `1px solid ${showTQuote ? COLORS.accent : COLORS.border}`,
-                    color: showTQuote ? COLORS.accent : COLORS.textDim, 
-                    borderRadius: 4, cursor: "pointer", transition: "all 0.15s",
-                    marginRight: 4 // 縮小間距
-                  }}>
-                    <span style={{ fontSize: 12 }}>📊</span> 期權
-                  </button>
+        <div style={{ display: page === "database" ? "block" : "none", height: "100%", overflow: "hidden" }}>
+          <DatabasePage send={send} addHandler={addHandler} />
+        </div>
 
-                  {/* Timeframe selector */}
-                  <div style={{ display: "flex", gap: 2, background: COLORS.bgCard, borderRadius: 4, padding: 2, border: `1px solid ${COLORS.border}` }}>
-                    {["1", "3", "15", "60", "日", "周", "月"].map(tf => (
-                      <button key={tf} onClick={() => setTimeframe(tf)} style={{
-                        padding: "3px 8px", fontSize: 10, fontWeight: timeframe === tf ? 700 : 400,
-                        background: timeframe === tf ? "rgba(59,130,246,0.15)" : "transparent",
-                        border: timeframe === tf ? `1px solid ${COLORS.accent}` : "1px solid transparent",
-                        color: timeframe === tf ? COLORS.accent : COLORS.textDim,
-                        borderRadius: 3, cursor: "pointer", transition: "all 0.15s"
-                      }}>{tf}{["1", "3", "15", "60"].includes(tf) ? "分" : ""}</button>
-                    ))}
-                  </div>
-                  {enabledIndicators.length > 0 && (
-                    <>
-                      <span style={{ color: COLORS.border }}>|</span>
-                      <div style={{ display: "flex", gap: 3 }}>
-                        {enabledIndicators.map(n => (
-                          <span key={n} style={{
-                            padding: "2px 6px", background: "rgba(59,130,246,0.1)",
-                            borderRadius: 3, color: COLORS.accent, fontSize: 9, fontWeight: 600
-                          }}>{n}</span>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <select value={chartSymbol} onChange={(e) => setChartSymbol(e.target.value)} style={{
-                    background: COLORS.bgCard, border: `1px solid ${COLORS.border}`, borderRadius: 4,
-                    color: COLORS.text, fontSize: 14, fontWeight: 700, padding: "2px 4px", outline: "none", cursor: "pointer"
-                  }}>
-                    <option value="TX">TX</option>
-                    <option value="MTX">MTX</option>
-                    <option value="TMF">TMF</option>
-                  </select>
-                  <span style={{ color: COLORS.text, fontWeight: 700, fontFamily: "monospace", fontSize: 16 }}>
-                    {latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? "--"}
-                  </span>
-                  <span style={{
-                    color: klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? COLORS.up : COLORS.down,
-                    fontSize: 11, fontWeight: 600
-                  }}>
-                    {klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? "▲" : "▼"}
-                    {Math.abs(klineData[klineData.length - 1]?.close - klineData[klineData.length - 2]?.close).toFixed(0)}
-                  </span>
-                </div>
-              </div>
+        <div style={{ display: page === "backtest" ? "block" : "none", height: "100%", overflow: "hidden" }}>
+          <BacktestPage scripts={scripts} />
+        </div>
 
-              {/* K-line chart — 60% */}
-              <div style={{ ...panelStyle, flex: 6, position: "relative", minHeight: 0 }}>
-                <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} visibleCount={visibleCount} setVisibleCount={setVisibleCount} offset={offset} setOffset={setOffset} setTooltip={setGlobalTooltip} />
-              </div>
+        <div style={{ display: page === "scripts" ? "block" : "none", height: "calc(100% - 16px)", ...panelStyle, margin: 8, borderRadius: 8 }}>
+          <ScriptsPanel scripts={scripts} send={send} activeView="scripts" />
+        </div>
 
-              {/* Volume — 30% */}
-              <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
-                <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
-              </div>
+        <div style={{ display: page === "trading" ? "flex" : "none", height: "100%", padding: 8, gap: 8, overflow: "hidden" }}>
+          {/* 選擇權 T字報價表 - 放在左側 */}
+          {showTQuote && (
+            <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+              <OptionsTQuote
+                currentPrice={latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? 46465}
+                onClose={() => setShowTQuote(false)}
+                send={send}
+                addHandler={addHandler}
+              />
+            </div>
+          )}
 
-              {/* Timeline Navigator */}
-              {klineData.length > 0 && (
-                <TimelineNavigator
-                  data={klineData}
-                  visibleCount={visibleCount}
-                  setVisibleCount={setVisibleCount}
-                  offset={offset}
-                  setOffset={setOffset}
-                />
-              )}
-
-              {/* Positions — 10% */}
-              <div style={{ ...panelStyle, flex: 1, minHeight: 0, overflowY: "auto" }}>
-                <div style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "4px 10px", borderBottom: `1px solid ${COLORS.border}`
+          {/* Left: Technical Analysis — stacked vertically */}
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+            {/* Header bar with price info and timeframe selector */}
+            <div style={{
+              ...panelStyle, display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "0 12px", height: 34, flexShrink: 0
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {/* T字報價切換按鈕 */}
+                <button onClick={() => setShowTQuote(!showTQuote)} style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  padding: "4px 8px", fontSize: 11, fontWeight: showTQuote ? 700 : 500,
+                  background: showTQuote ? "rgba(59,130,246,0.15)" : "transparent",
+                  border: `1px solid ${showTQuote ? COLORS.accent : COLORS.border}`,
+                  color: showTQuote ? COLORS.accent : COLORS.textDim,
+                  borderRadius: 4, cursor: "pointer", transition: "all 0.15s",
+                  marginRight: 4 // 縮小間距
                 }}>
-                  <span style={{ fontSize: 9, color: COLORS.textMuted, letterSpacing: 1, fontWeight: 600, textTransform: "uppercase" }}>庫存倉位</span>
-                  <span style={{
-                    fontSize: 11, fontFamily: "monospace", fontWeight: 700,
-                    color: MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0) >= 0 ? COLORS.up : COLORS.down
-                  }}>
-                    {MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0) >= 0 ? "+" : ""}
-                    {MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0).toLocaleString()}
-                  </span>
-                </div>
-                <div style={{ display: "flex", gap: 6, padding: "3px 8px", fontSize: 10, overflowX: "auto" }}>
-                  {MOCK_POSITIONS.map(p => (
-                    <div key={p.id} style={{
-                      display: "flex", alignItems: "center", gap: 6, padding: "2px 8px",
-                      background: COLORS.bgCard, borderRadius: 4, whiteSpace: "nowrap",
-                      border: `1px solid ${p.pnl >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`
-                    }}>
-                      <span style={{ color: COLORS.text, fontWeight: 600 }}>{p.symbol}</span>
-                      <span style={{ color: p.direction === "多" ? COLORS.up : COLORS.down, fontWeight: 600 }}>{p.direction}{p.qty}</span>
-                      <span style={{ color: p.pnl >= 0 ? COLORS.up : COLORS.down, fontFamily: "monospace", fontWeight: 600 }}>
-                        {p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString()}
-                      </span>
-                    </div>
+                  <span style={{ fontSize: 12 }}>📊</span> 期權
+                </button>
+
+                {/* Timeframe selector */}
+                <div style={{ display: "flex", gap: 2, background: COLORS.bgCard, borderRadius: 4, padding: 2, border: `1px solid ${COLORS.border}` }}>
+                  {["1", "3", "15", "60", "日", "周", "月"].map(tf => (
+                    <button key={tf} onClick={() => setTimeframe(tf)} style={{
+                      padding: "3px 8px", fontSize: 10, fontWeight: timeframe === tf ? 700 : 400,
+                      background: timeframe === tf ? "rgba(59,130,246,0.15)" : "transparent",
+                      border: timeframe === tf ? `1px solid ${COLORS.accent}` : "1px solid transparent",
+                      color: timeframe === tf ? COLORS.accent : COLORS.textDim,
+                      borderRadius: 3, cursor: "pointer", transition: "all 0.15s"
+                    }}>{tf}{["1", "3", "15", "60"].includes(tf) ? "分" : ""}</button>
                   ))}
                 </div>
+                {enabledIndicators.length > 0 && (
+                  <>
+                    <span style={{ color: COLORS.border }}>|</span>
+                    <div style={{ display: "flex", gap: 3 }}>
+                      {enabledIndicators.map(n => (
+                        <span key={n} style={{
+                          padding: "2px 6px", background: "rgba(59,130,246,0.1)",
+                          borderRadius: 3, color: COLORS.accent, fontSize: 9, fontWeight: 600
+                        }}>{n}</span>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <select value={chartSymbol} onChange={(e) => setChartSymbol(e.target.value)} style={{
+                  background: COLORS.bgCard, border: `1px solid ${COLORS.border}`, borderRadius: 4,
+                  color: COLORS.text, fontSize: 14, fontWeight: 700, padding: "2px 4px", outline: "none", cursor: "pointer"
+                }}>
+                  <option value="TX">TX</option>
+                  <option value="MTX">MTX</option>
+                  <option value="TMF">TMF</option>
+                </select>
+                <span style={{ color: COLORS.text, fontWeight: 700, fontFamily: "monospace", fontSize: 16 }}>
+                  {latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? "--"}
+                </span>
+                <span style={{
+                  color: klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? COLORS.up : COLORS.down,
+                  fontSize: 11, fontWeight: 600
+                }}>
+                  {klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? "▲" : "▼"}
+                  {Math.abs(klineData[klineData.length - 1]?.close - klineData[klineData.length - 2]?.close).toFixed(0)}
+                </span>
               </div>
             </div>
-            {/* Right: 閃電下單 (10/5) + 倉位/委託 (10/2) + 成交明細 (10/3) */}
-            <div style={{ width: 330, display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-              {/* 閃電下單 - 50% */}
-              <div style={{ ...panelStyle, flex: 5, display: "flex", flexDirection: "column", minHeight: 0 }}>
-                <OrderPanel brokerConfig={brokerConfig}
-                  currentPrice={latestPrices[orderSymbol] ?? 17535}
-                  orderbook={orderbooks[orderSymbol]}
-                  activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
-                  myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
-                  mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
-                  stopBuys={stopBuys} setStopBuys={setStopBuys}
-                  stopSells={stopSells} setStopSells={setStopSells}
-                />
+
+            {/* K-line chart — 60% */}
+            <div style={{ ...panelStyle, flex: 6, position: "relative", minHeight: 0 }}>
+              <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} visibleCount={visibleCount} setVisibleCount={setVisibleCount} offset={offset} setOffset={setOffset} setTooltip={setGlobalTooltip} />
+            </div>
+
+            {/* Volume — 30% */}
+            <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
+              <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
+            </div>
+
+            {/* Timeline Navigator */}
+            {klineData.length > 0 && (
+              <TimelineNavigator
+                data={klineData}
+                visibleCount={visibleCount}
+                setVisibleCount={setVisibleCount}
+                offset={offset}
+                setOffset={setOffset}
+              />
+            )}
+
+            {/* Positions — 10% */}
+            <div style={{ ...panelStyle, flex: 1, minHeight: 0, overflowY: "auto" }}>
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "4px 10px", borderBottom: `1px solid ${COLORS.border}`
+              }}>
+                <span style={{ fontSize: 9, color: COLORS.textMuted, letterSpacing: 1, fontWeight: 600, textTransform: "uppercase" }}>庫存倉位</span>
+                <span style={{
+                  fontSize: 11, fontFamily: "monospace", fontWeight: 700,
+                  color: MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0) >= 0 ? COLORS.up : COLORS.down
+                }}>
+                  {MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0) >= 0 ? "+" : ""}
+                  {MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0).toLocaleString()}
+                </span>
               </div>
-              {/* 倉位/委託 - 20% */}
-              <div style={{ ...panelStyle, flex: 2, minHeight: 0, display: "flex", flexDirection: "column" }}>
-                <PositionOrdersPanel
-                  myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
-                  mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
-                  stopBuys={stopBuys} setStopBuys={setStopBuys}
-                  stopSells={stopSells} setStopSells={setStopSells}
-                />
-              </div>
-              {/* 成交明細 - 30% */}
-              <div style={{ ...panelStyle, flex: 3, minHeight: 0, display: "flex", flexDirection: "column" }}>
-                <TradeHistoryPanel />
+              <div style={{ display: "flex", gap: 6, padding: "3px 8px", fontSize: 10, overflowX: "auto" }}>
+                {MOCK_POSITIONS.map(p => (
+                  <div key={p.id} style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "2px 8px",
+                    background: COLORS.bgCard, borderRadius: 4, whiteSpace: "nowrap",
+                    border: `1px solid ${p.pnl >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`
+                  }}>
+                    <span style={{ color: COLORS.text, fontWeight: 600 }}>{p.symbol}</span>
+                    <span style={{ color: p.direction === "多" ? COLORS.up : COLORS.down, fontWeight: 600 }}>{p.direction}{p.qty}</span>
+                    <span style={{ color: p.pnl >= 0 ? COLORS.up : COLORS.down, fontFamily: "monospace", fontWeight: 600 }}>
+                      {p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString()}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
-        )}
+          {/* Right: 閃電下單 (10/5) + 倉位/委託 (10/2) + 成交明細 (10/3) */}
+          <div style={{ width: 330, display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+            {/* 閃電下單 - 50% */}
+            <div style={{ ...panelStyle, flex: 5, display: "flex", flexDirection: "column", minHeight: 0 }}>
+              <OrderPanel brokerConfig={brokerConfig}
+                currentPrice={latestPrices[orderSymbol] ?? 17535}
+                orderbook={orderbooks[orderSymbol]}
+                activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
+                myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
+                mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
+                stopBuys={stopBuys} setStopBuys={setStopBuys}
+                stopSells={stopSells} setStopSells={setStopSells}
+              />
+            </div>
+            {/* 倉位/委託 - 20% */}
+            <div style={{ ...panelStyle, flex: 2, minHeight: 0, display: "flex", flexDirection: "column" }}>
+              <PositionOrdersPanel
+                myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
+                mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
+                stopBuys={stopBuys} setStopBuys={setStopBuys}
+                stopSells={stopSells} setStopSells={setStopSells}
+              />
+            </div>
+            {/* 成交明細 - 30% */}
+            <div style={{ ...panelStyle, flex: 3, minHeight: 0, display: "flex", flexDirection: "column" }}>
+              <TradeHistoryPanel />
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* ─── Status Bar ────────────────────────────── */}

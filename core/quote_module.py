@@ -104,3 +104,15 @@ class QuoteModule:
             logger.warning("[QuoteModule] 未連線，無法取得歷史資料")
             return []
         return await self._adapter.get_history_bars(symbol, timeframe, count)
+
+    # ── 選擇權資料 ────────────────────────────────────
+
+    async def get_options_months(self, symbol: str = "TXO") -> list[str]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_options_months(symbol)
+
+    async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_options_t_quote(symbol, month)
