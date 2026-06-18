@@ -1827,6 +1827,7 @@ const MOCK_OPTIONS_DATA = [
 
 function OptionsTQuote({ currentPrice = 46465, onClose }) {
   const scrollRef = useRef(null);
+  const [selectedContract, setSelectedContract] = useState("2026/06F3");
 
   // Auto-scroll to ATM
   useEffect(() => {
@@ -1836,7 +1837,7 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
         const currentDiff = Math.abs(row.strike - currentPrice);
         return currentDiff < closestDiff ? idx : closestIdx;
       }, 0);
-      
+
       const rowHeight = 26;
       const headerHeight = 28;
       const containerHeight = scrollRef.current.clientHeight;
@@ -1863,7 +1864,22 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
       {/* Header Info */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>台指選擇權 (TXO)</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>台指選擇權</span>
+          <select 
+            value={selectedContract}
+            onChange={(e) => setSelectedContract(e.target.value)}
+            style={{
+              background: "transparent", border: `1px solid rgba(255,255,255,0.1)`, color: COLORS.text,
+              fontSize: 12, fontWeight: 600, padding: "2px 4px", borderRadius: 4, outline: "none", cursor: "pointer"
+            }}
+          >
+            <option value="2026/06F3">2026/06F3</option>
+            <option value="2026/06W4">2026/06W4</option>
+            <option value="2026/06F4">2026/06F4</option>
+            <option value="2026/07W1">2026/07W1</option>
+            <option value="2026/07">2026/07</option>
+            <option value="2026/08">2026/08</option>
+          </select>
           <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>剩 5 天</span>
         </div>
         {onClose && (
@@ -1882,7 +1898,9 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
       {/* Main Headers */}
       <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, background: COLORS.bgPanel }}>
         <div style={{ width: "40%", textAlign: "center", color: COLORS.up, fontWeight: 700, fontSize: 12 }}>買權 Call</div>
-        <div style={{ width: "20%", textAlign: "center", color: "#facc15", fontWeight: 700, fontSize: 11, border: `1px solid rgba(250,204,21,0.5)`, borderRadius: 4, background: "rgba(250,204,21,0.1)" }}>202606</div>
+        <div style={{ width: "20%", textAlign: "center", color: "#facc15", fontWeight: 700, fontSize: 11, border: `1px solid rgba(250,204,21,0.5)`, borderRadius: 4, background: "rgba(250,204,21,0.1)" }}>
+          {selectedContract.split('/')[1] || "06F3"}
+        </div>
         <div style={{ width: "40%", textAlign: "center", color: COLORS.down, fontWeight: 700, fontSize: 12 }}>賣權 Put</div>
       </div>
 
@@ -1900,7 +1918,7 @@ function OptionsTQuote({ currentPrice = 46465, onClose }) {
         {MOCK_OPTIONS_DATA.map((row) => {
           const diffToAtm = Math.abs(row.strike - currentPrice);
           const isAtm = diffToAtm < 25;
-          
+
           return (
             <div key={row.strike} style={{ display: "grid", gridTemplateColumns: T_GRID, alignItems: "center", height: 26, borderBottom: `1px solid ${COLORS.border}15`, fontSize: 11, fontFamily: "monospace", fontWeight: 600 }}>
               <div style={{ textAlign: "center", paddingRight: 4 }}>{renderChange(row.callChange)}</div>
@@ -2375,12 +2393,16 @@ export default function TradingPlatform() {
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   {/* T字報價切換按鈕 */}
                   <button onClick={() => setShowTQuote(!showTQuote)} style={{
-                    padding: "3px 8px", fontSize: 10, fontWeight: showTQuote ? 700 : 400,
+                    display: "flex", alignItems: "center", gap: 4,
+                    padding: "4px 8px", fontSize: 11, fontWeight: showTQuote ? 700 : 500,
                     background: showTQuote ? "rgba(59,130,246,0.15)" : "transparent",
                     border: `1px solid ${showTQuote ? COLORS.accent : COLORS.border}`,
-                    color: showTQuote ? COLORS.accent : COLORS.textDim, borderRadius: 3, cursor: "pointer", marginRight: 8,
-                    transition: "all 0.15s"
-                  }}>📊 T字報價</button>
+                    color: showTQuote ? COLORS.accent : COLORS.textDim, 
+                    borderRadius: 4, cursor: "pointer", transition: "all 0.15s",
+                    marginRight: 4 // 縮小間距
+                  }}>
+                    <span style={{ fontSize: 12 }}>📊</span> 期權
+                  </button>
 
                   {/* Timeframe selector */}
                   <div style={{ display: "flex", gap: 2, background: COLORS.bgCard, borderRadius: 4, padding: 2, border: `1px solid ${COLORS.border}` }}>
