@@ -2151,8 +2151,9 @@ export default function TradingPlatform() {
   useEffect(() => {
     if (!connected) return;
     send("subscribe", { symbol: orderSymbol });
+    send("subscribe", { symbol: chartSymbol });
     send("get_history", { symbol: orderSymbol, timeframe: "1", count: 1 });
-  }, [connected, orderSymbol]);
+  }, [connected, orderSymbol, chartSymbol]);
 
   // 後端回傳歷史資料
   useEffect(() => {
