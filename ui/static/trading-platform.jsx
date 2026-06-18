@@ -1791,27 +1791,7 @@ function BacktestPage({ scripts }) {
 }
 
 // ─── Options T-Quote Component ───────────────────────────────────────
-const MOCK_OPTIONS_DATA = [
-  { strike: 46200, callPrice: 710, callChange: 25, putPrice: 185, putChange: -55 },
-  { strike: 46250, callPrice: 670, callChange: 20, putPrice: 205, putChange: -52 },
-  { strike: 46300, callPrice: 630, callChange: 15, putPrice: 230, putChange: -50 },
-  { strike: 46350, callPrice: 590, callChange: 10, putPrice: 260, putChange: -48 },
-  { strike: 46400, callPrice: 550, callChange: 5, putPrice: 290, putChange: -45 },
-  { strike: 46450, callPrice: 510, callChange: 0, putPrice: 327, putChange: -44 },
-  { strike: 46500, callPrice: 470, callChange: -5, putPrice: 347, putChange: -41 },
-  { strike: 46550, callPrice: 435, callChange: -9, putPrice: 364, putChange: -46 },
-  { strike: 46600, callPrice: 400, callChange: -12, putPrice: 383, putChange: -47 },
-  { strike: 46650, callPrice: 365, callChange: -15, putPrice: 404, putChange: -50 },
-  { strike: 46700, callPrice: 330, callChange: -18, putPrice: 427, putChange: -48 },
-  { strike: 46750, callPrice: 300, callChange: -20, putPrice: 451, putChange: -49 },
-  { strike: 46800, callPrice: 270, callChange: -22, putPrice: 479, putChange: -46 },
-  { strike: 46850, callPrice: 245, callChange: -25, putPrice: 500, putChange: -50 },
-  { strike: 46900, callPrice: 220, callChange: -28, putPrice: 565, putChange: -20 },
-  { strike: 46950, callPrice: 200, callChange: -30, putPrice: 595, putChange: -10 },
-  { strike: 47000, callPrice: 180, callChange: -32, putPrice: 590, putChange: -45 },
-];
-
-function OptionsTQuote({ currentPrice = 46465, onClose, send, addHandler }) {
+function OptionsTQuote({ brokerConfig, currentPrice = 0, onClose, send, addHandler }) {
   const scrollRef = useRef(null);
   const [months, setMonths] = useState([]);
   const [selectedContract, setSelectedContract] = useState("");
@@ -1859,7 +1839,7 @@ function OptionsTQuote({ currentPrice = 46465, onClose, send, addHandler }) {
     return () => clearInterval(interval);
   }, [selectedContract, send]);
 
-  const displayData = quoteData.length > 0 ? quoteData : MOCK_OPTIONS_DATA;
+  const displayData = quoteData;
 
   // Auto-scroll to ATM
   useEffect(() => {
@@ -1908,11 +1888,11 @@ function OptionsTQuote({ currentPrice = 46465, onClose, send, addHandler }) {
             {months.length > 0 ? months.map(m => (
               <option key={m} value={m}>{m}</option>
             )) : (
-              <option value="2026/06F3">載入中...</option>
+              <option value="">載入中...</option>
             )}
           </select>
           <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>
-            {months.length > 0 ? "即時報價" : "模擬資料"}
+            {brokerConfig?.quote?.connected ? "連線中" : "無連線"}
           </span>
         </div>
         {onClose && (
@@ -1932,7 +1912,7 @@ function OptionsTQuote({ currentPrice = 46465, onClose, send, addHandler }) {
       <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, background: COLORS.bgPanel }}>
         <div style={{ width: "40%", textAlign: "center", color: COLORS.up, fontWeight: 700, fontSize: 12 }}>買權 Call</div>
         <div style={{ width: "20%", textAlign: "center", color: "#facc15", fontWeight: 700, fontSize: 11, border: `1px solid rgba(250,204,21,0.5)`, borderRadius: 4, background: "rgba(250,204,21,0.1)" }}>
-          {selectedContract.split('/')[1] || "06F3"}
+          {selectedContract ? selectedContract.split('/')[1] || selectedContract : "--"}
         </div>
         <div style={{ width: "40%", textAlign: "center", color: COLORS.down, fontWeight: 700, fontSize: 12 }}>賣權 Put</div>
       </div>
@@ -1947,8 +1927,12 @@ function OptionsTQuote({ currentPrice = 46465, onClose, send, addHandler }) {
       </div>
 
       {/* Rows */}
-      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-        {displayData.map((row) => {
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden", display: "flex", flexDirection: "column" }}>
+        {!brokerConfig?.quote?.connected ? (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textMuted, fontSize: 13, minHeight: 100 }}>無連線...</div>
+        ) : displayData.length === 0 ? (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textMuted, fontSize: 13, minHeight: 100 }}>無選擇權資料...</div>
+        ) : displayData.map((row) => {
           const diffToAtm = Math.abs(row.strike - currentPrice);
           const isAtm = diffToAtm < 25;
 
@@ -2167,7 +2151,13 @@ export default function TradingPlatform() {
             setKlineData(msg.bars);
             setRawM1([]);
           } else {
-            setRawM1(msg.bars);
+            setRawM1(prev => {
+              // 避免為了刷價格而取 count=1 的請求，覆蓋掉正常的 1500 根歷史資料
+              if (msg.bars.length === 1 && prev.length > 1) {
+                return prev;
+              }
+              return msg.bars;
+            });
           }
         }
       }
