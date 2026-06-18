@@ -2051,6 +2051,18 @@ export default function TradingPlatform() {
       if (msg.success) {
         if (msg.connected) {
           localStorage.setItem("autoConnectBrokerId", msg.broker_id);
+          // 連線成功後，重新從 API 拉當前商品的 M1 歷史，取代 DB fallback 的舊資料
+          const sym = chartSymbolRef.current;
+          const tf = timeframeRef.current;
+          const isLarge = ["日", "周", "月"].includes(tf);
+          let reqCount = 2000;
+          if (!isLarge) {
+            const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[tf] || 1;
+            reqCount = 1500 * minutes;
+          } else {
+            reqCount = 500;
+          }
+          send("get_history", { symbol: sym, timeframe: tf, count: reqCount });
         } else {
           localStorage.removeItem("autoConnectBrokerId");
         }
@@ -2069,6 +2081,12 @@ export default function TradingPlatform() {
   const [visibleCount, setVisibleCount] = useState(60);
   const [offset, setOffset] = useState(0);
   const [globalTooltip, setGlobalTooltip] = useState(null);
+
+  // Refs for latest values usable inside stale-closure handlers
+  const chartSymbolRef = useRef(chartSymbol);
+  useEffect(() => { chartSymbolRef.current = chartSymbol; }, [chartSymbol]);
+  const timeframeRef = useRef(timeframe);
+  useEffect(() => { timeframeRef.current = timeframe; }, [timeframe]);
 
   const enabledIndicators = scripts.filter(s => s.type === "indicator" && s.enabled).map(s => s.name);
 
