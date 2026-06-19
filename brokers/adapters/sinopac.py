@@ -148,7 +148,11 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         kbars() 回傳的是 M1 分鐘K（奈秒時間戳），
         在此聚合成目標週期後回傳。
         台指期含夜盤約 1200 分鐘/日，估算所需日曆天數。
+
+        R1 滾動合約 (如 TXFR1) 是 Shioaji 官方用於 kbars 連續歷史查詢的合約形式。
+        登入後 kbars() 可能需要數秒初始化，空資料時自動重試。
         """
+        import asyncio
         import math
         from datetime import date, timedelta
 
@@ -180,9 +184,16 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         end = (today + timedelta(days=3)).strftime("%Y-%m-%d")
 
         try:
-            kbars = self._api.kbars(contract=contract, start=start, end=end)
-            if not kbars or not kbars.ts:
-                logger.warning("[SinoPac] kbars 無資料: %s %s", symbol, timeframe)
+            # 登入後 Shioaji 需要數秒初始化，kbars() 可能立即返回空；最多重試 3 次
+            kbars = None
+            for attempt in range(1, 4):
+                kbars = self._api.kbars(contract=contract, start=start, end=end)
+                if kbars and kbars.ts:
+                    break
+                logger.warning("[SinoPac] kbars 無資料 (%d/3): %s %s", attempt, symbol, timeframe)
+                if attempt < 3:
+                    await asyncio.sleep(2)
+            else:
                 return []
 
             logger.info("[SinoPac] kbars %s 取得 %d 根 M1，start=%s", symbol, len(kbars.ts), start)
