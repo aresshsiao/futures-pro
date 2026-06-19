@@ -178,6 +178,8 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         trading_days = max(2, math.ceil(count * tf_minutes / TRADING_MINUTES_PER_DAY))
         calendar_days = int(trading_days * 1.6) + 5
 
+        # 單次 kbars 最多查 90 個日曆天（約 108,000 根 M1），防止 timeout
+        calendar_days = min(calendar_days, 90)
         start = (today - timedelta(days=calendar_days)).strftime("%Y-%m-%d")
         # TAIFEX 交易日規則：週五 15:00 ~ 週六 05:00 屬於「週一」的交易日。
         # 若在週末使用 today 作為 end，會導致週五夜盤被過濾掉，因此加上 3 天。
@@ -264,7 +266,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             contracts = self._api.Contracts.Options.TXO
             # 過濾掉已經到期或是異常的月份 (Shioaji 的 delivery_month 包含週選例如 202606W1)
             months = sorted(list(set([c.delivery_month for c in contracts if c.delivery_month])))
-            logger.info("[SinoPac] get_options_months found %d contracts, %d unique delivery_months", len(contracts), len(months))
+            logger.info("[SinoPac] get_options_months: %d unique delivery_months", len(months))
             return months
         except Exception as e:
             logger.error("[SinoPac] get_options_months error: %s", e)

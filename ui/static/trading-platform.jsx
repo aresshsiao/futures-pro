@@ -538,6 +538,127 @@ function VolumeChart({ data, visibleCount, offset, setTooltip, refLines = [{ lev
   );
 }
 
+// ─── RSI Chart Component ──────────────────────────────────────────
+function RSIChart({ data, visibleCount, offset, period = 14 }) {
+  const canvasRef = useRef(null);
+  const [crosshair, setCrosshair] = useState(null);
+
+  const visibleData = useMemo(() => {
+    if (!data.length) return [];
+    const end = data.length - offset;
+    const start = Math.max(0, end - visibleCount);
+    return data.slice(start, end);
+  }, [data, offset, visibleCount]);
+
+  const rsiValues = useMemo(() => {
+    if (!data.length || !visibleData.length) return [];
+    const globalStart = data.length - visibleData.length;
+    return visibleData.map((_, localIdx) => {
+      const gi = globalStart + localIdx;
+      if (gi < period) return null;
+      let gain = 0, loss = 0;
+      for (let j = gi - period + 1; j <= gi; j++) {
+        const diff = data[j].close - data[j - 1].close;
+        if (diff > 0) gain += diff; else loss -= diff;
+      }
+      const rs = gain / (loss || 1e-9);
+      return 100 - 100 / (1 + rs);
+    });
+  }, [data, visibleData, period]);
+
+  const drawRSI = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width = canvas.offsetWidth * 2;
+    const H = canvas.height = canvas.offsetHeight * 2;
+    ctx.scale(2, 2);
+    const w = W / 2, h = H / 2;
+    ctx.clearRect(0, 0, w, h);
+    if (!visibleData.length) return;
+
+    const barW = (w - 50) / visibleCount;
+    const startIdx = visibleCount - visibleData.length;
+    const topPad = 8, botPad = 4;
+    const drawH = h - topPad - botPad;
+    const toY = (val) => topPad + (1 - val / 100) * drawH;
+
+    // Reference lines: 70 / 50 / 30
+    const refs = [{ v: 70, color: "rgba(239,68,68,0.35)", dash: [3, 2] }, { v: 50, color: "#1e2d42", dash: [] }, { v: 30, color: "rgba(34,197,94,0.35)", dash: [3, 2] }];
+    refs.forEach(({ v, color, dash }) => {
+      const y = toY(v);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "9px monospace";
+      ctx.textAlign = "right";
+      ctx.fillStyle = v === 50 ? COLORS.textDim : (v === 70 ? "rgba(239,68,68,0.7)" : "rgba(34,197,94,0.7)");
+      ctx.fillText(v, w - 4, y + 3);
+    });
+
+    // RSI line
+    ctx.strokeStyle = "#a78bfa";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let started = false;
+    rsiValues.forEach((val, i) => {
+      if (val === null) return;
+      const x = (startIdx + i) * barW + barW / 2;
+      const y = toY(val);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Current RSI label
+    const lastRSI = [...rsiValues].reverse().find(v => v !== null);
+    if (lastRSI != null) {
+      const color = lastRSI >= 70 ? COLORS.down : lastRSI <= 30 ? COLORS.up : "#a78bfa";
+      ctx.fillStyle = color;
+      ctx.font = "bold 10px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(`RSI(${period})  ${lastRSI.toFixed(1)}`, 4, topPad + 10);
+    }
+
+    // Crosshair
+    if (crosshair) {
+      // find RSI value at crosshair
+      const visIdx = Math.floor(crosshair.x / barW) - startIdx;
+      const rsiAtCross = rsiValues[visIdx];
+      if (rsiAtCross != null) {
+        ctx.fillStyle = "#a78bfa";
+        ctx.font = "9px monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(rsiAtCross.toFixed(1), w - 4, toY(rsiAtCross) - 2);
+      }
+      ctx.strokeStyle = "rgba(255,255,255,0.12)";
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(crosshair.x, 0); ctx.lineTo(crosshair.x, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, crosshair.y); ctx.lineTo(w, crosshair.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }, [visibleData, rsiValues, crosshair, visibleCount, period]);
+
+  useEffect(() => { drawRSI(); }, [drawRSI]);
+
+  return (
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      <canvas
+        ref={canvasRef}
+        onMouseMove={(e) => {
+          const rect = canvasRef.current.getBoundingClientRect();
+          setCrosshair({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        }}
+        onMouseLeave={() => setCrosshair(null)}
+        style={{ width: "100%", height: "100%", cursor: "crosshair", display: "block" }}
+      />
+    </div>
+  );
+}
+
 // ─── Timeline Navigator Component ─────────────────────────────────────────
 function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOffset }) {
   const containerRef = useRef(null);
@@ -2051,18 +2172,12 @@ export default function TradingPlatform() {
       if (msg.success) {
         if (msg.connected) {
           localStorage.setItem("autoConnectBrokerId", msg.broker_id);
-          // 連線成功後，重新從 API 拉當前商品的 M1 歷史，取代 DB fallback 的舊資料
+          // 連線成功後，重新從 API 拉當前商品歷史，取代 DB fallback 的舊資料
+          // count 是目標週期棒數，後端 main.py 自行換算成所需的 M1 棒數
           const sym = chartSymbolRef.current;
           const tf = timeframeRef.current;
           const isLarge = ["日", "周", "月"].includes(tf);
-          let reqCount = 2000;
-          if (!isLarge) {
-            const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[tf] || 1;
-            reqCount = 1500 * minutes;
-          } else {
-            reqCount = 500;
-          }
-          send("get_history", { symbol: sym, timeframe: tf, count: reqCount });
+          send("get_history", { symbol: sym, timeframe: tf, count: isLarge ? 500 : 1800 });
         } else {
           localStorage.removeItem("autoConnectBrokerId");
         }
@@ -2135,18 +2250,12 @@ export default function TradingPlatform() {
     // 訂閱即時報價（後端 QuoteModule 已連線才有效，未連線也不影響）
     send("subscribe", { symbol: chartSymbol });
 
+    // count 是目標週期棒數，後端 main.py 自行換算成所需的 M1 棒數
     const isLarge = ["日", "周", "月"].includes(timeframe);
-    let reqCount = 2000;
-    if (!isLarge) {
-      const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe] || 1;
-      reqCount = 1500 * minutes;
-    } else {
-      reqCount = 500;
-    }
     send("get_history", {
       symbol: chartSymbol,
       timeframe,
-      count: reqCount,
+      count: isLarge ? 500 : 1800,
     });
   }, [connected, chartSymbol, timeframe]);
 
@@ -2170,7 +2279,7 @@ export default function TradingPlatform() {
             setRawM1([]);
           } else {
             setRawM1(prev => {
-              // 避免為了刷價格而取 count=1 的請求，覆蓋掉正常的 1500 根歷史資料
+              // 避免為了刷價格而取 count=1 的請求，覆蓋掉正常的 1800 根歷史資料
               if (msg.bars.length === 1 && prev.length > 1) {
                 return prev;
               }
@@ -2525,10 +2634,17 @@ export default function TradingPlatform() {
               <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} visibleCount={visibleCount} setVisibleCount={setVisibleCount} offset={offset} setOffset={setOffset} setTooltip={setGlobalTooltip} />
             </div>
 
-            {/* Volume — 30% */}
+            {/* Volume — 25% */}
             <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
               <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
             </div>
+
+            {/* RSI — 15%（僅在啟用 RSI_Signal 指標時顯示） */}
+            {enabledIndicators.includes("RSI_Signal") && (
+              <div style={{ ...panelStyle, flex: 2, position: "relative", minHeight: 0 }}>
+                <RSIChart data={klineData} visibleCount={visibleCount} offset={offset} />
+              </div>
+            )}
 
             {/* Timeline Navigator */}
             {klineData.length > 0 && (
