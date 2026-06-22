@@ -237,14 +237,18 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
     const startIdx = visibleCount - visibleData.length;
 
     // Grid (Price & Time)
-    // 目標顯示 15~25 條水平線，選最接近的步距
+    // 動態計算合適的水平線數量 (大約每 40px 一條)，避免太密
     const adjPriceRange = adjMax - adjMin;
+    const targetLines = Math.max(4, Math.floor(h / 40));
     const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].reverse();
-    let step = 5;
+    let step = steps[0];
+    let minDiff = Infinity;
     for (const s of steps) {
-      if (adjPriceRange / s >= 12 && adjPriceRange / s <= 20) {
+      const lines = adjPriceRange / s;
+      const diff = Math.abs(lines - targetLines);
+      if (diff < minDiff) {
+        minDiff = diff;
         step = s;
-        break;
       }
     }
     const startPrice = Math.ceil(adjMin / step) * step;
@@ -1358,7 +1362,13 @@ function ScriptsPanel({ scripts, send, activeView }) {
       <div style={{ width: 260, borderRight: `1px solid ${COLORS.border}`, padding: 12, overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>📜 Scripts</span>
-          <button style={{
+          <button onClick={() => {
+            const name = prompt("請輸入 Script 名稱 (例如 MyIndicator):");
+            if (!name) return;
+            const type = prompt("請輸入類型 (indicator 或 strategy):", "indicator");
+            if (type !== "indicator" && type !== "strategy") return;
+            send("add_script", { name, type });
+          }} style={{
             padding: "3px 10px", background: COLORS.accent, color: "#fff", border: "none",
             borderRadius: 4, fontSize: 11, cursor: "pointer"
           }}>+ 新增</button>
@@ -1416,11 +1426,11 @@ function ScriptsPanel({ scripts, send, activeView }) {
                 }}>{selectedScript.type === "indicator" ? "指標" : "策略"}</span>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                <button style={{
+                <button onClick={() => send("run_script", { id: selectedScript.id, code: editCode })} style={{
                   padding: "4px 14px", background: "rgba(34,197,94,0.1)", border: `1px solid ${COLORS.success}`,
                   color: COLORS.success, borderRadius: 4, fontSize: 11, cursor: "pointer"
                 }}>▶ 執行</button>
-                <button style={{
+                <button onClick={() => send("save_script", { id: selectedScript.id, code: editCode })} style={{
                   padding: "4px 14px", background: "rgba(59,130,246,0.1)", border: `1px solid ${COLORS.accent}`,
                   color: COLORS.accent, borderRadius: 4, fontSize: 11, cursor: "pointer"
                 }}>💾 儲存</button>

@@ -583,6 +583,138 @@ async def handle_toggle_script(ws, data: dict):
     })
 
 
+async def handle_save_script(ws, data: dict):
+    """前端: 儲存 Script 原始碼"""
+    from pathlib import Path
+    from ui.server import get_scripts
+    
+    script_id = data["id"]
+    code = data["code"]
+    meta = script_engine._scripts.get(script_id)
+    if not meta:
+        await ws.send_json({"type": "error", "message": f"找不到 script: {script_id}"})
+        return
+
+    try:
+        Path(meta.file_path).write_text(code, encoding="utf-8")
+        was_enabled = meta.enabled
+        script_engine.unload_script(script_id)
+        script_engine.load_script(meta)
+        if was_enabled:
+            script_engine.enable_script(script_id)
+            
+        await ws.send_json({"type": "script_saved", "id": script_id})
+        
+        # 廣播最新列表給所有前端
+        scripts_data = await get_scripts()
+        from ui.server import manager
+        await manager.broadcast({"type": "scripts_list", **scripts_data})
+    except Exception as e:
+        await ws.send_json({"type": "error", "message": f"儲存失敗: {str(e)}"})
+
+
+async def handle_run_script(ws, data: dict):
+    """前端: 執行 Script (儲存並啟用)"""
+    from pathlib import Path
+    from ui.server import get_scripts
+    
+    script_id = data["id"]
+    code = data["code"]
+    meta = script_engine._scripts.get(script_id)
+    if not meta:
+        await ws.send_json({"type": "error", "message": f"找不到 script: {script_id}"})
+        return
+
+    try:
+        Path(meta.file_path).write_text(code, encoding="utf-8")
+        script_engine.unload_script(script_id)
+        script_engine.load_script(meta)
+        script_engine.enable_script(script_id)
+        
+        await ws.send_json({"type": "script_toggled", "id": script_id, "enabled": True})
+        
+        scripts_data = await get_scripts()
+        from ui.server import manager
+        await manager.broadcast({"type": "scripts_list", **scripts_data})
+    except Exception as e:
+        await ws.send_json({"type": "error", "message": f"執行失敗: {str(e)}"})
+
+
+async def handle_add_script(ws, data: dict):
+    """前端: 新增 Script"""
+    from pathlib import Path
+    import json
+    from core.models import ScriptMeta, ScriptType
+    from ui.server import get_scripts, manager
+    
+    name = data.get("name", "New Script")
+    script_type = data.get("type", "indicator")
+    
+    if script_type not in ["indicator", "strategy"]:
+        return
+        
+    user_dir = Path("scripts/user")
+    user_dir.mkdir(parents=True, exist_ok=True)
+    
+    script_id = name.lower().replace(" ", "_")
+    file_path = user_dir / f"{script_id}.py"
+    
+    if file_path.exists() or script_id in script_engine._scripts:
+        await ws.send_json({"type": "error", "message": "Script 已存在或 ID 衝突"})
+        return
+        
+    stype = ScriptType.INDICATOR if script_type == "indicator" else ScriptType.STRATEGY
+    
+    if stype == ScriptType.INDICATOR:
+        template = f'''def calc(ctx):
+    # 指標範例
+    close = ctx.close
+    ma = close.rolling(5).mean()
+    ctx.plot("{name}", ma, color="#f59e0b")
+'''
+    else:
+        template = f'''def on_bar(ctx):
+    # 策略範例
+    close = ctx.close
+    if len(close) > 1 and close.iloc[-1] > close.iloc[-2]:
+        ctx.buy(1, reason="買進訊號")
+'''
+    file_path.write_text(template, encoding="utf-8")
+    
+    meta = ScriptMeta(
+        id=script_id,
+        name=name,
+        script_type=stype,
+        description="自訂 Script",
+        enabled=False,
+        file_path=str(file_path)
+    )
+    
+    # Save meta to a json registry
+    meta_registry = user_dir / "meta.json"
+    registry_data = []
+    if meta_registry.exists():
+        try:
+            registry_data = json.loads(meta_registry.read_text(encoding="utf-8"))
+        except:
+            pass
+            
+    registry_data.append({
+        "id": meta.id,
+        "name": meta.name,
+        "script_type": meta.script_type.value,
+        "description": meta.description,
+        "enabled": meta.enabled,
+        "file_path": meta.file_path,
+    })
+    meta_registry.write_text(json.dumps(registry_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    script_engine.load_script(meta)
+    
+    scripts_data = await get_scripts()
+    await manager.broadcast({"type": "scripts_list", **scripts_data})
+
+
 # ── 選擇權報價 (Options) ──────────────────────────
 
 async def handle_get_options_months(ws, data: dict):
@@ -645,6 +777,9 @@ def setup():
     register_action("broker_sync", handle_broker_sync)
     register_action("db_summary", handle_db_summary)
     register_action("toggle_script", handle_toggle_script)
+    register_action("save_script", handle_save_script)
+    register_action("run_script", handle_run_script)
+    register_action("add_script", handle_add_script)
     register_action("get_options_months", handle_get_options_months)
     register_action("get_options_t_quote", handle_get_options_t_quote)
 
@@ -655,6 +790,28 @@ def setup():
     # 載入內建 Script（指標 / 策略）
     for meta in BUILTIN_SCRIPTS:
         script_engine.load_script(meta)
+        
+    # 載入使用者 Script
+    import json
+    from pathlib import Path
+    from core.models import ScriptType
+    user_meta_registry = Path("scripts/user/meta.json")
+    if user_meta_registry.exists():
+        try:
+            registry_data = json.loads(user_meta_registry.read_text(encoding="utf-8"))
+            for entry in registry_data:
+                stype = ScriptType.INDICATOR if entry["script_type"] == "indicator" else ScriptType.STRATEGY
+                meta = ScriptMeta(
+                    id=entry["id"],
+                    name=entry["name"],
+                    script_type=stype,
+                    description=entry.get("description", "自訂 Script"),
+                    enabled=entry.get("enabled", False),
+                    file_path=entry["file_path"],
+                )
+                script_engine.load_script(meta)
+        except Exception as e:
+            logger.error(f"載入使用者 Script 失敗: {e}")
 
     # 資料庫
     db.connect()
