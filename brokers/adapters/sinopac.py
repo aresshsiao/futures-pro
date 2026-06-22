@@ -256,60 +256,111 @@ class SinoPacQuoteAdapter(QuoteAdapter):
 
     # ── 選擇權資料 ────────────────────────────────────
 
-    async def get_options_months(self, symbol: str = "TXO") -> list[str]:
+    # 排序鍵：W1<W2<W4<W5（週三）< WF1..WF5（週五）< Z（月選）
+    # 週三系列：TX1/TX2/TX4/TX5，同時掛牌2個連續週
+    # 週五系列：TXU=F1, TXV=F2, TXX=F3, TXY=F4, TXZ=F5，同時掛牌2個連續週
+    # TXO：月選（3連續月+2季月），只保留最近月
+    _PROD_SORT_SUFFIX = {
+        "TX1": "W1", "TX2": "W2", "TX4": "W4", "TX5": "W5",
+        "TXU": "WF1", "TXV": "WF2", "TXX": "WF3", "TXY": "WF4", "TXZ": "WF5",
+        "TXO": "Z",
+    }
+
+    async def get_options_months(self, _symbol: str = "TXO") -> list[str]:
+        """回傳所有 TXO 系列產品的到期月份，格式為 "PRODUCT:delivery_month"。
+
+        使用 api.Contracts.Options.keys() 動態取得所有實際存在的 Option 產品，
+        過濾出 TX 開頭的台指選擇權系列（TXO, TXW1, TXW2, TXW4 等）。
+        """
         if not self._api:
             return []
         try:
-            # 支援 TXO
-            if symbol != "TXO":
-                return []
-            contracts = self._api.Contracts.Options.TXO
-            # 過濾掉已經到期或是異常的月份 (Shioaji 的 delivery_month 包含週選例如 202606W1)
-            months = sorted(list(set([c.delivery_month for c in contracts if c.delivery_month])))
-            logger.info("[SinoPac] get_options_months: %d unique delivery_months", len(months))
-            return months
+            # _block() 等待 StreamProductContracts 完成載入（_fetched=True）；
+            # keys() 本身不呼叫 _block()，若合約尚未完成串流會取到空集合
+            self._api.Contracts.Options._block()
+            all_categories = list(self._api.Contracts.Options.keys())
+            tx_categories = [c for c in all_categories if c.startswith("TX")]
+            logger.info("[SinoPac] option categories found: %s", tx_categories)
+
+            seen: set[str] = set()
+            entries: list[str] = []
+            for prod in tx_categories:
+                try:
+                    prod_contracts = self._api.Contracts.Options[prod]
+                    for c in prod_contracts:
+                        dm = getattr(c, "delivery_month", "")
+                        if not dm:
+                            continue
+                        key = f"{prod}:{dm}"
+                        if key not in seen:
+                            seen.add(key)
+                            entries.append(key)
+                except Exception:
+                    pass
+
+            def sort_key(k: str):
+                prod, dm = k.split(":", 1)
+                ym = dm[:6]
+                # delivery_month 本身帶週別後綴（如 "202607W1"）直接用；
+                # 否則從產品代碼推算（TXW1→W1, TXO→Z 月選排最後）
+                suffix = dm[6:] or self._PROD_SORT_SUFFIX.get(prod, "Z")
+                return (ym, suffix)
+
+            entries.sort(key=sort_key)
+
+            # TXO 月選只保留最近的那一個月（去掉遠月，避免下拉清單過長）
+            txo_entries = [k for k in entries if k.startswith("TXO:")]
+            if len(txo_entries) > 1:
+                nearest_txo = txo_entries[0]  # 已排序，第一個即最近月
+                entries = [k for k in entries if not k.startswith("TXO:") or k == nearest_txo]
+
+            logger.info("[SinoPac] get_options_months: %d entries", len(entries))
+            return entries
         except Exception as e:
             logger.error("[SinoPac] get_options_months error: %s", e)
             return []
 
     async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
+        """month 格式為 "PRODUCT:delivery_month"，例如 "TXW1:202607" 或 "TXO:202607W1"。
+        舊格式（純 delivery_month 字串）仍相容，預設 product 為 TXO。
+        """
         if not self._api:
             return []
         try:
             import shioaji as sj
-            if symbol != "TXO":
+
+            # 解析複合 key
+            if ":" in month:
+                prod, dm = month.split(":", 1)
+            else:
+                prod, dm = "TXO", month
+
+            prod_contracts = getattr(self._api.Contracts.Options, prod, None)
+            if prod_contracts is None:
+                logger.warning("[SinoPac] options product not found: %s", prod)
                 return []
-            
-            contracts = [c for c in self._api.Contracts.Options.TXO if c.delivery_month == month]
+
+            contracts = [c for c in prod_contracts if c.delivery_month == dm]
             if not contracts:
-                logger.warning("[SinoPac] get_options_t_quote found NO contracts for month %s", month)
+                logger.warning("[SinoPac] get_options_t_quote: no contracts for %s %s", prod, dm)
                 return []
-            
-            logger.info("[SinoPac] get_options_t_quote fetching snapshots for %d contracts (month: %s)...", len(contracts), month)
-            # Snapshots
+
+            logger.debug("[SinoPac] get_options_t_quote: %d contracts (%s %s)", len(contracts), prod, dm)
             snapshots = self._api.snapshots(contracts)
-            logger.info("[SinoPac] get_options_t_quote received %d snapshots", len(snapshots))
-            # Organise by strike price
-            strikes = {}
+            logger.debug("[SinoPac] get_options_t_quote: %d snapshots received", len(snapshots))
+
+            strikes: dict = {}
             for contract, snap in zip(contracts, snapshots):
                 s = contract.strike_price
                 if s not in strikes:
                     strikes[s] = {"strike": s, "callPrice": 0, "callChange": 0, "putPrice": 0, "putChange": 0}
-                
-                # 如果還沒有成交，則預設為 0
                 price = snap.close if snap.close > 0 else 0
-                # 漲跌 (因為 Snapshot 沒有 reference，先計算相對於開盤價的漲跌或直接放 0)
-                change = 0 # 暫時先放 0，後續有需要可以算 snap.close - snap.previous_close 等
-                
-                if contract.option_right == sj.constant.CallPut.Call:
+                if contract.option_right == sj.constant.OptionRight.Call:
                     strikes[s]["callPrice"] = price
-                    strikes[s]["callChange"] = change
                 else:
                     strikes[s]["putPrice"] = price
-                    strikes[s]["putChange"] = change
-                    
-            result = [strikes[s] for s in sorted(strikes.keys())]
-            return result
+
+            return [strikes[s] for s in sorted(strikes.keys())]
         except Exception as e:
             logger.exception("[SinoPac] get_options_t_quote error")
             return []

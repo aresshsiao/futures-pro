@@ -1912,6 +1912,29 @@ function BacktestPage({ scripts }) {
 }
 
 // ─── Options T-Quote Component ───────────────────────────────────────
+
+/** Shioaji 產品代碼 → 後綴識別碼
+ * 週三結算：TX1=W1, TX2=W2, TX4=W4, TX5=W5（同時掛牌2個連續週）
+ * 週五結算：TXU=F1, TXV=F2, TXX=F3, TXY=F4, TXZ=F5（同時掛牌2個連續週）
+ * 月選：TXO=無後綴（3個連續月+2個季月，只顯示最近月）
+ * 參考：TAIFEX 台指選擇權商品規格 */
+const PROD_SUFFIX = {
+  TX1: "W1", TX2: "W2", TX4: "W4", TX5: "W5",
+  TXU: "F1", TXV: "F2", TXX: "F3", TXY: "F4", TXZ: "F5",
+  TXO: "",
+};
+/** "TX4:202606" → "06月W4"；"TXO:202607" → "07月"；"TXO:202607W1" → "07月W1" */
+function formatMonth(m) {
+  if (!m) return m;
+  let prod = "", dm = m;
+  if (m.includes(":")) { [prod, dm] = m.split(":"); }
+  const mon = dm.slice(4, 6);
+  const wSuffix = dm.slice(6); // delivery_month 本身帶週別後綴（如 "202607W1" 中的 "W1"）
+  if (wSuffix) return `${mon}月${wSuffix}`;
+  const s = PROD_SUFFIX[prod] ?? prod;
+  return s ? `${mon}月${s}` : `${mon}月`;
+}
+
 function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, send, addHandler }) {
   const scrollRef = useRef(null);
   const [months, setMonths] = useState([]);
@@ -2007,7 +2030,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
             }}
           >
             {months.length > 0 ? months.map(m => (
-              <option key={m} value={m}>{m}</option>
+              <option key={m} value={m}>{formatMonth(m)}</option>
             )) : (
               <option value="">載入中...</option>
             )}
@@ -2033,7 +2056,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
       <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, background: COLORS.bgPanel }}>
         <div style={{ width: "40%", textAlign: "center", color: COLORS.up, fontWeight: 700, fontSize: 12 }}>買權 Call</div>
         <div style={{ width: "20%", textAlign: "center", color: "#facc15", fontWeight: 700, fontSize: 11, border: `1px solid rgba(250,204,21,0.5)`, borderRadius: 4, background: "rgba(250,204,21,0.1)" }}>
-          {selectedContract ? selectedContract.split('/')[1] || selectedContract : "--"}
+          {selectedContract ? formatMonth(selectedContract) : "--"}
         </div>
         <div style={{ width: "40%", textAlign: "center", color: COLORS.down, fontWeight: 700, fontSize: 12 }}>賣權 Put</div>
       </div>
