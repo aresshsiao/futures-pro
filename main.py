@@ -64,6 +64,11 @@ BUILTIN_SCRIPTS = [
         parameters={"levels": settings.VOLUME_REFERENCE_LINES},
     ),
     ScriptMeta(
+        id="kd", name="KD_Indicator", script_type=ScriptType.INDICATOR,
+        description="隨機指標 (KD)", enabled=False,
+        file_path="scripts/builtin/kd.py",
+    ),
+    ScriptMeta(
         id="breakout", name="Breakout_Strategy", script_type=ScriptType.STRATEGY,
         description="突破策略 (20K高低)", enabled=False,
         file_path="scripts/builtin/breakout.py",
@@ -143,6 +148,36 @@ async def handle_get_history(ws, data: dict):
         "timeframe": timeframe,
         "bars": bars_out,
     })
+
+    if len(bars_out) >= 5:
+        import pandas as pd
+        from datetime import datetime
+        df_m1 = pd.DataFrame([
+            {"open": b["open"], "high": b["high"], "low": b["low"],
+             "close": b["close"], "volume": b["volume"], "timestamp": datetime.fromtimestamp(b["time"]/1000)}
+            for b in bars_out
+        ])
+        
+        tf_mins = _TF_MINUTES.get(timeframe, 1)
+        if tf_mins > 1 and timeframe not in ["日", "周", "月"]:
+            df_m1.set_index("timestamp", inplace=True)
+            df = df_m1.resample(f"{tf_mins}min").agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum"
+            }).dropna().reset_index()
+        else:
+            df = df_m1
+        indicator_results = script_engine.run_all_on_bar(df)
+        for script_id, output in indicator_results.items():
+            await ws.send_json({
+                "type": "indicator_output",
+                "timeframe": timeframe,
+                "name": output.name,
+                "series": output.series
+            })
 
 
 # 前端 timeframe 字串 → 分鐘數
@@ -544,8 +579,8 @@ def on_bar_complete(bar):
     """每根 K 棒收完時，執行所有啟用的 Script"""
     import pandas as pd
 
-    # 取得足夠的歷史資料給 Script 計算
-    bars = db.get_bars(bar.symbol, limit=200)
+    # 取得足夠的歷史資料給 Script 計算 (配合前端 1800 根歷史 K 棒)
+    bars = db.get_bars(bar.symbol, limit=1800)
     if len(bars) < 5:
         return
 

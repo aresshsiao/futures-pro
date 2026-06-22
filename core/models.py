@@ -58,6 +58,12 @@ class ScriptType(str, Enum):
     STRATEGY = "strategy"
 
 
+class PanelType(str, Enum):
+    MAIN = "main"
+    VOLUME = "volume"
+    SUB = "sub"
+
+
 # ═══════════════════════════════════════════════════════════
 #  市場資料
 # ═══════════════════════════════════════════════════════════
@@ -197,12 +203,16 @@ class ScriptMeta:
 
 
 @dataclass
+class IndicatorSeries:
+    values: list[float]
+    color: str = "#3b82f6"
+    panel: PanelType = PanelType.MAIN
+
+@dataclass
 class IndicatorOutput:
     """指標計算結果 (供繪圖)"""
-    name: str                          # 指標名稱
-    series: dict[str, list[float]]     # {"ma5": [...], "ma20": [...]}
-    overlays: bool = True              # True=疊在K線上, False=獨立子圖
-    colors: dict[str, str] = field(default_factory=dict)  # {"ma5": "#f59e0b"}
+    name: str
+    series: dict[str, dict]  # e.g. {"ma5": {"values": [...], "color": "#f59e0b", "panel": "main"}}
 
 
 @dataclass

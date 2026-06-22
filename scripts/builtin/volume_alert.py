@@ -18,8 +18,8 @@ def calc(ctx):
               （未提供時使用下方預設值）
     """
     levels = ctx.param("levels", [
-        {"level": 1500, "label": "爆1500大量"},
-        {"level": 400, "label": "爆400大量"},
+        {"level": 1500, "label": "夜盤大量"},
+        {"level": 400, "label": "日盤大量"},
     ])
 
     n = len(ctx.volume)
@@ -29,4 +29,4 @@ def calc(ctx):
         if not level:
             continue
         # 水平線 = 整段區間都畫同一個值，前端依此畫出參考線 & 判斷量是否跨越
-        ctx.subplot(label, [level] * n, color="#f59e0b")
+        ctx.volplot(label, [level] * n, color="#f59e0b")

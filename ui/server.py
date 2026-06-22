@@ -146,10 +146,9 @@ def setup_event_bridge():
     async def forward_indicator_output(output: IndicatorOutput):
         await manager.broadcast({
             "type": "indicator_output",
+            "timeframe": "1",
             "name": output.name,
             "series": output.series,
-            "colors": output.colors,
-            "overlays": output.overlays,
         })
 
     bus.on("tick", forward_tick)

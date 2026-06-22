@@ -154,7 +154,7 @@ function useWebSocket(url) {
 }
 
 // ─── Candlestick Chart Component (K-line only) ──────────────────────
-function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCount, setVisibleCount, offset, setOffset, setTooltip }) {
+function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe = "15", visibleCount, setVisibleCount, offset, setOffset, setTooltip }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const [crosshair, setCrosshair] = useState(null);
@@ -301,28 +301,36 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
       ctx.fillRect(x - bodyW / 2, top, bodyW, bodyH);
     });
 
-    // MA lines (from indicators) — 用全域索引回溯計算
+    // Script lines (panel: main)
     const globalStart = data.length - offset - visibleData.length;
-    if (indicators.includes("MA_Cross")) {
-      [{ period: 5, color: "#f59e0b" }, { period: 20, color: "#8b5cf6" }].forEach(({ period, color }) => {
-        ctx.strokeStyle = color;
+    Object.values(scriptOutputs).forEach(out => {
+      if (!indicators.includes(out.name)) return;
+      Object.entries(out.series).forEach(([lineName, seriesObj]) => {
+        if (seriesObj.panel !== "main") return;
+        
+        ctx.strokeStyle = seriesObj.color || "#f59e0b";
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         let started = false;
+        
+        const seriesStartIdx = (seriesObj.values.length || 0) - data.length + globalStart;
         for (let i = 0; i < visibleData.length; i++) {
-          const gi = globalStart + i;
-          if (gi < period - 1) continue;
-          let sum = 0;
-          for (let j = gi - period + 1; j <= gi; j++) sum += data[j].close;
-          const ma = sum / period;
+          const gi = seriesStartIdx + i;
+          if (gi < 0 || gi >= seriesObj.values.length) continue;
+          
+          const val = seriesObj.values[gi];
+          if (val == null) continue;
+          
           const x = (startIdx + i) * candleW + candleW / 2;
-          const y = 10 + ((adjMax - ma) / (adjMax - adjMin)) * (h - 20);
+          const y = 10 + ((adjMax - val) / (adjMax - adjMin)) * (h - 20);
           if (!started) { ctx.moveTo(x, y); started = true; }
           else ctx.lineTo(x, y);
         }
         ctx.stroke();
       });
-    }
+    });
+
+
 
     // Crosshair
     if (crosshair) {
@@ -343,31 +351,7 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
 
   useEffect(() => { drawChart(); }, [drawChart]);
 
-  const calcIndicatorValues = (globalIdx) => {
-    const result = {};
-    if (indicators.includes("MA_Cross")) {
-      for (const period of [5, 20]) {
-        if (globalIdx >= period - 1) {
-          let sum = 0;
-          for (let j = globalIdx - period + 1; j <= globalIdx; j++) sum += data[j].close;
-          result[`MA${period}`] = (sum / period).toFixed(0);
-        }
-      }
-    }
-    if (indicators.includes("RSI_Signal")) {
-      const period = 14;
-      if (globalIdx >= period) {
-        let gain = 0, loss = 0;
-        for (let j = globalIdx - period + 1; j <= globalIdx; j++) {
-          const diff = data[j].close - data[j - 1].close;
-          if (diff > 0) gain += diff; else loss -= diff;
-        }
-        const rs = gain / (loss || 1);
-        result["RSI"] = (100 - 100 / (1 + rs)).toFixed(1);
-      }
-    }
-    return result;
-  };
+
 
   const handleMouseMove = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -383,8 +367,7 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
     if (visibleIdx >= 0 && visibleIdx < visibleData.length) {
       // visibleData 是 data 的最後 visibleCount 筆，換算全域索引
       const globalIdx = data.length - visibleData.length + visibleIdx;
-      const indVals = calcIndicatorValues(globalIdx);
-      if (setTooltip) setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, indVals });
+      if (setTooltip) setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, globalIdx });
     } else if (setTooltip) {
       setTooltip(null);
     }
@@ -405,7 +388,7 @@ function CandlestickChart({ data, indicators = [], timeframe = "15", visibleCoun
 }
 
 // ─── Volume Chart Component ──────────────────────────────────────────
-function VolumeChart({ data, visibleCount, offset, setTooltip, refLines = [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }] }) {
+function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicators = [], setTooltip, refLines = [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }] }) {
   const canvasRef = useRef(null);
   const [crosshair, setCrosshair] = useState(null);
 
@@ -493,6 +476,35 @@ function VolumeChart({ data, visibleCount, offset, setTooltip, refLines = [{ lev
     });
     ctx.setLineDash([]);
 
+    // Script lines (panel: volume)
+    const globalStart = data.length - offset - visibleData.length;
+    Object.values(scriptOutputs).forEach(out => {
+      if (!indicators.includes(out.name)) return;
+      Object.entries(out.series).forEach(([lineName, seriesObj]) => {
+        if (seriesObj.panel !== "volume") return;
+        
+        ctx.strokeStyle = seriesObj.color || "#f59e0b";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        let started = false;
+        
+        const seriesStartIdx = (seriesObj.values.length || 0) - data.length + globalStart;
+        for (let i = 0; i < visibleData.length; i++) {
+          const gi = seriesStartIdx + i;
+          if (gi < 0 || gi >= seriesObj.values.length) continue;
+          
+          const val = seriesObj.values[gi];
+          if (val == null) continue;
+          
+          const x = (startIdx + i) * barW + barW / 2;
+          const y = bottomY - (val / maxVol) * (bottomY - 10);
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+    });
+
     // Crosshair
     if (crosshair) {
       ctx.strokeStyle = "rgba(255,255,255,0.15)";
@@ -522,9 +534,9 @@ function VolumeChart({ data, visibleCount, offset, setTooltip, refLines = [{ lev
     const barW = w / visibleCount;
     const startIdx = visibleCount - visibleData.length;
     const visibleIdx = Math.floor(x / barW) - startIdx;
-
     if (visibleIdx >= 0 && visibleIdx < visibleData.length && setTooltip) {
-      setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY });
+      const globalIdx = data.length - visibleData.length + visibleIdx;
+      setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, globalIdx });
     } else if (setTooltip) {
       setTooltip(null);
     }
@@ -542,8 +554,9 @@ function VolumeChart({ data, visibleCount, offset, setTooltip, refLines = [{ lev
   );
 }
 
-// ─── RSI Chart Component ──────────────────────────────────────────
-function RSIChart({ data, visibleCount, offset, period = 14 }) {
+
+// ─── Unified SubChart Component ─────────────────────────────────────
+function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs, setTooltip }) {
   const canvasRef = useRef(null);
   const [crosshair, setCrosshair] = useState(null);
 
@@ -554,23 +567,7 @@ function RSIChart({ data, visibleCount, offset, period = 14 }) {
     return data.slice(start, end);
   }, [data, offset, visibleCount]);
 
-  const rsiValues = useMemo(() => {
-    if (!data.length || !visibleData.length) return [];
-    const globalStart = data.length - visibleData.length;
-    return visibleData.map((_, localIdx) => {
-      const gi = globalStart + localIdx;
-      if (gi < period) return null;
-      let gain = 0, loss = 0;
-      for (let j = gi - period + 1; j <= gi; j++) {
-        const diff = data[j].close - data[j - 1].close;
-        if (diff > 0) gain += diff; else loss -= diff;
-      }
-      const rs = gain / (loss || 1e-9);
-      return 100 - 100 / (1 + rs);
-    });
-  }, [data, visibleData, period]);
-
-  const drawRSI = useCallback(() => {
+  const drawChart = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -581,62 +578,131 @@ function RSIChart({ data, visibleCount, offset, period = 14 }) {
     ctx.clearRect(0, 0, w, h);
     if (!visibleData.length) return;
 
+    // Collect all sub lines
+    const subLines = [];
+    Object.values(scriptOutputs).forEach(out => {
+      if (!indicators.includes(out.name)) return;
+      Object.entries(out.series).forEach(([lineName, seriesObj]) => {
+        if (seriesObj.panel === "sub") {
+          subLines.push({ indicatorName: out.name, lineName, seriesObj });
+        }
+      });
+    });
+
+    if (subLines.length === 0) return;
+
     const barW = (w - 50) / visibleCount;
     const startIdx = visibleCount - visibleData.length;
     const topPad = 8, botPad = 4;
     const drawH = h - topPad - botPad;
-    const toY = (val) => topPad + (1 - val / 100) * drawH;
-
-    // Reference lines: 70 / 50 / 30
-    const refs = [{ v: 70, color: "rgba(239,68,68,0.35)", dash: [3, 2] }, { v: 50, color: "#1e2d42", dash: [] }, { v: 30, color: "rgba(34,197,94,0.35)", dash: [3, 2] }];
-    refs.forEach(({ v, color, dash }) => {
-      const y = toY(v);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 0.5;
-      ctx.setLineDash(dash);
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.font = "9px monospace";
-      ctx.textAlign = "right";
-      ctx.fillStyle = v === 50 ? COLORS.textDim : (v === 70 ? "rgba(239,68,68,0.7)" : "rgba(34,197,94,0.7)");
-      ctx.fillText(v, w - 4, y + 3);
+    
+    // Global max/min
+    let minVal = Infinity, maxVal = -Infinity;
+    const globalStart = data.length - offset - visibleData.length;
+    
+    subLines.forEach(line => {
+      const sStart = (line.seriesObj.values.length || 0) - data.length + globalStart;
+      for (let i = 0; i < visibleData.length; i++) {
+        const val = line.seriesObj.values[sStart + i];
+        if (val != null) {
+          if (val < minVal) minVal = val;
+          if (val > maxVal) maxVal = val;
+        }
+      }
     });
+    
+    if (minVal === Infinity) return;
+    const range = maxVal - minVal || 1;
+    const adjMin = minVal - range * 0.1;
+    const adjMax = maxVal + range * 0.1;
+    const adjRange = adjMax - adjMin;
+    
+    const toY = (val) => topPad + ((adjMax - val) / adjRange) * drawH;
 
-    // RSI line
-    ctx.strokeStyle = "#a78bfa";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    let started = false;
-    rsiValues.forEach((val, i) => {
-      if (val === null) return;
-      const x = (startIdx + i) * barW + barW / 2;
-      const y = toY(val);
-      if (!started) { ctx.moveTo(x, y); started = true; }
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-    // Current RSI label
-    const lastRSI = [...rsiValues].reverse().find(v => v !== null);
-    if (lastRSI != null) {
-      const color = lastRSI >= 70 ? COLORS.down : lastRSI <= 30 ? COLORS.up : "#a78bfa";
-      ctx.fillStyle = color;
-      ctx.font = "bold 10px monospace";
-      ctx.textAlign = "left";
-      ctx.fillText(`RSI(${period})  ${lastRSI.toFixed(1)}`, 4, topPad + 10);
+    // Reference lines (draw 80/20 for KD, 70/30 for RSI based on what's active, or just 50)
+    // To keep it clean, we'll draw 50 always, and maybe top/bottom bounds if it looks like a 0-100 oscillator.
+    if (adjMin <= 20 && adjMax >= 80) {
+      const refs = [20, 50, 80];
+      refs.forEach(v => {
+        if (v < adjMin || v > adjMax) return;
+        const y = toY(v);
+        ctx.strokeStyle = v === 50 ? "#1e2d42" : "rgba(255,255,255,0.1)";
+        ctx.lineWidth = 0.5;
+        ctx.setLineDash(v === 50 ? [] : [3, 2]);
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = "9px monospace";
+        ctx.textAlign = "right";
+        ctx.fillStyle = COLORS.textDim;
+        ctx.fillText(v, w - 4, y + 3);
+      });
     }
+
+    // Draw lines
+    subLines.forEach(line => {
+      ctx.strokeStyle = line.seriesObj.color || "#f59e0b";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      let started = false;
+      const sStart = (line.seriesObj.values.length || 0) - data.length + globalStart;
+      for (let i = 0; i < visibleData.length; i++) {
+        const val = line.seriesObj.values[sStart + i];
+        if (val == null) continue;
+        const x = (startIdx + i) * barW + barW / 2;
+        const y = toY(val);
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    });
+
+    // Legend
+    let legendX = 4;
+    ctx.font = "bold 10px monospace";
+    ctx.textAlign = "left";
+    
+    // Group by indicator
+    const byIndicator = {};
+    subLines.forEach(line => {
+      if (!byIndicator[line.indicatorName]) byIndicator[line.indicatorName] = [];
+      byIndicator[line.indicatorName].push(line);
+    });
+
+    Object.keys(byIndicator).forEach(indName => {
+      ctx.fillStyle = COLORS.textMuted;
+      ctx.fillText(`${indName}:`, legendX, topPad + 10);
+      legendX += ctx.measureText(`${indName}:`).width + 4;
+      
+      byIndicator[indName].forEach(line => {
+        const sStart = (line.seriesObj.values.length || 0) - data.length + globalStart;
+        const lastVal = line.seriesObj.values[sStart + visibleData.length - 1];
+        if (lastVal != null) {
+          ctx.fillStyle = line.seriesObj.color || "#f59e0b";
+          const text = `${line.lineName}(${lastVal.toFixed(1)})`;
+          ctx.fillText(text, legendX, topPad + 10);
+          legendX += ctx.measureText(text).width + 6;
+        }
+      });
+      legendX += 4;
+    });
 
     // Crosshair
     if (crosshair) {
-      // find RSI value at crosshair
       const visIdx = Math.floor(crosshair.x / barW) - startIdx;
-      const rsiAtCross = rsiValues[visIdx];
-      if (rsiAtCross != null) {
-        ctx.fillStyle = "#a78bfa";
-        ctx.font = "9px monospace";
-        ctx.textAlign = "right";
-        ctx.fillText(rsiAtCross.toFixed(1), w - 4, toY(rsiAtCross) - 2);
-      }
+      
+      let tooltipYOffset = 0;
+      subLines.forEach(line => {
+        const sStart = (line.seriesObj.values.length || 0) - data.length + globalStart;
+        const val = line.seriesObj.values[sStart + visIdx];
+        if (val != null) {
+          ctx.fillStyle = line.seriesObj.color || "#f59e0b";
+          ctx.font = "9px monospace";
+          ctx.textAlign = "right";
+          ctx.fillText(val.toFixed(1), w - 4, toY(val) + tooltipYOffset);
+          tooltipYOffset += 10;
+        }
+      });
+      
       ctx.strokeStyle = "rgba(255,255,255,0.12)";
       ctx.setLineDash([4, 4]);
       ctx.lineWidth = 0.5;
@@ -644,21 +710,39 @@ function RSIChart({ data, visibleCount, offset, period = 14 }) {
       ctx.beginPath(); ctx.moveTo(0, crosshair.y); ctx.lineTo(w, crosshair.y); ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [visibleData, rsiValues, crosshair, visibleCount, period]);
+  }, [visibleData, scriptOutputs, indicators, crosshair, visibleCount, data.length, offset]);
 
-  useEffect(() => { drawRSI(); }, [drawRSI]);
+  useEffect(() => { drawChart(); }, [drawChart]);
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
-      <canvas
-        ref={canvasRef}
-        onMouseMove={(e) => {
+      {(() => {
+        const handleMouseMove = (e) => {
           const rect = canvasRef.current.getBoundingClientRect();
-          setCrosshair({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-        }}
-        onMouseLeave={() => setCrosshair(null)}
-        style={{ width: "100%", height: "100%", cursor: "crosshair", display: "block" }}
-      />
+          const x = e.clientX - rect.left;
+          setCrosshair({ x, y: e.clientY - rect.top });
+          
+          const W = canvasRef.current.offsetWidth;
+          const barW = (W - 25) / visibleCount;
+          const startIdx = visibleCount - visibleData.length;
+          const visibleIdx = Math.floor(x / barW) - startIdx;
+          
+          if (visibleIdx >= 0 && visibleIdx < visibleData.length && setTooltip) {
+            const globalIdx = data.length - visibleData.length + visibleIdx;
+            setTooltip({ ...visibleData[visibleIdx], x: e.clientX, y: e.clientY, globalIdx });
+          } else if (setTooltip) {
+            setTooltip(null);
+          }
+        };
+        return (
+          <canvas
+            ref={canvasRef}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={() => { setCrosshair(null); if (setTooltip) setTooltip(null); }}
+            style={{ width: "100%", height: "100%", cursor: "crosshair", display: "block" }}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -2134,7 +2218,10 @@ export default function TradingPlatform() {
       return [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }];
     }
     return Object.entries(output.series)
-      .map(([label, values]) => ({ level: values[values.length - 1], label }))
+      .map(([label, seriesObj]) => {
+        const vals = seriesObj.values || [];
+        return { level: vals[vals.length - 1], label };
+      })
       .sort((a, b) => b.level - a.level);
   }, [indicatorOutputs]);
 
@@ -2170,6 +2257,7 @@ export default function TradingPlatform() {
 
   useEffect(() => {
     const cleanup = addHandler("indicator_output", (msg) => {
+      if (msg.timeframe && msg.timeframe !== timeframeRef.current) return;
       setIndicatorOutputs(prev => ({ ...prev, [msg.name]: msg }));
     });
     return cleanup;
@@ -2664,20 +2752,26 @@ export default function TradingPlatform() {
 
             {/* K-line chart — 60% */}
             <div style={{ ...panelStyle, flex: 6, position: "relative", minHeight: 0 }}>
-              <CandlestickChart data={klineData} indicators={enabledIndicators} timeframe={timeframe} visibleCount={visibleCount} setVisibleCount={setVisibleCount} offset={offset} setOffset={setOffset} setTooltip={setGlobalTooltip} />
+              <CandlestickChart data={klineData} indicators={enabledIndicators} scriptOutputs={indicatorOutputs} timeframe={timeframe} visibleCount={visibleCount} setVisibleCount={setVisibleCount} offset={offset} setOffset={setOffset} setTooltip={setGlobalTooltip} />
             </div>
 
             {/* Volume — 25% */}
             <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
-              <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
+              <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} indicators={enabledIndicators} scriptOutputs={indicatorOutputs} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
             </div>
 
-            {/* RSI — 15%（僅在啟用 RSI_Signal 指標時顯示） */}
-            {enabledIndicators.includes("RSI_Signal") && (
-              <div style={{ ...panelStyle, flex: 2, position: "relative", minHeight: 0 }}>
-                <RSIChart data={klineData} visibleCount={visibleCount} offset={offset} />
-              </div>
-            )}
+                        {/* Unified SubChart (顯示所有 panel="sub" 的指標) */}
+            {(() => {
+              const hasSub = Object.values(indicatorOutputs).some(out => 
+                enabledIndicators.includes(out.name) && Object.values(out.series).some(s => s.panel === "sub")
+              );
+              if (!hasSub) return null;
+              return (
+                <div style={{ ...panelStyle, flex: 2, position: "relative", minHeight: 0 }}>
+                  <UnifiedSubChart data={klineData} visibleCount={visibleCount} offset={offset} indicators={enabledIndicators} scriptOutputs={indicatorOutputs} setTooltip={setGlobalTooltip} />
+                </div>
+              );
+            })()}
 
             {/* Timeline Navigator */}
             {klineData.length > 0 && (
@@ -2792,17 +2886,30 @@ export default function TradingPlatform() {
           <div>低 <span style={{ color: COLORS.down }}>{globalTooltip.low}</span></div>
           <div>收 <span style={{ color: globalTooltip.close >= globalTooltip.open ? COLORS.up : COLORS.down, fontWeight: 600 }}>{globalTooltip.close}</span></div>
           <div>量 <span style={{ color: COLORS.accent }}>{globalTooltip.volume.toLocaleString()}</span></div>
-          {globalTooltip.indVals && Object.keys(globalTooltip.indVals).length > 0 && (
-            <>
-              <div style={{ borderTop: `1px solid ${COLORS.border}`, margin: "5px 0" }} />
-              {Object.entries(globalTooltip.indVals).map(([name, val]) => (
-                <div key={name}>
-                  <span style={{ color: COLORS.textDim }}>{name} </span>
-                  <span style={{ color: COLORS.warn, fontWeight: 600 }}>{val}</span>
-                </div>
-              ))}
-            </>
-          )}
+          {(() => {
+            if (globalTooltip.globalIdx == null) return null;
+            const vals = [];
+            Object.values(indicatorOutputs).forEach(out => {
+              if (!enabledIndicators.includes(out.name)) return;
+              Object.entries(out.series).forEach(([lineName, seriesObj]) => {
+                const sStart = (seriesObj.values.length || 0) - klineData.length;
+                const v = seriesObj.values[sStart + globalTooltip.globalIdx];
+                if (v != null) vals.push({ name: `${out.name} ${lineName}`, val: v });
+              });
+            });
+            if (vals.length === 0) return null;
+            return (
+              <>
+                <div style={{ borderTop: `1px solid ${COLORS.border}`, margin: "5px 0" }} />
+                {vals.map(({ name, val }) => (
+                  <div key={name}>
+                    <span style={{ color: COLORS.textDim }}>{name} </span>
+                    <span style={{ color: COLORS.warn, fontWeight: 600 }}>{typeof val === 'number' ? val.toFixed(1) : val}</span>
+                  </div>
+                ))}
+              </>
+            );
+          })()}
         </div>
       )}
 

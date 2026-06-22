@@ -39,14 +39,15 @@ class ScriptContext:
         ctx.buy_limit(price=17500, qty=1)
     """
 
-    def __init__(self, script_meta: ScriptMeta, bars: pd.DataFrame):
-        self._meta = script_meta
+    def __init__(self, meta: ScriptMeta, bars: pd.DataFrame):
+        self._meta = meta
         self._bars = bars        # DataFrame with columns: open, high, low, close, volume, timestamp
         self._signals: list[StrategySignal] = []
-        self._plots: dict[str, list[float]] = {}
-        self._plot_colors: dict[str, str] = {}
-        self._overlay = True
-        self._params = dict(script_meta.parameters)
+        
+        # 指標繪圖暫存 (dict of IndicatorSeries dict)
+        self._plots: dict[str, dict] = {}
+        
+        self._params = dict(meta.parameters)
 
     # ── 資料存取 ──────────────────────────────────────
 
@@ -81,17 +82,33 @@ class ScriptContext:
 
     # ── 指標繪圖 (Indicator) ──────────────────────────
 
-    def plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
-        """畫一條線 (疊在K線上)"""
+    def plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6", panel: str = "main") -> None:
+        """畫一條線 (預設疊在K線上)"""
+        from core.models import PanelType
+        
         if isinstance(values, pd.Series):
-            values = values.tolist()
-        self._plots[name] = values
-        self._plot_colors[name] = color
+            # 處理 NaN，轉為 None 讓 JSON 可以序列化
+            values = [None if pd.isna(x) else x for x in values.tolist()]
+            
+        p_type = PanelType.MAIN
+        if panel == "volume":
+            p_type = PanelType.VOLUME
+        elif panel == "sub":
+            p_type = PanelType.SUB
+            
+        self._plots[name] = {
+            "values": values,
+            "color": color,
+            "panel": p_type.value
+        }
+
+    def volplot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
+        """畫在量圖 (等同 panel="volume")"""
+        self.plot(name, values, color, panel="volume")
 
     def subplot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
-        """畫在獨立子圖"""
-        self.plot(name, values, color)
-        self._overlay = False
+        """畫在獨立子圖 (等同 panel="sub")"""
+        self.plot(name, values, color, panel="sub")
 
     # ── 交易訊號 (Strategy) ───────────────────────────
 
@@ -241,8 +258,6 @@ class ScriptEngine:
             return IndicatorOutput(
                 name=meta.name,
                 series=ctx._plots,
-                overlays=ctx._overlay,
-                colors=ctx._plot_colors,
             )
         except Exception:
             logger.exception(f"[ScriptEngine] 指標執行錯誤: {meta.name}")
