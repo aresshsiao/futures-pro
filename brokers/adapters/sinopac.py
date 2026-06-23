@@ -186,29 +186,51 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         end = (today + timedelta(days=3)).strftime("%Y-%m-%d")
 
         try:
-            # 登入後 Shioaji 需要數秒初始化，kbars() 可能立即返回空；最多重試 3 次
-            kbars = None
-            for attempt in range(1, 4):
-                kbars = self._api.kbars(contract=contract, start=start, end=end)
+            all_ts, all_open, all_high, all_low, all_close, all_vol = [], [], [], [], [], []
+            
+            curr_end_date = today + timedelta(days=3)
+            target_start_date = today - timedelta(days=calendar_days)
+            
+            while curr_end_date > target_start_date:
+                chunk_start_date = max(target_start_date, curr_end_date - timedelta(days=29))
+                start_str = chunk_start_date.strftime("%Y-%m-%d")
+                end_str = curr_end_date.strftime("%Y-%m-%d")
+                
+                # 登入後 Shioaji 需要數秒初始化，kbars() 可能立即返回空；最多重試 3 次
+                kbars = None
+                for attempt in range(1, 4):
+                    kbars = self._api.kbars(contract=contract, start=start_str, end=end_str)
+                    if kbars and kbars.ts:
+                        break
+                    if attempt < 3:
+                        await asyncio.sleep(2)
+                
                 if kbars and kbars.ts:
-                    break
-                logger.warning("[SinoPac] kbars 無資料 (%d/3): %s %s", attempt, symbol, timeframe)
-                if attempt < 3:
-                    await asyncio.sleep(2)
-            else:
+                    all_ts = list(kbars.ts) + all_ts
+                    all_open = list(kbars.Open) + all_open
+                    all_high = list(kbars.High) + all_high
+                    all_low = list(kbars.Low) + all_low
+                    all_close = list(kbars.Close) + all_close
+                    all_vol = list(kbars.Volume) + all_vol
+                elif attempt == 3 and not all_ts:
+                    logger.warning("[SinoPac] kbars 無資料: %s %s %s~%s", symbol, timeframe, start_str, end_str)
+
+                curr_end_date = chunk_start_date - timedelta(days=1)
+
+            if not all_ts:
                 return []
 
-            logger.info("[SinoPac] kbars %s 取得 %d 根 M1，start=%s", symbol, len(kbars.ts), start)
+            logger.info("[SinoPac] kbars %s 取得 %d 根 M1，start=%s", symbol, len(all_ts), target_start_date.strftime("%Y-%m-%d"))
 
             # 聚合成目標週期
             buckets: dict[int, list] = {}
-            for i in range(len(kbars.ts)):
+            for i in range(len(all_ts)):
                 # Shioaji 歷史 K 棒的 ts 欄位，是將台灣時間直接視為 UTC 所算出的 epoch，
                 # 這會導致瀏覽器轉換時多加了 8 小時。因此需要將其減去 8 小時 (28800 秒) 
                 # 使其成為標準的絕對 UTC epoch。
-                ts_sec = int(kbars.ts[i] / 1e9) - 28800
+                ts_sec = int(all_ts[i] / 1e9) - 28800
                 aligned = (ts_sec // tf_seconds) * tf_seconds
-                o, h, l, c, v = kbars.Open[i], kbars.High[i], kbars.Low[i], kbars.Close[i], kbars.Volume[i]
+                o, h, l, c, v = all_open[i], all_high[i], all_low[i], all_close[i], all_vol[i]
                 if aligned not in buckets:
                     buckets[aligned] = [o, h, l, c, v]
                 else:
