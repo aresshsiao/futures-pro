@@ -9,9 +9,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import status
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from ui.auth import create_token, require_auth, verify_password, ws_require_auth
 
 from core.event_bus import EventBus
 from core.models import (
@@ -182,7 +186,7 @@ def setup_event_bridge():
 # ═══════════════════════════════════════════════════════════
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket, _: None = Depends(ws_require_auth)):
     await manager.connect(ws)
     try:
         while True:
@@ -229,12 +233,23 @@ def register_action(action: str, handler):
 #  REST API 端點
 # ═══════════════════════════════════════════════════════════
 
+class LoginRequest(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+async def login(req: LoginRequest):
+    if not verify_password(req.password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="密碼錯誤")
+    return {"token": create_token()}
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}
 
 
-@app.get("/api/config")
+@app.get("/api/config", dependencies=[Depends(require_auth)])
 async def get_config():
     """提供前端可調整的設定，統一從 config/settings.py 讀取。"""
     from config import settings
@@ -243,7 +258,7 @@ async def get_config():
     }
 
 
-@app.get("/api/scripts")
+@app.get("/api/scripts", dependencies=[Depends(require_auth)])
 async def get_scripts():
     """
     提供 Scripts 面板顯示用的清單（含原始碼）。
@@ -282,6 +297,11 @@ if static_dir.exists():
 
 @app.on_event("startup")
 async def startup():
+    from config import settings as _s
+    if not _s.AUTH_PASSWORD_HASH:
+        logger.warning("[Auth] AUTH_PASSWORD_HASH 尚未設定！請執行 `python scripts/gen_password_hash.py` 設定登入密碼。")
+    if _s.AUTH_SECRET_KEY == "change-this-secret-key-in-production":
+        logger.warning("[Auth] AUTH_SECRET_KEY 使用預設值，請在 config/settings.py 更換為隨機字串。")
     # 在伺服器真正啟動、event loop 開始運行後才存入主 loop，
     # 確保 EventBus.emit_sync() 從子執行緒（如 Shioaji callback）排程時用的是正確的 loop。
     EventBus().set_main_loop(asyncio.get_running_loop())

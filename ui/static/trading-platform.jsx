@@ -100,6 +100,64 @@ function applyCandleColorScheme(scheme) {
   }
 }
 
+// ─── Auth helpers ─────────────────────────────────────────────────────
+const TOKEN_KEY = "futures_pro_token";
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
+function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+function authHeaders() { return { Authorization: `Bearer ${getToken()}` }; }
+
+// ─── Login Page ───────────────────────────────────────────────────────
+function LoginPage({ onLogin }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) {
+        const { token } = await res.json();
+        setToken(token);
+        onLogin();
+      } else {
+        setError("密碼錯誤");
+      }
+    } catch {
+      setError("連線失敗");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: COLORS.bg }}>
+      <form onSubmit={handleSubmit} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: "32px 40px", display: "flex", flexDirection: "column", gap: 16, minWidth: 300 }}>
+        <div style={{ color: COLORS.text, fontSize: 18, fontWeight: 700, textAlign: "center", marginBottom: 8 }}>Futures Pro</div>
+        <input
+          type="password"
+          placeholder="登入密碼"
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+          autoFocus
+          style={{ background: COLORS.bg, border: `1px solid ${COLORS.border}`, borderRadius: 4, color: COLORS.text, padding: "8px 12px", fontSize: 14, outline: "none" }}
+        />
+        {error && <div style={{ color: COLORS.down, fontSize: 12, textAlign: "center" }}>{error}</div>}
+        <button type="submit" disabled={loading || !password} style={{ background: COLORS.accent, border: "none", borderRadius: 4, color: "#fff", padding: "9px 0", fontSize: 14, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+          {loading ? "驗證中…" : "登入"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 // ─── WebSocket Hook ───────────────────────────────────────────────────
 function useWebSocket(url) {
   const wsRef = useRef(null);
@@ -107,6 +165,7 @@ function useWebSocket(url) {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
+    if (!url) return;
     let ws;
     let stopped = false;
 
@@ -2175,6 +2234,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
 
 // ─── Main App ────────────────────────────────────────────────────────
 export default function TradingPlatform() {
+  const [authed, setAuthed] = useState(!!getToken());
   const [page, setPage] = useState("trading");
   const [klineData, setKlineData] = useState([]);
   const [chartSymbol, setChartSymbol] = useState("TX");
@@ -2182,8 +2242,10 @@ export default function TradingPlatform() {
   const [latestPrices, setLatestPrices] = useState({});
   const [orderbooks, setOrderbooks] = useState({});
   const [scripts, setScripts] = useState([]);
-  const wsUrl = `ws://${window.location.host}/ws`;
+  const wsUrl = authed ? `ws://${window.location.host}/ws?token=${getToken()}` : null;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
+
+  if (!authed) return <LoginPage onLogin={() => setAuthed(true)} />;
   const [showBrokerConfig, setShowBrokerConfig] = useState(false);
   const [showTQuote, setShowTQuote] = useState(true);
   const [brokerConfig, setBrokerConfig] = useState({
@@ -2209,24 +2271,20 @@ export default function TradingPlatform() {
       .sort((a, b) => b.level - a.level);
   }, [indicatorOutputs]);
 
+  function logout() { clearToken(); setAuthed(false); }
+
   useEffect(() => {
-    fetch("/api/scripts")
-      .then(r => r.json())
-      .then(cfg => {
-        if (Array.isArray(cfg.scripts)) setScripts(cfg.scripts);
-      })
-      .catch(() => { }); // 取不到就維持空清單
+    fetch("/api/scripts", { headers: authHeaders() })
+      .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
+      .then(cfg => { if (cfg && Array.isArray(cfg.scripts)) setScripts(cfg.scripts); })
+      .catch(() => { });
   }, []);
 
   useEffect(() => {
-    fetch("/api/config")
-      .then(r => r.json())
-      .then(cfg => {
-        if (cfg.candle_color_scheme) {
-          setCandleColorScheme(cfg.candle_color_scheme);
-        }
-      })
-      .catch(() => { }); // 取不到設定就沿用預設值
+    fetch("/api/config", { headers: authHeaders() })
+      .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
+      .then(cfg => { if (cfg?.candle_color_scheme) setCandleColorScheme(cfg.candle_color_scheme); })
+      .catch(() => { });
   }, []);
 
   // 在每次渲染前套用漲跌顏色慣例，讓所有子元件（K棒、損益、多空標籤…）讀到一致的顏色
