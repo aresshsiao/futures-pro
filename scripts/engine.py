@@ -102,15 +102,11 @@ class ScriptContext:
             "panel": p_type.value
         }
 
-    def volplot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
+    def vol_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
         """畫在量圖 (等同 panel="volume")"""
         self.plot(name, values, color, panel="volume")
 
-    def volumeplot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
-        """畫在量圖 (等同 panel="volume")"""
-        self.plot(name, values, color, panel="volume")
-
-    def subplot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
+    def sub_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
         """畫在獨立子圖 (等同 panel="sub")"""
         self.plot(name, values, color, panel="sub")
 

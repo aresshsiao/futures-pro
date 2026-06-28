@@ -2870,7 +2870,7 @@ export default function TradingPlatform() {
               Object.entries(out.series).forEach(([lineName, seriesObj]) => {
                 const sStart = (seriesObj.values.length || 0) - klineData.length;
                 const v = seriesObj.values[sStart + globalTooltip.globalIdx];
-                if (v != null) vals.push({ name: `${out.name} ${lineName}`, val: v });
+                if (v != null) vals.push({ name: lineName, val: v });
               });
             });
             if (vals.length === 0) return null;

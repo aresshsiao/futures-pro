@@ -21,4 +21,4 @@ def calc(ctx):
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
 
-    ctx.subplot("RSI", rsi, color="#06b6d4")
+    ctx.sub_plot("RSI", rsi, color="#06b6d4")
