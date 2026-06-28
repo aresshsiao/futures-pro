@@ -106,9 +106,11 @@ class ScriptContext:
         """畫在量圖 (等同 panel="volume")"""
         self.plot(name, values, color, panel="volume")
 
-    def sub_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
-        """畫在獨立子圖 (等同 panel="sub")"""
+    def sub_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6", ref_lines: list[float] | None = None) -> None:
+        """畫在獨立子圖 (等同 panel="sub")，ref_lines 可指定水平參考線 (如 [80, 20])"""
         self.plot(name, values, color, panel="sub")
+        if ref_lines:
+            self._plots[name]["ref_lines"] = ref_lines
 
     # ── 交易訊號 (Strategy) ───────────────────────────
 
@@ -158,6 +160,34 @@ class ScriptContext:
 # ═══════════════════════════════════════════════════════════
 #  Script 執行引擎
 # ═══════════════════════════════════════════════════════════
+
+def load_meta_from_file(file_path: str, script_id: str, enabled: bool = False, param_overrides: dict | None = None) -> Optional["ScriptMeta"]:
+    """從 script 檔案讀取 __meta__ 並建立 ScriptMeta"""
+    path = Path(file_path)
+    if not path.exists():
+        logger.error(f"[ScriptEngine] 找不到檔案: {path}")
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(script_id, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        meta_dict = getattr(module, "__meta__", {})
+        name = meta_dict.get("name", script_id)
+        description = meta_dict.get("description", "")
+        type_str = meta_dict.get("type", "indicator")
+        default_params = dict(meta_dict.get("default_params", {}))
+        if param_overrides:
+            default_params.update(param_overrides)
+        script_type = ScriptType.INDICATOR if type_str == "indicator" else ScriptType.STRATEGY
+        return ScriptMeta(
+            id=script_id, name=name, script_type=script_type,
+            description=description, enabled=enabled,
+            file_path=file_path, parameters=default_params,
+        )
+    except Exception:
+        logger.exception(f"[ScriptEngine] 讀取 meta 失敗: {file_path}")
+        return None
+
 
 class ScriptEngine:
     """

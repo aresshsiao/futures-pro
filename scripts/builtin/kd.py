@@ -1,3 +1,11 @@
+__meta__ = {
+    "name": "KD",
+    "description": "隨機指標 (KD)",
+    "type": "indicator",
+    "default_params": {"period": 9},
+}
+
+
 def calc(ctx):
     """
     KD 指標 (Stochastic Oscillator)
@@ -22,5 +30,5 @@ def calc(ctx):
     d = k.ewm(alpha=1/3, adjust=False).mean()
     
     # 畫在獨立子圖 (subplot) 中
-    ctx.sub_plot("K", k, color="#f59e0b")
+    ctx.sub_plot("K", k, color="#f59e0b", ref_lines=[80, 20])
     ctx.sub_plot("D", d, color="#3b82f6")

@@ -1,7 +1,9 @@
-"""
-scripts/builtin/rsi.py — RSI 指標
-示範 subplot (獨立子圖) 的用法。
-"""
+__meta__ = {
+    "name": "RSI",
+    "description": "RSI 相對強弱指標",
+    "type": "indicator",
+    "default_params": {"period": 14, "overbought": 70, "oversold": 30},
+}
 
 
 def calc(ctx):
@@ -21,4 +23,6 @@ def calc(ctx):
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
 
-    ctx.sub_plot("RSI", rsi, color="#06b6d4")
+    overbought = ctx.param("overbought", 70)
+    oversold = ctx.param("oversold", 30)
+    ctx.sub_plot("RSI", rsi, color="#06b6d4", ref_lines=[overbought, oversold])

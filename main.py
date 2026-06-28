@@ -14,7 +14,8 @@ from config import settings
 from core.event_bus import EventBus
 from core.quote_module import QuoteModule
 from core.trade_module import TradeModule
-from core.models import Direction, OrderType, ScriptMeta, ScriptType, Timeframe
+from core.models import Direction, OrderType, Timeframe
+from scripts.engine import load_meta_from_file
 from data.database import Database
 from data.bar_builder import BarBuilder
 from data.sources.taifex import TaifexImporter
@@ -43,37 +44,17 @@ bar_builder = BarBuilder()
 taifex = TaifexImporter()
 # script_engine 定義在 ui/server.py（理由見該檔案註解），這裡直接重用同一個實例
 
-# 內建 Script 清單（啟動時載入到 script_engine）。
-# Volume_Alert 的水平線數值直接沿用 config/settings.py 的 VOLUME_REFERENCE_LINES，
-# 讓「爆大量」設定維持單一來源，但實際運算/廣播改走 Script 引擎。
-BUILTIN_SCRIPTS = [
-    ScriptMeta(
-        id="ma_cross", name="MA_Cross", script_type=ScriptType.INDICATOR,
-        description="均線交叉指標 (5/20)", enabled=True,
-        file_path="scripts/builtin/ma_cross.py",
-    ),
-    ScriptMeta(
-        id="rsi", name="RSI_Signal", script_type=ScriptType.INDICATOR,
-        description="RSI 超買超賣", enabled=True,
-        file_path="scripts/builtin/rsi.py",
-    ),
-    ScriptMeta(
-        id="volume_alert", name="Volume_Alert", script_type=ScriptType.INDICATOR,
-        description="成交量爆量水平線", enabled=True,
-        file_path="scripts/builtin/volume_alert.py",
-        parameters={"levels": settings.VOLUME_REFERENCE_LINES},
-    ),
-    ScriptMeta(
-        id="kd", name="KD_Indicator", script_type=ScriptType.INDICATOR,
-        description="隨機指標 (KD)", enabled=False,
-        file_path="scripts/builtin/kd.py",
-    ),
-    ScriptMeta(
-        id="breakout", name="Breakout_Strategy", script_type=ScriptType.STRATEGY,
-        description="突破策略 (20K高低)", enabled=False,
-        file_path="scripts/builtin/breakout.py",
-    ),
-]
+# 內建 Script 清單：只需指定 id、file_path、enabled。
+# name / description / default_params 從各 script 的 __meta__ 讀取。
+# Volume_Alert 的 levels 從 settings 覆蓋，讓設定維持單一來源。
+BUILTIN_SCRIPTS = [s for s in [
+    load_meta_from_file("scripts/builtin/ma.py",           "ma",           enabled=True),
+    load_meta_from_file("scripts/builtin/rsi.py",          "rsi",          enabled=True),
+    load_meta_from_file("scripts/builtin/volume_alert.py", "volume_alert", enabled=True,
+                        param_overrides={"levels": settings.VOLUME_REFERENCE_LINES}),
+    load_meta_from_file("scripts/builtin/kd.py",           "kd",           enabled=False),
+    load_meta_from_file("scripts/builtin/breakout.py",     "breakout",     enabled=False),
+] if s is not None]
 
 
 # ═══════════════════════════════════════════════════════════

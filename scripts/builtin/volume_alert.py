@@ -1,12 +1,14 @@
-"""
-scripts/builtin/volume_alert.py — 成交量爆量水平線
-把「成交量圖要在哪個量級畫水平警示線」變成一般指標 Script，
-取代舊版寫死在 config/settings.py + 前端的版本。
-
-水平線數值/文字仍可從 config/settings.py 的 VOLUME_REFERENCE_LINES 設定
-（透過 main.py 載入時帶入 ScriptMeta.parameters["levels"]），
-也可以不帶參數，使用本檔案內建的預設值。
-"""
+__meta__ = {
+    "name": "Volume_Alert",
+    "description": "成交量爆量水平線",
+    "type": "indicator",
+    "default_params": {
+        "levels": [
+            {"level": 1500, "label": "夜盤大量"},
+            {"level": 400, "label": "日盤大量"},
+        ]
+    },
+}
 
 
 def calc(ctx):

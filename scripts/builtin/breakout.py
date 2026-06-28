@@ -1,13 +1,9 @@
-"""
-scripts/builtin/breakout.py — 突破策略
-示範 Strategy Script 的標準寫法。
-
-Script 規範:
-  - 策略類型必須包含 on_bar(ctx) 函式
-  - 透過 ctx.buy() / ctx.sell() 產生交易訊號
-  - 透過 ctx.data 存取完整歷史資料
-  - 透過 ctx.param() 讀取可調參數
-"""
+__meta__ = {
+    "name": "Breakout",
+    "description": "通道突破策略",
+    "type": "strategy",
+    "default_params": {"lookback": 20},
+}
 
 
 def on_bar(ctx):

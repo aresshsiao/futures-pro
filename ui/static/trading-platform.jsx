@@ -612,31 +612,39 @@ function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs
     });
     
     if (minVal === Infinity) return;
+
+    // Collect ref_lines from all sub series, include them in scale
+    const refLineSet = new Set();
+    subLines.forEach(line => {
+      (line.seriesObj.ref_lines || []).forEach(v => refLineSet.add(v));
+    });
+    const refLinesArr = Array.from(refLineSet);
+
+    refLinesArr.forEach(v => {
+      if (v < minVal) minVal = v;
+      if (v > maxVal) maxVal = v;
+    });
+
     const range = maxVal - minVal || 1;
     const adjMin = minVal - range * 0.1;
     const adjMax = maxVal + range * 0.1;
     const adjRange = adjMax - adjMin;
-    
+
     const toY = (val) => topPad + ((adjMax - val) / adjRange) * drawH;
 
-    // Reference lines (draw 80/20 for KD, 70/30 for RSI based on what's active, or just 50)
-    // To keep it clean, we'll draw 50 always, and maybe top/bottom bounds if it looks like a 0-100 oscillator.
-    if (adjMin <= 20 && adjMax >= 80) {
-      const refs = [20, 50, 80];
-      refs.forEach(v => {
-        if (v < adjMin || v > adjMax) return;
-        const y = toY(v);
-        ctx.strokeStyle = v === 50 ? "#1e2d42" : "rgba(255,255,255,0.1)";
-        ctx.lineWidth = 0.5;
-        ctx.setLineDash(v === 50 ? [] : [3, 2]);
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.font = "9px monospace";
-        ctx.textAlign = "right";
-        ctx.fillStyle = COLORS.textDim;
-        ctx.fillText(v, w - 4, y + 3);
-      });
-    }
+    // Draw ref lines from script definitions
+    refLinesArr.forEach(v => {
+      const y = toY(v);
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([3, 2]);
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "9px monospace";
+      ctx.textAlign = "right";
+      ctx.fillStyle = COLORS.textDim;
+      ctx.fillText(v, w - 4, y + 3);
+    });
 
     // Draw lines
     subLines.forEach(line => {
