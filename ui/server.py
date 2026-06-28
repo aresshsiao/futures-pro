@@ -95,6 +95,7 @@ def setup_event_bridge():
             "close": bar.close,
             "volume": bar.volume,
             "timestamp": bar.timestamp.isoformat(),
+            "time": int(bar.timestamp.timestamp() * 1000),
             "is_closed": bar.is_closed,
         })
 

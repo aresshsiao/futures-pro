@@ -212,6 +212,9 @@ async def _get_bars_from_broker(symbol: str, timeframe: str, count: int) -> list
 
     logger.info("[get_history] API 回傳 %d 根 M1，目標週期=%s count=%d", len(m1_bars), timeframe, count)
 
+    # 將剛從券商取回的歷史資料寫入 DB，確保 Script 引擎計算指標時有最新資料
+    db.insert_bars(m1_bars)
+
     if timeframe == "1":
         # M1 直接回傳，前端不再聚合
         return [
@@ -387,34 +390,48 @@ async def handle_broker_config(ws, data: dict):
     """前端: 連線或斷線指定券商
     data.action    = "connect" | "disconnect"
     data.broker_id = "sinopac" | ...
+    data.kind      = "quote" | "trade" (optional for backward compatibility)
     """
     action    = data.get("action", "connect")
     broker_id = data.get("broker_id", "")
+    kind      = data.get("kind", "both")
 
     if action == "disconnect":
-        await quote.disconnect()
+        if kind in ("quote", "both"):
+            await quote.disconnect()
+        if kind in ("trade", "both"):
+            await trade.disconnect()
+            
         await ws.send_json({
             "type": "broker_config_result",
             "success": True,
             "connected": False,
             "broker_id": broker_id,
+            "kind": kind,
             "message": "已斷線",
         })
         return
 
     # action == "connect"
-    ADAPTERS = {
+    ADAPTERS_QUOTE = {
         "sinopac": lambda: __import__(
             "brokers.adapters.sinopac", fromlist=["SinoPacQuoteAdapter"]
         ).SinoPacQuoteAdapter(),
     }
+    ADAPTERS_TRADE = {
+        "sinopac": lambda: __import__(
+            "brokers.adapters.sinopac", fromlist=["SinoPacTradeAdapter"]
+        ).SinoPacTradeAdapter(),
+    }
 
-    factory = ADAPTERS.get(broker_id)
-    if not factory:
+    q_factory = ADAPTERS_QUOTE.get(broker_id)
+    t_factory = ADAPTERS_TRADE.get(broker_id)
+    if not q_factory or not t_factory:
         await ws.send_json({
             "type": "broker_config_result",
             "success": False,
             "broker_id": broker_id,
+            "kind": kind,
             "message": f"不支援的券商: {broker_id}",
         })
         return
@@ -425,19 +442,32 @@ async def handle_broker_config(ws, data: dict):
             "type": "broker_config_result",
             "success": False,
             "broker_id": broker_id,
+            "kind": kind,
             "message": "找不到 credentials，請檢查 config/brokers.yaml",
         })
         return
 
-    adapter = factory()
-    adapter.broker_id = broker_id  # 方便 handle_broker_status 讀取
-    ok = await quote.set_adapter(adapter, **credentials)
+    ok_quote = True
+    ok_trade = True
+
+    if kind in ("quote", "both"):
+        q_adapter = q_factory()
+        q_adapter.broker_id = broker_id
+        ok_quote = await quote.set_adapter(q_adapter, **credentials)
+
+    if kind in ("trade", "both"):
+        t_adapter = t_factory()
+        t_adapter.broker_id = broker_id
+        ok_trade = await trade.set_adapter(t_adapter, **credentials)
+
+    ok = ok_quote and ok_trade
 
     await ws.send_json({
         "type": "broker_config_result",
         "success": ok,
         "connected": ok,
         "broker_id": broker_id,
+        "kind": kind,
         "message": "連線成功" if ok else "連線失敗，請確認 API Key 是否正確",
     })
 
@@ -576,11 +606,29 @@ async def handle_db_summary(ws, data: dict):
 # ═══════════════════════════════════════════════════════════
 
 def on_bar_complete(bar):
-    """每根 K 棒收完時，執行所有啟用的 Script"""
+    """每根 K 棒收完（或更新）時，執行所有啟用的 Script"""
+    from core.models import Timeframe
+
+    # 目前 Script 引擎一律以 M1 K 棒為基礎運算
+    if bar.timeframe != Timeframe.M1:
+        return
+
+    # 若 K 棒已完全收完，則寫入 DB，確保歷史資料更新
+    if bar.is_closed:
+        db.insert_bars([bar])
+
     import pandas as pd
 
     # 取得足夠的歷史資料給 Script 計算 (配合前端 1800 根歷史 K 棒)
     bars = db.get_bars(bar.symbol, limit=1800)
+    
+    # 若是即時尚未收完的 K 棒（未寫入 DB），手動將它加到序列末端
+    if not bar.is_closed:
+        if bars and bars[-1].timestamp == bar.timestamp:
+            bars[-1] = bar
+        else:
+            bars.append(bar)
+
     if len(bars) < 5:
         return
 

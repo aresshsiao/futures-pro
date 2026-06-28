@@ -18,6 +18,38 @@ from brokers.base import QuoteAdapter, TradeAdapter
 
 logger = logging.getLogger(__name__)
 
+_SHARED_API = None
+_SHARED_CONNECTED = False
+
+def _get_shared_api(credentials):
+    global _SHARED_API, _SHARED_CONNECTED
+    import shioaji as sj
+    if _SHARED_API is None:
+        _SHARED_API = sj.Shioaji()
+    if not _SHARED_CONNECTED:
+        _SHARED_API.login(
+            api_key=credentials.get("api_key", ""),
+            secret_key=credentials.get("secret_key", ""),
+        )
+        if "cert_path" in credentials:
+            _SHARED_API.activate_ca(
+                ca_path=credentials["cert_path"],
+                ca_passwd=credentials.get("cert_password", ""),
+                person_id=credentials.get("person_id", ""),
+            )
+        _SHARED_CONNECTED = True
+    return _SHARED_API
+
+def _logout_shared_api():
+    global _SHARED_API, _SHARED_CONNECTED
+    if _SHARED_API is not None and _SHARED_CONNECTED:
+        try:
+            _SHARED_API.logout()
+        except Exception:
+            pass
+        _SHARED_CONNECTED = False
+
+
 
 class SinoPacQuoteAdapter(QuoteAdapter):
     """永豐金 — 問價 Adapter"""
@@ -40,11 +72,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         try:
             import shioaji as sj
 
-            self._api = sj.Shioaji()
-            self._api.login(
-                api_key=credentials.get("api_key", ""),
-                secret_key=credentials.get("secret_key", ""),
-            )
+            self._api = _get_shared_api(credentials)
 
             # 全域 tick callback 在 connect 時設定一次，避免每次 subscribe 覆蓋
             @self._api.on_tick_fop_v1()
@@ -108,9 +136,8 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             return False
 
     async def disconnect(self) -> None:
-        if self._api:
-            self._api.logout()
-            self._connected = False
+        _logout_shared_api()
+        self._connected = False
 
     def is_connected(self) -> bool:
         return self._connected
@@ -403,19 +430,7 @@ class SinoPacTradeAdapter(TradeAdapter):
         try:
             import shioaji as sj
 
-            self._api = sj.Shioaji()
-            self._api.login(
-                api_key=credentials.get("api_key", ""),
-                secret_key=credentials.get("secret_key", ""),
-            )
-
-            # 啟用憑證 (下單需要)
-            if "cert_path" in credentials:
-                self._api.activate_ca(
-                    ca_path=credentials["cert_path"],
-                    ca_passwd=credentials.get("cert_password", ""),
-                    person_id=credentials.get("person_id", ""),
-                )
+            self._api = _get_shared_api(credentials)
 
             self._setup_callbacks()
             self._connected = True
@@ -426,25 +441,91 @@ class SinoPacTradeAdapter(TradeAdapter):
             return False
 
     async def disconnect(self) -> None:
-        if self._api:
-            self._api.logout()
-            self._connected = False
+        _logout_shared_api()
+        self._connected = False
 
     def is_connected(self) -> bool:
         return self._connected
 
-    def _setup_callbacks(self):
-        @self._api.on_order_callback
-        def on_order(stat, msg):
-            if self._on_order_cb:
-                # TODO: 轉換為 Order model
-                pass
+    _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "TMF": "TMF"}
 
-        @self._api.on_deal_callback
+    def _code_to_symbol(self, code: str) -> str | None:
+        """將 Shioaji code（如 TXFR1）轉回系統商品代碼（如 TX）"""
+        for prefix, symbol in self._CODE_PREFIX_MAP.items():
+            if code.startswith(prefix):
+                return symbol
+        return None
+
+    def _setup_callbacks(self):
+        def on_order(stat, msg):
+            if not self._on_order_cb:
+                return
+            try:
+                from core.models import Order, OrderStatus, Direction, OrderType
+                order_dict = msg.get('order', {})
+                status_dict = msg.get('status', {})
+                contract_dict = msg.get('contract', {})
+                
+                broker_id = order_dict.get('id', '')
+                code = contract_dict.get('code', '')
+                symbol = self._code_to_symbol(code) or code
+                
+                direction = Direction.BUY if order_dict.get('action') == 'Buy' else Direction.SELL
+                qty = order_dict.get('quantity', 0)
+                price = order_dict.get('price', 0.0)
+                
+                status = OrderStatus.SUBMITTED
+                cancel_qty = status_dict.get('cancel_quantity', 0)
+                if cancel_qty > 0:
+                    status = OrderStatus.CANCELLED
+                elif status_dict.get('order_quantity', 0) == 0:
+                    status = OrderStatus.FILLED
+                
+                o = Order(
+                    id=broker_id,
+                    broker_order_id=broker_id,
+                    symbol=symbol,
+                    direction=direction,
+                    order_type=OrderType.LIMIT,
+                    price=price,
+                    qty=qty,
+                    status=status,
+                )
+                o.filled_qty = status_dict.get('deal_quantity', 0)
+                self._on_order_cb(o)
+            except Exception as e:
+                logger.error(f"[SinoPac Trade] on_order error: {e}")
+
         def on_deal(stat, msg):
-            if self._on_fill_cb:
-                # TODO: 轉換為 Fill model
-                pass
+            if not self._on_fill_cb:
+                return
+            try:
+                from core.models import Fill, Direction
+                trade_id = msg.get('trade_id', '')
+                action = msg.get('action', '')
+                code = msg.get('code', '')
+                price = msg.get('price', 0.0)
+                qty = msg.get('quantity', 0)
+                
+                symbol = self._code_to_symbol(code) or code
+                direction = Direction.BUY if action == 'Buy' else Direction.SELL
+                
+                f = Fill(
+                    broker_order_id=trade_id,
+                    symbol=symbol,
+                    direction=direction,
+                    qty=qty,
+                    price=price,
+                )
+                self._on_fill_cb(f)
+            except Exception as e:
+                logger.error(f"[SinoPac Trade] on_deal error: {e}")
+
+        self._api.set_order_callback(on_order)
+        # Note: In some versions of Shioaji, deal callback might be set differently or not exist.
+        # usually set_order_callback handles both, or there is set_deal_callback.
+        if hasattr(self._api, "set_deal_callback"):
+            self._api.set_deal_callback(on_deal)
 
     async def place_order(self, symbol, direction, order_type, qty, price=0.0) -> str:
         import shioaji as sj

@@ -1310,11 +1310,7 @@ function TradeHistoryPanel() {
 
 // ─── Broker Config Panel ──────────────────────────────────────────────
 function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHandler }) {
-  const brokers = BROKER_LIST.map(b => ({
-    ...b,
-    status: (brokerConfig.quote.connected && brokerConfig.quote.name === b.name) ? "connected" : "disconnected"
-  }));
-  const [pending, setPending] = useState(null); // 正在連線/斷線的 broker_id
+  const [pending, setPending] = useState(null); // e.g. "quote-sinopac"
   const [message, setMessage] = useState(null); // { text, ok }
 
   // 連線/斷線結果回調
@@ -1326,14 +1322,56 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
     return cleanup;
   }, [addHandler]);
 
-  const toggleConnect = (id, currentStatus) => {
-    setPending(id);
+  const toggleConnect = (id, kind, currentStatus) => {
+    setPending(`${kind}-${id}`);
     setMessage(null);
     if (currentStatus === "connected") {
-      send("broker_config", { action: "disconnect", broker_id: id });
+      send("broker_config", { action: "disconnect", kind, broker_id: id });
     } else {
-      send("broker_config", { action: "connect", broker_id: id });
+      send("broker_config", { action: "connect", kind, broker_id: id });
     }
+  };
+
+  const renderColumn = (kind, label) => {
+    return (
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, color: COLORS.text, fontWeight: 700, marginBottom: 12, paddingBottom: 8, borderBottom: `1px solid ${COLORS.border}` }}>{label}</div>
+        {BROKER_LIST.map(b => {
+          const isConnected = brokerConfig[kind].connected && brokerConfig[kind].name === b.name;
+          const isLoading = pending === `${kind}-${b.id}`;
+          return (
+            <div key={b.id} style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "10px 12px", background: COLORS.bgCard, borderRadius: 6, marginBottom: 8,
+              border: `1px solid ${isConnected ? "rgba(34,197,94,0.3)" : COLORS.border}`
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{
+                  width: 8, height: 8, borderRadius: "50%",
+                  background: isLoading ? COLORS.warn : isConnected ? COLORS.success : COLORS.textMuted,
+                  boxShadow: isConnected ? `0 0 8px ${COLORS.success}` : "none",
+                  animation: isLoading ? "pulse 1s infinite" : "none",
+                }} />
+                <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{b.name}</span>
+              </div>
+              <button
+                onClick={() => toggleConnect(b.id, kind, isConnected ? "connected" : "disconnected")}
+                disabled={isLoading || (pending !== null && pending !== `${kind}-${b.id}`)}
+                style={{
+                  padding: "4px 14px",
+                  border: `1px solid ${isConnected ? COLORS.danger : COLORS.success}`,
+                  background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
+                  color: isConnected ? COLORS.danger : COLORS.success,
+                  opacity: (pending !== null && pending !== `${kind}-${b.id}`) ? 0.4 : 1,
+                }}
+              >
+                {isLoading ? "處理中..." : isConnected ? "斷線" : "連線"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   return (
@@ -1343,7 +1381,7 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
     }}>
       <div style={{
         background: COLORS.bgPanel, border: `1px solid ${COLORS.borderLight}`,
-        borderRadius: 12, padding: 24, width: 520, maxHeight: "80vh", overflow: "auto",
+        borderRadius: 12, padding: 24, width: 680, maxHeight: "80vh", overflow: "auto",
         boxShadow: "0 20px 60px rgba(0,0,0,0.6)"
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20 }}>
@@ -1353,80 +1391,18 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
           }}>✕</button>
         </div>
 
-        <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 16, padding: "8px 12px", background: COLORS.bgCard, borderRadius: 6, borderLeft: `3px solid ${COLORS.accent}` }}>
-          問價與交易是獨立模塊 — 可以使用不同券商的 API 分別處理問價與下單
-        </div>
-
-        {/* 操作回饋訊息 */}
         {message && (
           <div style={{
-            marginBottom: 12, padding: "8px 12px", borderRadius: 6, fontSize: 11,
+            marginBottom: 16, padding: "8px 12px", borderRadius: 6, fontSize: 11,
             background: message.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
             border: `1px solid ${message.ok ? COLORS.success : COLORS.danger}`,
             color: message.ok ? COLORS.success : COLORS.danger,
           }}>{message.text}</div>
         )}
 
-        {/* Broker List */}
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ fontSize: 12, color: COLORS.textDim, fontWeight: 600, marginBottom: 8 }}>已設定券商</div>
-          {brokers.map(b => {
-            const isConnected = b.status === "connected";
-            const isLoading = pending === b.id;
-            return (
-              <div key={b.id} style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                padding: "10px 12px", background: COLORS.bgCard, borderRadius: 6, marginBottom: 6,
-                border: `1px solid ${isConnected ? "rgba(34,197,94,0.3)" : COLORS.border}`
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{
-                    width: 8, height: 8, borderRadius: "50%",
-                    background: isLoading ? COLORS.warn : isConnected ? COLORS.success : COLORS.textMuted,
-                    boxShadow: isConnected ? `0 0 8px ${COLORS.success}` : "none",
-                    animation: isLoading ? "pulse 1s infinite" : "none",
-                  }} />
-                  <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{b.name}</span>
-                  {isConnected && (
-                    <span style={{ fontSize: 10, color: COLORS.success, background: "rgba(34,197,94,0.1)", padding: "1px 6px", borderRadius: 3 }}>已連線</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => toggleConnect(b.id, b.status)}
-                  disabled={isLoading || (pending !== null && pending !== b.id)}
-                  style={{
-                    padding: "4px 14px",
-                    border: `1px solid ${isConnected ? COLORS.danger : COLORS.success}`,
-                    background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
-                    color: isConnected ? COLORS.danger : COLORS.success,
-                    opacity: (pending !== null && pending !== b.id) ? 0.4 : 1,
-                  }}
-                >
-                  {isLoading ? "處理中..." : isConnected ? "斷線" : "連線"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Module Assignment */}
-        <div style={{ display: "flex", gap: 12 }}>
-          {[["quoteBroker", "問價模塊"], ["tradeBroker", "交易模塊"]].map(([key, label]) => (
-            <div key={key} style={{ flex: 1 }}>
-              <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 4 }}>{label}</div>
-              <select value={brokerConfig[key]}
-                onChange={e => setBrokerConfig(c => ({ ...c, [key]: e.target.value }))}
-                style={{
-                  width: "100%", padding: "8px 10px", background: COLORS.bg,
-                  border: `1px solid ${COLORS.border}`, borderRadius: 4,
-                  color: COLORS.text, fontSize: 12, outline: "none"
-                }}>
-                {brokers.filter(b => b.status === "connected").map(b => (
-                  <option key={b.id} value={b.name}>{b.name}</option>
-                ))}
-              </select>
-            </div>
-          ))}
+        <div style={{ display: "flex", gap: 24 }}>
+          {renderColumn("quote", "問價模塊")}
+          {renderColumn("trade", "交易模塊")}
         </div>
       </div>
     </div>
