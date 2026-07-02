@@ -438,6 +438,18 @@ async def handle_broker_config(ws, data: dict):
         return
 
     # action == "connect"
+    # 同一個券商已連線 → 直接回傳成功，不重連（避免多個 tab 互相踢掉連線）
+    if quote.is_connected and trade.is_connected:
+        await ws.send_json({
+            "type": "broker_config_result",
+            "success": True,
+            "connected": True,
+            "broker_id": broker_id,
+            "kind": kind,
+            "message": "已連線",
+        })
+        return
+
     ADAPTERS_QUOTE = {
         "sinopac": lambda: __import__(
             "brokers.adapters.sinopac", fromlist=["SinoPacQuoteAdapter"]

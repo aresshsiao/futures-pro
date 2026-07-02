@@ -2336,12 +2336,7 @@ export default function TradingPlatform() {
   useEffect(() => {
     if (!connected) return;
     send("broker_status", {});
-
-    // 自動登入上次成功連線的券商
-    const autoBroker = localStorage.getItem("autoConnectBrokerId");
-    if (autoBroker) {
-      send("broker_config", { action: "connect", broker_id: autoBroker });
-    }
+    // 自動連線：移到 broker_status handler 裡，確認未連線才送 connect
   }, [connected, send]);
 
   useEffect(() => {
@@ -2350,6 +2345,13 @@ export default function TradingPlatform() {
         quote: { name: msg.quote?.name || "未連線", connected: msg.quote?.connected || false },
         trade: { name: msg.trade?.name || "未連線", connected: msg.trade?.connected || false },
       });
+      // 確認後端尚未連線才自動連線（避免多個 tab 重複觸發 connect 砍掉現有連線）
+      if (!msg.quote?.connected && !msg.trade?.connected) {
+        const autoBroker = localStorage.getItem("autoConnectBrokerId");
+        if (autoBroker) {
+          send("broker_config", { action: "connect", broker_id: autoBroker });
+        }
+      }
     });
     const handle2 = addHandler("broker_status_update", (msg) => {
       if (msg.kind === "quote" || msg.kind === "trade") {

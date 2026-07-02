@@ -30,6 +30,7 @@ def _get_shared_api(credentials):
         _SHARED_API.login(
             api_key=credentials.get("api_key", ""),
             secret_key=credentials.get("secret_key", ""),
+            subscribe_trade=credentials.get("subscribe_trade", True),
         )
         if "cert_path" in credentials:
             _SHARED_API.activate_ca(
