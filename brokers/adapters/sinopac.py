@@ -245,9 +245,14 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 end_str = curr_end_date.strftime("%Y-%m-%d")
                 
                 # 登入後 Shioaji 需要數秒初始化，kbars() 可能立即返回空；最多重試 3 次
+                # kbars() 是同步阻塞呼叫，用 run_in_executor 避免凍結 asyncio event loop
                 kbars = None
+                loop = asyncio.get_running_loop()
                 for attempt in range(1, 4):
-                    kbars = self._api.kbars(contract=contract, start=start_str, end=end_str)
+                    _s, _e = start_str, end_str
+                    kbars = await loop.run_in_executor(
+                        None, lambda: self._api.kbars(contract=contract, start=_s, end=_e)
+                    )
                     if kbars and kbars.ts:
                         break
                     if attempt < 3:

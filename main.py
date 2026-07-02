@@ -128,25 +128,43 @@ async def handle_get_history(ws, data: dict):
 
     bars_out: list[dict] = []
 
-    if quote.is_connected:
-        bars_out = await _get_bars_from_broker(symbol, timeframe, count)
+    # DB 優先策略：server 一直在跑，DB 已有最新資料，browser refresh 不需要重打 API
+    # 只有 DB 完全沒有該商品資料時，才去打 SinoPac API（第一次載入或換商品）
+    db_limit = 999_999 if timeframe in ("日", "周", "月") else max(count, 1800)
+    db_bars = db.get_bars(symbol, limit=db_limit)
 
-    if not bars_out:
-        # Fallback: 從 DB 讀取
+    DB_SUFFICIENT = 200  # DB 至少要有這麼多 M1 才算有效（約 3 小時台指期資料）
+    if len(db_bars) >= DB_SUFFICIENT:
         if timeframe in ("日", "周", "月"):
-            bars_raw = db.get_bars(symbol, limit=999_999)
-            bars_out = _aggregate_bars(bars_raw, timeframe, count)
+            bars_out = _aggregate_bars(db_bars, timeframe, count)
         else:
-            bars_raw = db.get_bars(symbol, limit=count)
             bars_out = [
                 {
                     "time": int(b.timestamp.timestamp()) * 1000,
                     "open": b.open, "high": b.high,
                     "low": b.low, "close": b.close,
-                    "volume": b.volume,
-                    "delivery": b.delivery,
+                    "volume": b.volume, "delivery": b.delivery,
                 }
-                for b in bars_raw
+                for b in db_bars
+            ]
+
+    # DB 不足 → 從券商 API 抓（會寫入 DB，下次 refresh 就走 DB）
+    if not bars_out and quote.is_connected:
+        bars_out = await _get_bars_from_broker(symbol, timeframe, count)
+
+    # 券商也沒有 → 用 DB 現有的（即使不足 DB_SUFFICIENT）
+    if not bars_out and db_bars:
+        if timeframe in ("日", "周", "月"):
+            bars_out = _aggregate_bars(db_bars, timeframe, count)
+        else:
+            bars_out = [
+                {
+                    "time": int(b.timestamp.timestamp()) * 1000,
+                    "open": b.open, "high": b.high,
+                    "low": b.low, "close": b.close,
+                    "volume": b.volume, "delivery": b.delivery,
+                }
+                for b in db_bars
             ]
 
     await ws.send_json({
