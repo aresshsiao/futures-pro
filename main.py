@@ -44,17 +44,21 @@ bar_builder = BarBuilder()
 taifex = TaifexImporter()
 # script_engine 定義在 ui/server.py（理由見該檔案註解），這裡直接重用同一個實例
 
-# 內建 Script 清單：只需指定 id、file_path、enabled。
-# name / description / default_params 從各 script 的 __meta__ 讀取。
-# Volume_Alert 的 levels 從 settings 覆蓋，讓設定維持單一來源。
-BUILTIN_SCRIPTS = [s for s in [
-    load_meta_from_file("scripts/builtin/ma.py",           "ma",           enabled=True),
-    load_meta_from_file("scripts/builtin/rsi.py",          "rsi",          enabled=True),
-    load_meta_from_file("scripts/builtin/volume_alert.py", "volume_alert", enabled=True,
-                        param_overrides={"levels": settings.VOLUME_REFERENCE_LINES}),
-    load_meta_from_file("scripts/builtin/kd.py",           "kd",           enabled=False),
-    load_meta_from_file("scripts/builtin/breakout.py",     "breakout",     enabled=False),
-] if s is not None]
+# 自動掃描 scripts/builtin/ 目錄，無需手動維護清單。
+# 新增 script 只需將 .py 放入該目錄，並在 __meta__ 中設定 "enabled": True/False。
+# 需要覆蓋參數的特殊 script（如 volume_alert 讀取 settings）在此指定。
+_BUILTIN_PARAM_OVERRIDES: dict[str, dict] = {
+    "volume_alert": {"levels": settings.VOLUME_REFERENCE_LINES},
+}
+
+from pathlib import Path as _Path
+BUILTIN_SCRIPTS = [
+    s for _py in sorted(_Path("scripts/builtin").glob("*.py"))
+    if (s := load_meta_from_file(
+        str(_py), _py.stem,
+        param_overrides=_BUILTIN_PARAM_OVERRIDES.get(_py.stem),
+    )) is not None
+]
 
 
 # ═══════════════════════════════════════════════════════════

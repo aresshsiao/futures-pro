@@ -2,6 +2,7 @@ __meta__ = {
     "name": "RSI",
     "description": "RSI 相對強弱指標",
     "type": "indicator",
+    "enabled": True,
     "default_params": {"period": 14, "overbought": 70, "oversold": 30},
 }
 

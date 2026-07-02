@@ -2,6 +2,7 @@ __meta__ = {
     "name": "MA",
     "description": "均線指標 (可設定多條)",
     "type": "indicator",
+    "enabled": True,
     "default_params": {"periods": "5,20,60"},
 }
 

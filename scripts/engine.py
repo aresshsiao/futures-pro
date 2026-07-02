@@ -161,7 +161,7 @@ class ScriptContext:
 #  Script 執行引擎
 # ═══════════════════════════════════════════════════════════
 
-def load_meta_from_file(file_path: str, script_id: str, enabled: bool = False, param_overrides: dict | None = None) -> Optional["ScriptMeta"]:
+def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = None, param_overrides: dict | None = None) -> Optional["ScriptMeta"]:
     """從 script 檔案讀取 __meta__ 並建立 ScriptMeta"""
     path = Path(file_path)
     if not path.exists():
@@ -179,6 +179,9 @@ def load_meta_from_file(file_path: str, script_id: str, enabled: bool = False, p
         if param_overrides:
             default_params.update(param_overrides)
         script_type = ScriptType.INDICATOR if type_str == "indicator" else ScriptType.STRATEGY
+        # enabled 優先用呼叫端傳入的值；未傳入則讀 __meta__["enabled"]，預設 False
+        if enabled is None:
+            enabled = bool(meta_dict.get("enabled", False))
         return ScriptMeta(
             id=script_id, name=name, script_type=script_type,
             description=description, enabled=enabled,

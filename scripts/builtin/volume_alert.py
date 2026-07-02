@@ -2,6 +2,7 @@ __meta__ = {
     "name": "Volume_Alert",
     "description": "成交量爆量水平線",
     "type": "indicator",
+    "enabled": True,
     "default_params": {
         "levels": [
             {"level": 1500, "label": "夜盤大量"},
