@@ -27,6 +27,15 @@ LOG_LEVEL = "INFO"
 # 個別券商底層 API 的日誌等級（因報價跳動頻繁，若不想看到洗版可改為 INFO 或 WARNING）
 BROKER_LOG_LEVEL = "INFO"
 
+# ── Core Service 自動連線 ────────────────────────────
+# server 啟動、event loop ready 後，Core Service 會自動連線券商並訂閱預設商品，
+# 使券商連線的擁有權屬於 Core 而非 browser（見 ARCHITECTURE.md §4.1）。
+#   None / ""  → 不自動連線，等 UI 手動觸發
+#   "sinopac"  → 啟動時自動連線永豐金
+AUTO_CONNECT_BROKER = "sinopac"
+# 自動連線成功後自動訂閱的商品清單（Core 只會向券商訂閱一次，多分頁共用）
+DEFAULT_SUBSCRIBE_SYMBOLS = ["TX", "TAIEX"]
+
 # ── 交易 ─────────────────────────────────────────────
 DEFAULT_SYMBOL = "TX"
 TICK_SIZE = {

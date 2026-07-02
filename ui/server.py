@@ -237,6 +237,15 @@ def register_action(action: str, handler):
     _action_handlers[action] = handler
 
 
+# Startup hooks（由 main.py 注入，在 event loop ready 後執行，例如 Core 自動連線）
+_startup_hooks: list = []
+
+
+def register_startup_hook(fn):
+    """註冊一個 async 啟動函式，會在 FastAPI startup 事件中依序 await 執行。"""
+    _startup_hooks.append(fn)
+
+
 # ═══════════════════════════════════════════════════════════
 #  REST API 端點
 # ═══════════════════════════════════════════════════════════
@@ -315,3 +324,11 @@ async def startup():
     EventBus().set_main_loop(asyncio.get_running_loop())
     setup_event_bridge()
     logger.info("[Server] Futures Pro 伺服器啟動")
+
+    # 執行 Core Service 啟動 hook（自動連線券商 + 訂閱預設商品）
+    # 放在此處是因為 emit_sync 需要 running loop，而 loop 到這裡才 ready。
+    for hook in _startup_hooks:
+        try:
+            await hook()
+        except Exception:
+            logger.exception("[Server] startup hook 執行失敗")

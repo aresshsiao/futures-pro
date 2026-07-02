@@ -19,7 +19,7 @@ from scripts.engine import load_meta_from_file
 from data.database import Database
 from data.bar_builder import BarBuilder
 from data.sources.taifex import TaifexImporter
-from ui.server import app, register_action, script_engine
+from ui.server import app, register_action, register_startup_hook, script_engine
 
 # ── Logging ───────────────────────────────────────────
 
@@ -411,6 +411,77 @@ async def handle_broker_status(ws, data: dict):
     })
 
 
+async def _connect_broker(broker_id: str, kind: str = "both") -> tuple[bool, str]:
+    """核心券商連線邏輯（不依賴 ws）。
+
+    供 Core Service 啟動時自動連線與 WS handler(handle_broker_config) 共用。
+    回傳 (success, message)。已連線時直接回傳成功，不重連。
+    """
+    if not broker_id:
+        return False, "未指定券商"
+
+    # 已連線 → 不重連（避免自動連線 / 多分頁互相踢掉現有連線）
+    if quote.is_connected and trade.is_connected:
+        return True, "已連線"
+
+    ADAPTERS_QUOTE = {
+        "sinopac": lambda: __import__(
+            "brokers.adapters.sinopac", fromlist=["SinoPacQuoteAdapter"]
+        ).SinoPacQuoteAdapter(),
+    }
+    ADAPTERS_TRADE = {
+        "sinopac": lambda: __import__(
+            "brokers.adapters.sinopac", fromlist=["SinoPacTradeAdapter"]
+        ).SinoPacTradeAdapter(),
+    }
+
+    q_factory = ADAPTERS_QUOTE.get(broker_id)
+    t_factory = ADAPTERS_TRADE.get(broker_id)
+    if not q_factory or not t_factory:
+        return False, f"不支援的券商: {broker_id}"
+
+    credentials = _load_broker_credentials(broker_id)
+    if not credentials:
+        return False, "找不到 credentials，請檢查 config/brokers.yaml"
+
+    ok_quote = True
+    ok_trade = True
+    if kind in ("quote", "both"):
+        q_adapter = q_factory()
+        q_adapter.broker_id = broker_id
+        ok_quote = await quote.set_adapter(q_adapter, **credentials)
+    if kind in ("trade", "both"):
+        t_adapter = t_factory()
+        t_adapter.broker_id = broker_id
+        ok_trade = await trade.set_adapter(t_adapter, **credentials)
+
+    ok = ok_quote and ok_trade
+    return ok, ("連線成功" if ok else "連線失敗，請確認 API Key 是否正確")
+
+
+async def startup_core():
+    """Core Service 啟動 hook — event loop ready 後自動連線券商並訂閱預設商品。
+
+    在 ui/server.py 的 FastAPI startup 事件中被呼叫（此時 loop 已 ready，
+    emit_sync 可正確排程券商 callback）。券商連線的擁有權由此屬於 Core，
+    而非 browser（見 ARCHITECTURE.md §4.1）。
+    """
+    broker_id = getattr(settings, "AUTO_CONNECT_BROKER", None)
+    if not broker_id:
+        logger.info("[Core] AUTO_CONNECT_BROKER 未設定，等待 UI 手動連線")
+        return
+
+    ok, message = await _connect_broker(broker_id, "both")
+    if not ok:
+        logger.warning("[Core] 自動連線 %s 失敗: %s", broker_id, message)
+        return
+
+    symbols = getattr(settings, "DEFAULT_SUBSCRIBE_SYMBOLS", [])
+    for sym in symbols:
+        await quote.subscribe(sym)
+    logger.info("[Core] 自動連線 %s 成功，已訂閱: %s", broker_id, ", ".join(symbols) or "(無)")
+
+
 async def handle_broker_config(ws, data: dict):
     """前端: 連線或斷線指定券商
     data.action    = "connect" | "disconnect"
@@ -437,75 +508,15 @@ async def handle_broker_config(ws, data: dict):
         })
         return
 
-    # action == "connect"
-    # 同一個券商已連線 → 直接回傳成功，不重連（避免多個 tab 互相踢掉連線）
-    if quote.is_connected and trade.is_connected:
-        await ws.send_json({
-            "type": "broker_config_result",
-            "success": True,
-            "connected": True,
-            "broker_id": broker_id,
-            "kind": kind,
-            "message": "已連線",
-        })
-        return
-
-    ADAPTERS_QUOTE = {
-        "sinopac": lambda: __import__(
-            "brokers.adapters.sinopac", fromlist=["SinoPacQuoteAdapter"]
-        ).SinoPacQuoteAdapter(),
-    }
-    ADAPTERS_TRADE = {
-        "sinopac": lambda: __import__(
-            "brokers.adapters.sinopac", fromlist=["SinoPacTradeAdapter"]
-        ).SinoPacTradeAdapter(),
-    }
-
-    q_factory = ADAPTERS_QUOTE.get(broker_id)
-    t_factory = ADAPTERS_TRADE.get(broker_id)
-    if not q_factory or not t_factory:
-        await ws.send_json({
-            "type": "broker_config_result",
-            "success": False,
-            "broker_id": broker_id,
-            "kind": kind,
-            "message": f"不支援的券商: {broker_id}",
-        })
-        return
-
-    credentials = _load_broker_credentials(broker_id)
-    if not credentials:
-        await ws.send_json({
-            "type": "broker_config_result",
-            "success": False,
-            "broker_id": broker_id,
-            "kind": kind,
-            "message": "找不到 credentials，請檢查 config/brokers.yaml",
-        })
-        return
-
-    ok_quote = True
-    ok_trade = True
-
-    if kind in ("quote", "both"):
-        q_adapter = q_factory()
-        q_adapter.broker_id = broker_id
-        ok_quote = await quote.set_adapter(q_adapter, **credentials)
-
-    if kind in ("trade", "both"):
-        t_adapter = t_factory()
-        t_adapter.broker_id = broker_id
-        ok_trade = await trade.set_adapter(t_adapter, **credentials)
-
-    ok = ok_quote and ok_trade
-
+    # action == "connect" — 委派給核心邏輯（與 Core 啟動自動連線共用同一份程式）
+    ok, message = await _connect_broker(broker_id, kind)
     await ws.send_json({
         "type": "broker_config_result",
         "success": ok,
         "connected": ok,
         "broker_id": broker_id,
         "kind": kind,
-        "message": "連線成功" if ok else "連線失敗，請確認 API Key 是否正確",
+        "message": message,
     })
 
 
@@ -898,6 +909,9 @@ def setup():
     # 事件接線
     bus.on("bar", on_bar_complete)
     bus.on("script_signal", on_strategy_signal)
+
+    # Core Service 啟動 hook — event loop ready 後自動連線券商 + 訂閱預設商品
+    register_startup_hook(startup_core)
 
     # 載入內建 Script（指標 / 策略）
     for meta in BUILTIN_SCRIPTS:
