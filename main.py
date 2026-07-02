@@ -60,6 +60,28 @@ BUILTIN_SCRIPTS = [
     )) is not None
 ]
 
+# Script 啟用狀態持久化 — 儲存於 config/script_states.json
+_SCRIPT_STATES_PATH = _Path("config/script_states.json")
+
+def _load_script_states() -> dict[str, bool]:
+    """讀取已儲存的 script 啟用/停用狀態"""
+    if _SCRIPT_STATES_PATH.exists():
+        import json as _json
+        try:
+            return _json.loads(_SCRIPT_STATES_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def _save_script_states() -> None:
+    """將所有 script 目前的啟用/停用狀態寫入磁碟"""
+    import json as _json
+    states = {sid: meta.enabled for sid, meta in script_engine._scripts.items()}
+    _SCRIPT_STATES_PATH.write_text(
+        _json.dumps(states, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
 
 # ═══════════════════════════════════════════════════════════
 #  WebSocket Action Handlers
@@ -634,6 +656,8 @@ async def handle_toggle_script(ws, data: dict):
     else:
         script_engine.enable_script(script_id)
 
+    _save_script_states()
+
     await ws.send_json({
         "type": "script_toggled",
         "id": script_id,
@@ -870,6 +894,13 @@ def setup():
                 script_engine.load_script(meta)
         except Exception as e:
             logger.error(f"載入使用者 Script 失敗: {e}")
+
+    # 套用已儲存的啟用/停用狀態（覆蓋 __meta__["enabled"] 預設值）
+    for sid, enabled in _load_script_states().items():
+        if enabled:
+            script_engine.enable_script(sid)
+        else:
+            script_engine.disable_script(sid)
 
     # 資料庫
     db.connect()

@@ -1,0 +1,8 @@
+{
+  "breakout": false,
+  "kd": false,
+  "ma": true,
+  "rsi": true,
+  "volume_alert": true,
+  "window_price": true
+}

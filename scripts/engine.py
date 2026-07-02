@@ -82,33 +82,56 @@ class ScriptContext:
 
     # ── 指標繪圖 (Indicator) ──────────────────────────
 
-    def plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6", panel: str = "main") -> None:
-        """畫一條線 (預設疊在K線上)"""
+    def plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",
+             panel: str = "main", dash: str | list | None = None, width: float = 1.2) -> None:
+        """畫一條線 (預設疊在K線上)
+
+        dash  : None/"solid"=實線, "dash"=長虛線, "dot"=點線, "dash-dot"=點劃線,
+                或直接傳 canvas setLineDash 陣列，例如 [6, 3]
+        width : 線寬 (邏輯像素，預設 1.2)
+        """
         from core.models import PanelType
-        
+
         if isinstance(values, pd.Series):
-            # 處理 NaN，轉為 None 讓 JSON 可以序列化
             values = [None if pd.isna(x) else x for x in values.tolist()]
-            
+
         p_type = PanelType.MAIN
         if panel == "volume":
             p_type = PanelType.VOLUME
         elif panel == "sub":
             p_type = PanelType.SUB
-            
+
+        _DASH_PRESETS = {
+            "solid":    [],
+            "dash":     [6, 3],
+            "dot":      [2, 3],
+            "dash-dot": [6, 3, 2, 3],
+        }
+        if dash is None or dash == "solid":
+            dash_pattern = []
+        elif isinstance(dash, str):
+            dash_pattern = _DASH_PRESETS.get(dash, [])
+        else:
+            dash_pattern = list(dash)
+
         self._plots[name] = {
             "values": values,
             "color": color,
-            "panel": p_type.value
+            "panel": p_type.value,
+            "dash":  dash_pattern,
+            "width": float(width),
         }
 
-    def vol_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6") -> None:
+    def vol_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",
+                dash: str | list | None = None, width: float = 1.2) -> None:
         """畫在量圖 (等同 panel="volume")"""
-        self.plot(name, values, color, panel="volume")
+        self.plot(name, values, color, panel="volume", dash=dash, width=width)
 
-    def sub_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6", ref_lines: list[float] | None = None) -> None:
+    def sub_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",
+                ref_lines: list[float] | None = None,
+                dash: str | list | None = None, width: float = 1.2) -> None:
         """畫在獨立子圖 (等同 panel="sub")，ref_lines 可指定水平參考線 (如 [80, 20])"""
-        self.plot(name, values, color, panel="sub")
+        self.plot(name, values, color, panel="sub", dash=dash, width=width)
         if ref_lines:
             self._plots[name]["ref_lines"] = ref_lines
 

@@ -368,28 +368,28 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
         if (seriesObj.panel !== "main") return;
         
         ctx.strokeStyle = seriesObj.color || "#f59e0b";
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = seriesObj.width ?? 1.2;
+        ctx.setLineDash(seriesObj.dash ?? []);
         ctx.beginPath();
         let started = false;
-        
+
         const seriesStartIdx = (seriesObj.values.length || 0) - data.length + globalStart;
         for (let i = 0; i < visibleData.length; i++) {
           const gi = seriesStartIdx + i;
           if (gi < 0 || gi >= seriesObj.values.length) continue;
-          
+
           const val = seriesObj.values[gi];
           if (val == null) continue;
-          
+
           const x = (startIdx + i) * candleW + candleW / 2;
           const y = 10 + ((adjMax - val) / (adjMax - adjMin)) * (h - 20);
           if (!started) { ctx.moveTo(x, y); started = true; }
           else ctx.lineTo(x, y);
         }
         ctx.stroke();
+        ctx.setLineDash([]);
       });
     });
-
-
 
     // Crosshair
     if (crosshair) {
@@ -543,24 +543,26 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
         if (seriesObj.panel !== "volume") return;
         
         ctx.strokeStyle = seriesObj.color || "#f59e0b";
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = seriesObj.width ?? 1.2;
+        ctx.setLineDash(seriesObj.dash ?? []);
         ctx.beginPath();
         let started = false;
-        
+
         const seriesStartIdx = (seriesObj.values.length || 0) - data.length + globalStart;
         for (let i = 0; i < visibleData.length; i++) {
           const gi = seriesStartIdx + i;
           if (gi < 0 || gi >= seriesObj.values.length) continue;
-          
+
           const val = seriesObj.values[gi];
           if (val == null) continue;
-          
+
           const x = (startIdx + i) * barW + barW / 2;
           const y = bottomY - (val / maxVol) * (bottomY - 10);
           if (!started) { ctx.moveTo(x, y); started = true; }
           else ctx.lineTo(x, y);
         }
         ctx.stroke();
+        ctx.setLineDash([]);
       });
     });
 
@@ -708,7 +710,8 @@ function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs
     // Draw lines
     subLines.forEach(line => {
       ctx.strokeStyle = line.seriesObj.color || "#f59e0b";
-      ctx.lineWidth = 1.2;
+      ctx.lineWidth = line.seriesObj.width ?? 1.2;
+      ctx.setLineDash(line.seriesObj.dash ?? []);
       ctx.beginPath();
       let started = false;
       const sStart = (line.seriesObj.values.length || 0) - data.length + globalStart;
@@ -721,6 +724,7 @@ function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      ctx.setLineDash([]);
     });
 
     // Legend
