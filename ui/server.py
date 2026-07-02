@@ -80,6 +80,14 @@ def setup_event_bridge():
     bus = EventBus()
 
     async def forward_tick(tick: Tick):
+        if tick.symbol == "TAIEX":
+            await manager.broadcast({
+                "type": "index_tick",
+                "price": tick.price,
+                "change": tick.change,
+                "change_pct": tick.change_pct,
+            })
+            return
         await manager.broadcast({
             "type": "tick",
             "symbol": tick.symbol,

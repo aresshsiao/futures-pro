@@ -96,6 +96,25 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 )
                 cb(t)
 
+            @self._api.on_tick_stk_v1()
+            def _on_stk_tick(exchange, tick):
+                # 僅處理加權指數 Y9999
+                if tick.code != "Y9999":
+                    return
+                cb = self._tick_callbacks.get("TAIEX")
+                if cb is None:
+                    return
+                logger.debug("[SinoPac] TAIEX price=%.2f chg=%.2f", float(tick.close), float(getattr(tick, "price_chg", 0)))
+                t = Tick(
+                    symbol="TAIEX",
+                    price=float(tick.close),
+                    volume=int(tick.volume),
+                    timestamp=tick.datetime,
+                    change=float(getattr(tick, "price_chg", 0.0)),
+                    change_pct=float(getattr(tick, "pct_chg", 0.0)),
+                )
+                cb(t)
+
             @self._api.on_bidask_fop_v1()
             def _on_bidask(exchange, bidask):
                 symbol = self._code_to_symbol(bidask.code)
@@ -155,6 +174,8 @@ class SinoPacQuoteAdapter(QuoteAdapter):
 
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBook], None]) -> None:
         """訂閱五檔（同一 symbol 只發一次訂閱請求）"""
+        if symbol == "TAIEX":
+            return  # 指數無五檔資料
         self._book_callbacks[symbol] = callback
         contract = self._get_contract(symbol)
         if contract:
@@ -285,6 +306,12 @@ class SinoPacQuoteAdapter(QuoteAdapter):
 
     def _get_contract(self, symbol: str):
         """將系統代碼轉換為 Shioaji contract"""
+        if symbol == "TAIEX":
+            try:
+                return self._api.Contracts.Indexs.TSE["Y9999"]
+            except (KeyError, AttributeError):
+                logger.warning("[SinoPac] 找不到加權指數合約 (Y9999)")
+                return None
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:

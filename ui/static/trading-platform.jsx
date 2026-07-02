@@ -2077,11 +2077,25 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const [months, setMonths] = useState([]);
   const [selectedContract, setSelectedContract] = useState("");
   const [quoteData, setQuoteData] = useState([]);
+  const [taiexIndex, setTaiexIndex] = useState({ price: 0, change: 0, change_pct: 0 });
 
   // Fetch months on mount or when connection is established
   useEffect(() => {
     if (send && connected) send("get_options_months", { symbol: "TXO" });
   }, [send, connected]);
+
+  // Subscribe to TAIEX index for 加權指數 display
+  useEffect(() => {
+    if (connected && send) send("subscribe", { symbol: "TAIEX" });
+  }, [connected, send]);
+
+  // Listen for TAIEX index tick
+  useEffect(() => {
+    if (!addHandler) return;
+    return addHandler("index_tick", (msg) => {
+      setTaiexIndex({ price: msg.price, change: msg.change || 0, change_pct: msg.change_pct || 0 });
+    });
+  }, [addHandler]);
 
   // Handle WebSocket messages
   useEffect(() => {
@@ -2184,9 +2198,19 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
       {/* Underlying Info */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "6px", background: COLORS.bgPanel, borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, fontSize: 11 }}>
         <span style={{ color: COLORS.textMuted }}>加權指數</span>
-        <span style={{ color: COLORS.up, fontWeight: 700 }}>46465.20</span>
-        <span style={{ color: COLORS.up }}>587.81 ▲</span>
-        <span style={{ color: COLORS.up }}>1.28%</span>
+        {taiexIndex.price > 0 ? (() => {
+          const up = taiexIndex.change >= 0;
+          const color = up ? COLORS.up : COLORS.down;
+          return (
+            <>
+              <span style={{ color, fontWeight: 700 }}>{taiexIndex.price.toFixed(2)}</span>
+              <span style={{ color }}>{Math.abs(taiexIndex.change).toFixed(2)} {up ? "▲" : "▼"}</span>
+              <span style={{ color }}>{Math.abs(taiexIndex.change_pct).toFixed(2)}%</span>
+            </>
+          );
+        })() : (
+          <span style={{ color: COLORS.textMuted }}>--</span>
+        )}
       </div>
 
       {/* Main Headers */}
@@ -2508,12 +2532,41 @@ export default function TradingPlatform() {
         if (msg.timeframe !== "1m") return;
 
         if (!msg.is_closed) {
-          // 即時棒：更新 liveM1Bar，供 liveM1Bar effect 更新 klineData
+          // 即時棒：直接更新 klineData（不等 liveM1Bar effect，減少一次 render cycle）
+          // 同時更新 liveM1Bar 供 volume alert effect 使用
           setLiveM1Bar({
             time: barTimeMs,
             open: msg.open, high: msg.high, low: msg.low,
             close: msg.close, volume: msg.volume,
           });
+          const _minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
+          if (_minutes) {
+            const _periodMs = _minutes * 60 * 1000;
+            const _bucket = Math.floor(barTimeMs / _periodMs) * _periodMs;
+            setKlineData(prev => {
+              if (!prev.length) return prev;
+              const last = prev[prev.length - 1];
+              if (_bucket === last.time) {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...last,
+                  high: Math.max(last.high, msg.high),
+                  low:  Math.min(last.low,  msg.low),
+                  close: msg.close,
+                  volume: Math.max(last.volume, msg.volume),
+                };
+                return updated;
+              } else if (_bucket > last.time) {
+                return [...prev, {
+                  time: _bucket,
+                  open: msg.open, high: msg.high, low: msg.low,
+                  close: msg.close, volume: msg.volume,
+                  delivery: last.delivery,
+                }].slice(-1500);
+              }
+              return prev;
+            });
+          }
           return;
         }
 
@@ -2531,60 +2584,22 @@ export default function TradingPlatform() {
     });
   }, [addHandler, chartSymbol, timeframe]);
 
-  // liveM1Bar 變化時更新 klineData 當前棒（取代舊的 tick handler）
-  // liveM1Bar 來自 BarBuilder 推送的 is_closed=false M1 棒，OHLCV 完全正確
+  // liveM1Bar 變化時更新 klineData（僅日/週/月；分鐘K 已在 bar handler 直接更新）
   useEffect(() => {
     if (!liveM1Bar) return;
-
-    if (["日", "周", "月"].includes(timeframe)) {
-      // 日週月：用最新 M1 棒的收盤更新當前棒
-      setKlineData(prev => {
-        if (!prev.length) return prev;
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        updated[updated.length - 1] = {
-          ...last,
-          high: Math.max(last.high, liveM1Bar.high),
-          low: Math.min(last.low, liveM1Bar.low),
-          close: liveM1Bar.close,
-        };
-        return updated;
-      });
-      return;
-    }
-
-    const minutes = { "1": 1, "3": 3, "15": 15, "60": 60 }[timeframe];
-    if (!minutes) return;
-    const periodMs = minutes * 60 * 1000;
-    const bucketTime = Math.floor(liveM1Bar.time / periodMs) * periodMs;
+    if (!["日", "周", "月"].includes(timeframe)) return;
 
     setKlineData(prev => {
       if (!prev.length) return prev;
-      const last = prev[prev.length - 1];
-
-      if (bucketTime === last.time) {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          ...last,
-          high: Math.max(last.high, liveM1Bar.high),
-          low: Math.min(last.low, liveM1Bar.low),
-          close: liveM1Bar.close,
-          volume: Math.max(last.volume, liveM1Bar.volume),
-        };
-        return updated;
-      } else if (bucketTime > last.time) {
-        // 新週期開始
-        return [...prev, {
-          time: bucketTime,
-          open: liveM1Bar.open,
-          high: liveM1Bar.high,
-          low: liveM1Bar.low,
-          close: liveM1Bar.close,
-          volume: liveM1Bar.volume,
-          delivery: last.delivery,
-        }].slice(-1500);
-      }
-      return prev;
+      const updated = [...prev];
+      const last = updated[updated.length - 1];
+      updated[updated.length - 1] = {
+        ...last,
+        high: Math.max(last.high, liveM1Bar.high),
+        low: Math.min(last.low, liveM1Bar.low),
+        close: liveM1Bar.close,
+      };
+      return updated;
     });
   }, [liveM1Bar, timeframe]);
 

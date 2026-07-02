@@ -587,29 +587,21 @@ async def handle_db_summary(ws, data: dict):
 # ═══════════════════════════════════════════════════════════
 
 def on_bar_complete(bar):
-    """每根 K 棒收完（或更新）時，執行所有啟用的 Script"""
+    """M1 棒收完時寫 DB 並重跑 Script（live 棒直接跳過，避免每 tick 阻塞 event loop）"""
     from core.models import Timeframe
 
-    # 目前 Script 引擎一律以 M1 K 棒為基礎運算
     if bar.timeframe != Timeframe.M1:
         return
 
-    # 若 K 棒已完全收完，則寫入 DB，確保歷史資料更新
-    if bar.is_closed:
-        db.insert_bars([bar])
+    # live 棒（尚未收完）不做任何計算，讓 forward_bar 立刻廣播
+    if not bar.is_closed:
+        return
+
+    db.insert_bars([bar])
 
     import pandas as pd
 
-    # 取得足夠的歷史資料給 Script 計算 (配合前端 1800 根歷史 K 棒)
     bars = db.get_bars(bar.symbol, limit=1800)
-    
-    # 若是即時尚未收完的 K 棒（未寫入 DB），手動將它加到序列末端
-    if not bar.is_closed:
-        if bars and bars[-1].timestamp == bar.timestamp:
-            bars[-1] = bar
-        else:
-            bars.append(bar)
-
     if len(bars) < 5:
         return
 
@@ -619,10 +611,8 @@ def on_bar_complete(bar):
         for b in bars
     ])
 
-    # 執行所有 Script
     indicator_results = script_engine.run_all_on_bar(df)
 
-    # 指標結果 → 廣播到 UI
     for script_id, output in indicator_results.items():
         bus.emit_sync("indicator_output", output)
 
