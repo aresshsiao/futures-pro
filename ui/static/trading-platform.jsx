@@ -2383,9 +2383,9 @@ export default function TradingPlatform() {
   const [mySellOrders, setMySellOrders] = useState({});
   const [stopBuys, setStopBuys] = useState({});
   const [stopSells, setStopSells] = useState({});
-  const [timeframe, setTimeframe] = useState("15"); // K棒時間週期
-  const [visibleCount, setVisibleCount] = useState(60);
-  const [offset, setOffset] = useState(0);
+  const [timeframe, setTimeframe] = useState(() => localStorage.getItem("chart_timeframe") ?? "15");
+  const [visibleCount, setVisibleCount] = useState(() => { const v = parseInt(localStorage.getItem("chart_visibleCount") ?? "60"); return isNaN(v) ? 60 : v; });
+  const [offset, setOffset] = useState(() => { const v = parseInt(localStorage.getItem("chart_offset") ?? "0"); return isNaN(v) ? 0 : v; });
   const [globalTooltip, setGlobalTooltip] = useState(null);
 
   // Refs for latest values usable inside stale-closure handlers
@@ -2393,6 +2393,15 @@ export default function TradingPlatform() {
   useEffect(() => { chartSymbolRef.current = chartSymbol; }, [chartSymbol]);
   const timeframeRef = useRef(timeframe);
   useEffect(() => { timeframeRef.current = timeframe; }, [timeframe]);
+
+  // 持久化 chart 設定到 localStorage
+  useEffect(() => { localStorage.setItem("chart_timeframe", timeframe); }, [timeframe]);
+  useEffect(() => { localStorage.setItem("chart_visibleCount", String(visibleCount)); }, [visibleCount]);
+  const _offsetSaveRef = useRef(null);
+  useEffect(() => {
+    clearTimeout(_offsetSaveRef.current);
+    _offsetSaveRef.current = setTimeout(() => { localStorage.setItem("chart_offset", String(offset)); }, 400);
+  }, [offset]);
 
   const enabledIndicators = scripts.filter(s => s.type === "indicator" && s.enabled).map(s => s.name);
 
@@ -2766,7 +2775,7 @@ export default function TradingPlatform() {
                 {/* Timeframe selector */}
                 <div style={{ display: "flex", gap: 2, background: COLORS.bgCard, borderRadius: 4, padding: 2, border: `1px solid ${COLORS.border}` }}>
                   {["1", "3", "15", "60", "日", "周", "月"].map(tf => (
-                    <button key={tf} onClick={() => setTimeframe(tf)} style={{
+                    <button key={tf} onClick={() => { setTimeframe(tf); setOffset(0); }} style={{
                       padding: "3px 8px", fontSize: 10, fontWeight: timeframe === tf ? 700 : 400,
                       background: timeframe === tf ? "rgba(59,130,246,0.15)" : "transparent",
                       border: timeframe === tf ? `1px solid ${COLORS.accent}` : "1px solid transparent",
