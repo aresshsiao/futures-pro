@@ -54,7 +54,7 @@ _BUILTIN_PARAM_OVERRIDES: dict[str, dict] = {
 from pathlib import Path as _Path
 BUILTIN_SCRIPTS = [
     s for _py in sorted(_Path("scripts/builtin").glob("*.py"))
-    if (s := load_meta_from_file(
+    if _py.name != "__init__.py" and (s := load_meta_from_file(
         str(_py), _py.stem,
         param_overrides=_BUILTIN_PARAM_OVERRIDES.get(_py.stem),
     )) is not None

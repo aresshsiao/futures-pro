@@ -248,11 +248,18 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         setOffset(o => clamp(o + (e.deltaX > 0 ? 3 : -3), 0, Math.max(0, data.length - 10)));
       } else {
-        setVisibleCount(c => clamp(c + (e.deltaY > 0 ? 5 : -5), 10, 1800));
+        // 比例縮放：每格滾輪固定 ±12%，各縮放層級手感一致，不會忽大忽小
+        setVisibleCount(c => {
+          const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+          let next = Math.round(c * factor);
+          // 確保至少變動 1 根，避免根數少時因四捨五入卡住不動
+          if (next === c) next = c + (e.deltaY > 0 ? 1 : -1);
+          return clamp(next, 10, 1800);
+        });
       }
     };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => window.removeEventListener("wheel", onWheel);
+    return () => el.removeEventListener("wheel", onWheel);
   }, [data.length, setOffset, setVisibleCount]);
 
   // 拖拉平移
