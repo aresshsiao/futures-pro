@@ -111,10 +111,51 @@ async def handle_cancel_order(ws, data: dict):
     await ws.send_json({"type": "cancel_result", "success": ok})
 
 
+async def _backfill_gap(symbol: str, minutes: int = 1800) -> None:
+    """訂閱即時報價前，先用券商 API 補一段固定範圍的歷史 M1 K棒寫入 DB。
+
+    BarBuilder 只用即時 tick 現場堆棒，完全不知道『之前』發生過什麼事——
+    伺服器離線期間的 K 棒不會自動補上。這裡不用「DB 最新一筆 ~ 現在」來算缺口，
+    是因為缺口可能不在資料尾端：例如伺服器斷線又恢復、跑了一小段又重啟，
+    DB 尾端會有一小段「新」資料，但更早之前那段離線期間的洞仍然沒被補到。
+    固定抓最近 `minutes` 根寫入 DB（insert_bars 是 INSERT OR IGNORE），
+    不論洞在哪個位置都會被填上，重複的資料則會被忽略。
+    """
+    try:
+        m1_bars = await quote.get_history(symbol, Timeframe.M1, minutes)
+    except Exception as e:
+        logger.warning("[Core] 補歷史資料失敗 %s: %s", symbol, e)
+        return
+
+    if m1_bars:
+        added = db.insert_bars(m1_bars)
+        logger.info("[Core] %s 補齊歷史 K 棒：取得 %d 根，新增 %d 根", symbol, len(m1_bars), added)
+
+
+_backfilled_symbols: set[str] = set()
+
+
+async def _ensure_backfilled(symbol: str) -> None:
+    """確保這個商品在本次程式啟動期間，至少補過一次歷史資料（見 _backfill_gap）。
+
+    一定要在 handle_get_history 判斷「DB 資料夠不夠」之前跑：
+    DB 裡只要湊到 200 根（DB_SUFFICIENT）就會被當成足夠、直接回傳現有資料，
+    不會再去問券商——如果 DB 剛好卡著一段舊的空窗（例如今天曾經有一段時間沒開伺服器），
+    就會被當成正常資料回傳給前端，永遠沒機會被補上。
+    """
+    if symbol in _backfilled_symbols:
+        return
+    _backfilled_symbols.add(symbol)
+    if quote.is_connected:
+        await _backfill_gap(symbol)
+
+
 async def handle_subscribe(ws, data: dict):
     """前端: 訂閱商品"""
-    await quote.subscribe(data["symbol"])
-    await ws.send_json({"type": "subscribed", "symbol": data["symbol"]})
+    symbol = data["symbol"]
+    await _ensure_backfilled(symbol)
+    await quote.subscribe(symbol)
+    await ws.send_json({"type": "subscribed", "symbol": symbol})
 
 
 async def handle_get_history(ws, data: dict):
@@ -125,6 +166,11 @@ async def handle_get_history(ws, data: dict):
     symbol    = data["symbol"]
     timeframe = data.get("timeframe", "1")  # "1","3","15","60","日","周","月"
     count     = data.get("count", 300)
+
+    # 換到一個本次程式啟動期間還沒補過歷史的商品（例如從 TX 切到 MTX）時，
+    # 要先補齊 DB，才能做下面的「DB 資料夠不夠」判斷——否則 DB 裡舊資料只要
+    # 湊到 DB_SUFFICIENT 就會被直接當成足夠回傳，永遠不會去問券商補洞。
+    await _ensure_backfilled(symbol)
 
     bars_out: list[dict] = []
 
@@ -478,6 +524,7 @@ async def startup_core():
 
     symbols = getattr(settings, "DEFAULT_SUBSCRIBE_SYMBOLS", [])
     for sym in symbols:
+        await _ensure_backfilled(sym)
         await quote.subscribe(sym)
     logger.info("[Core] 自動連線 %s 成功，已訂閱: %s", broker_id, ", ".join(symbols) or "(無)")
 

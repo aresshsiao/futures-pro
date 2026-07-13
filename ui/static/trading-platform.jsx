@@ -2454,11 +2454,15 @@ export default function TradingPlatform() {
     });
   }, [klineData, volumeRefLines, liveM1Bar]);
 
+  // 只送歷史請求，不在這裡訂閱即時報價——
+  // 訂閱後 tick/bar 事件會立刻開始推送，若比 1800 根歷史資料先抵達，
+  // 畫面會先出現只有「目前這一根」棒的空窗。改成等 history_bars 確定回來
+  // 之後（見下方 handler），才真正送出 subscribe。
+  const subscribedRef = useRef(new Set());
+  useEffect(() => { subscribedRef.current = new Set(); }, [connected]);
+
   useEffect(() => {
     if (!connected) return;
-    // 訂閱即時報價（後端 QuoteModule 已連線才有效，未連線也不影響）
-    send("subscribe", { symbol: chartSymbol });
-
     // count 是目標週期棒數，後端 main.py 自行換算成所需的 M1 棒數
     const isLarge = ["日", "周", "月"].includes(timeframe);
     send("get_history", {
@@ -2470,8 +2474,7 @@ export default function TradingPlatform() {
 
   useEffect(() => {
     if (!connected) return;
-    send("subscribe", { symbol: orderSymbol });
-    send("subscribe", { symbol: chartSymbol });
+    if (orderSymbol === chartSymbol) return; // chartSymbol 已由上面的歷史流程處理，避免重複訂閱造成競速
     send("get_history", { symbol: orderSymbol, timeframe: "1", count: 1 });
   }, [connected, orderSymbol, chartSymbol]);
 
@@ -2496,6 +2499,12 @@ export default function TradingPlatform() {
             });
           }
         }
+      }
+
+      // 歷史資料確定拉回來後才訂閱即時報價（每個商品只送一次，避免重複訂閱）
+      if (msg.symbol && !subscribedRef.current.has(msg.symbol)) {
+        subscribedRef.current.add(msg.symbol);
+        send("subscribe", { symbol: msg.symbol });
       }
     });
   }, [addHandler, chartSymbol]);
