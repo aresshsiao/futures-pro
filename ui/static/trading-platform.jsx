@@ -497,12 +497,19 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
     const bottomY = h - 14;
 
     // Grid lines
-    const vSteps = [10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000].reverse();
-    let vStep = 100;
+    // 跟 CandlestickChart 的價格格線同一套作法：找一個讓線數最接近 targetLines 的 step，
+    // 而不是找落在固定倍數區間 [3,6] 內的 step——原本那個寫法在 maxVol 很小（個位數~數十）
+    // 時可能完全配不到任何 step，直接 fallback 成 100，導致格線和軸上數字整個不見。
+    const targetVLines = Math.max(3, Math.floor((bottomY - 10) / 40));
+    const vSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000].reverse();
+    let vStep = vSteps[0];
+    let vMinDiff = Infinity;
     for (const s of vSteps) {
-      if (maxVol / s >= 3 && maxVol / s <= 6) {
+      const lines = maxVol / s;
+      const diff = Math.abs(lines - targetVLines);
+      if (diff < vMinDiff) {
+        vMinDiff = diff;
         vStep = s;
-        break;
       }
     }
     const startV = vStep;
