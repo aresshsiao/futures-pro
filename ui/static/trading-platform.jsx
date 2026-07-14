@@ -544,8 +544,10 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
     visibleData.forEach((d, i) => {
       const isUp = d.close >= d.open;
       const volH = (d.volume / maxVol) * (bottomY - 10);
-      ctx.fillStyle = isUp ? "rgba(34,197,94,0.45)" : "rgba(239,68,68,0.45)";
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = isUp ? COLORS.up : COLORS.down;
       ctx.fillRect((startIdx + i) * barW + 1, bottomY - volH, Math.max(barW - 2, 1), volH);
+      ctx.globalAlpha = 1;
     });
 
     // 成交量水平參考線（由 config/settings.py 的 VOLUME_REFERENCE_LINES 設定）
