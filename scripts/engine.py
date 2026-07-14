@@ -83,12 +83,14 @@ class ScriptContext:
     # ── 指標繪圖 (Indicator) ──────────────────────────
 
     def plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",
-             panel: str = "main", dash: str | list | None = None, width: float = 1.2) -> None:
+             panel: str = "main", dash: str | list | None = None, width: float = 1.2,
+             label: bool = False) -> None:
         """畫一條線 (預設疊在K線上)
 
         dash  : None/"solid"=實線, "dash"=長虛線, "dot"=點線, "dash-dot"=點劃線,
                 或直接傳 canvas setLineDash 陣列，例如 [6, 3]
         width : 線寬 (邏輯像素，預設 1.2)
+        label : True 時，在圖表右側價格軸標出這條線目前的點數（不用 hover 也看得到）
         """
         from core.models import PanelType
 
@@ -120,6 +122,7 @@ class ScriptContext:
             "panel": p_type.value,
             "dash":  dash_pattern,
             "width": float(width),
+            "label": bool(label),
         }
 
     def vol_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",

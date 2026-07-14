@@ -26,5 +26,5 @@ def calc(ctx):
     for i, period in enumerate(periods):
         color_h, color_l = _COLORS[i % len(_COLORS)]
         w = _WIDTHS[i % len(_WIDTHS)]
-        ctx.plot(f"High {period}T", ctx.high.rolling(period).max(), color=color_h, dash="dot", width=w)
-        ctx.plot(f"Low  {period}T", ctx.low.rolling(period).min(),  color=color_l, dash="dot", width=w)
+        ctx.plot(f"High {period}T", ctx.high.rolling(period).max(), color=color_h, dash="dot", width=w, label=True)
+        ctx.plot(f"Low  {period}T", ctx.low.rolling(period).min(),  color=color_l, dash="dot", width=w, label=True)

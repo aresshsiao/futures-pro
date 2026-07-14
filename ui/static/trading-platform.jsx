@@ -373,12 +373,13 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
       if (!indicators.includes(out.name)) return;
       Object.entries(out.series).forEach(([lineName, seriesObj]) => {
         if (seriesObj.panel !== "main") return;
-        
+
         ctx.strokeStyle = seriesObj.color || "#f59e0b";
         ctx.lineWidth = seriesObj.width ?? 1.2;
         ctx.setLineDash(seriesObj.dash ?? []);
         ctx.beginPath();
         let started = false;
+        let lastY = null, lastVal = null;
 
         const seriesStartIdx = (seriesObj.values.length || 0) - data.length + globalStart;
         for (let i = 0; i < visibleData.length; i++) {
@@ -392,9 +393,22 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
           const y = 10 + ((adjMax - val) / (adjMax - adjMin)) * (h - 20);
           if (!started) { ctx.moveTo(x, y); started = true; }
           else ctx.lineTo(x, y);
+          lastY = y; lastVal = val;
         }
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // 右側價格軸標出這條線目前的點數（像 price line 標籤，不用 hover 也看得到）
+        if (lastY != null && seriesObj.label) {
+          const color = seriesObj.color || "#f59e0b";
+          const label = lastVal.toFixed(0);
+          ctx.fillStyle = color;
+          ctx.fillRect(w - 45, lastY - 7, 45, 14);
+          ctx.fillStyle = "#0b0f19";
+          ctx.font = "bold 9px monospace";
+          ctx.textAlign = "right";
+          ctx.fillText(label, w - 4, lastY + 3);
+        }
       });
     });
 
@@ -747,7 +761,8 @@ function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs
     });
 
     Object.keys(byIndicator).forEach(indName => {
-      ctx.fillStyle = COLORS.textMuted;
+      // 名稱前綴也跟著這個 script 第一條線的顏色，不要固定灰色
+      ctx.fillStyle = byIndicator[indName][0]?.seriesObj.color || COLORS.textMuted;
       ctx.fillText(`${indName}:`, legendX, topPad + 10);
       legendX += ctx.measureText(`${indName}:`).width + 4;
       
@@ -2806,12 +2821,16 @@ export default function TradingPlatform() {
                   <>
                     <span style={{ color: COLORS.border }}>|</span>
                     <div style={{ display: "flex", gap: 3 }}>
-                      {enabledIndicators.map(n => (
-                        <span key={n} style={{
-                          padding: "2px 6px", background: "rgba(59,130,246,0.1)",
-                          borderRadius: 3, color: COLORS.accent, fontSize: 9, fontWeight: 600
-                        }}>{n}</span>
-                      ))}
+                      {enabledIndicators.map(n => {
+                        // 用這個 script 畫在圖上第一條線的顏色，讓文字顏色跟畫圖顏色一致
+                        const lineColor = Object.values(indicatorOutputs[n]?.series || {})[0]?.color || COLORS.accent;
+                        return (
+                          <span key={n} style={{
+                            padding: "2px 6px", background: "rgba(59,130,246,0.1)",
+                            borderRadius: 3, color: lineColor, fontSize: 9, fontWeight: 600
+                          }}>{n}</span>
+                        );
+                      })}
                     </div>
                   </>
                 )}
@@ -2982,17 +3001,17 @@ export default function TradingPlatform() {
               Object.entries(out.series).forEach(([lineName, seriesObj]) => {
                 const sStart = (seriesObj.values.length || 0) - klineData.length;
                 const v = seriesObj.values[sStart + globalTooltip.globalIdx];
-                if (v != null) vals.push({ name: lineName, val: v });
+                if (v != null) vals.push({ name: lineName, val: v, color: seriesObj.color });
               });
             });
             if (vals.length === 0) return null;
             return (
               <>
                 <div style={{ borderTop: `1px solid ${COLORS.border}`, margin: "5px 0" }} />
-                {vals.map(({ name, val }) => (
+                {vals.map(({ name, val, color }) => (
                   <div key={name}>
-                    <span style={{ color: COLORS.textDim }}>{name} </span>
-                    <span style={{ color: COLORS.warn, fontWeight: 600 }}>{typeof val === 'number' ? val.toFixed(1) : val}</span>
+                    <span style={{ color: color || COLORS.textDim }}>{name} </span>
+                    <span style={{ color: color || COLORS.warn, fontWeight: 600 }}>{typeof val === 'number' ? val.toFixed(1) : val}</span>
                   </div>
                 ))}
               </>
