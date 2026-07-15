@@ -2,7 +2,7 @@ __meta__ = {
     "name": "KD",
     "description": "隨機指標 (KD)",
     "type": "indicator",
-    "default_params": {"period": 9},
+    "params": {"period": 9},
 }
 
 from scripts.engine import ScriptContext

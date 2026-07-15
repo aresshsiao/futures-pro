@@ -3,7 +3,7 @@ __meta__ = {
     "description": "均線指標 (可設定多條)",
     "type": "indicator",
     "enabled": True,
-    "default_params": {"periods": [5, 20, 60]},
+    "params": {"periods": [5, 20, 60]},
 }
 
 COLORS = ["#f59e0b", "#8b5cf6", "#3b82f6", "#10b981", "#ef4444", "#f97316"]

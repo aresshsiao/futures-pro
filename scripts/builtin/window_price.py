@@ -2,7 +2,7 @@ __meta__ = {
     "name": "Window Price",
     "description": "Window最高/最低水平線",
     "type": "indicator",
-    "default_params": {
+    "params": {
         "periods": "60,300,1200",
     },
 }

@@ -3,7 +3,7 @@ __meta__ = {
     "description": "成交量爆量水平線",
     "type": "indicator",
     "enabled": True,
-    "default_params": {
+    "params": {
         "levels": [
             {"level": 1500, "label": "夜盤大量"},
             {"level": 400, "label": "日盤大量"},
@@ -19,7 +19,6 @@ def calc(ctx: ScriptContext):
 
     參數:
       levels: [{"level": 1500, "label": "爆1500大量"}, ...]
-              （未提供時使用下方預設值）
     """
     levels = ctx.param("levels")
 

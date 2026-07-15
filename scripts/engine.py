@@ -203,7 +203,7 @@ class ScriptContext:
 #  Script 執行引擎
 # ═══════════════════════════════════════════════════════════
 
-def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = None, param_overrides: dict | None = None) -> Optional["ScriptMeta"]:
+def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = None) -> Optional["ScriptMeta"]:
     """從 script 檔案讀取 __meta__ 並建立 ScriptMeta"""
     path = Path(file_path)
     if not path.exists():
@@ -217,9 +217,7 @@ def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = N
         name = meta_dict.get("name", script_id)
         description = meta_dict.get("description", "")
         type_str = meta_dict.get("type", "indicator")
-        default_params = dict(meta_dict.get("default_params", {}))
-        if param_overrides:
-            default_params.update(param_overrides)
+        params = dict(meta_dict.get("params", {}))
         script_type = ScriptType.INDICATOR if type_str == "indicator" else ScriptType.STRATEGY
         # enabled 優先用呼叫端傳入的值；未傳入則讀 __meta__["enabled"]，預設 False
         if enabled is None:
@@ -227,7 +225,7 @@ def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = N
         return ScriptMeta(
             id=script_id, name=name, script_type=script_type,
             description=description, enabled=enabled,
-            file_path=file_path, parameters=default_params,
+            file_path=file_path, parameters=params,
         )
     except Exception:
         logger.exception(f"[ScriptEngine] 讀取 meta 失敗: {file_path}")

@@ -46,17 +46,11 @@ taifex = TaifexImporter()
 
 # 自動掃描 scripts/builtin/ 目錄，無需手動維護清單。
 # 新增 script 只需將 .py 放入該目錄，並在 __meta__ 中設定 "enabled": True/False。
-# 個別 script 若需要覆蓋參數可在此指定；預設參數應以 script 自己的 __meta__["default_params"]
-# 為主（volume_alert 的爆量門檻之前放在 settings.py 覆蓋，導致改 script 本身沒有用，已移除）。
-_BUILTIN_PARAM_OVERRIDES: dict[str, dict] = {}
-
+# 參數一律以 script 自己的 __meta__["params"] 為唯一來源，不支援外部覆蓋。
 from pathlib import Path as _Path
 BUILTIN_SCRIPTS = [
     s for _py in sorted(_Path("scripts/builtin").glob("*.py"))
-    if _py.name != "__init__.py" and (s := load_meta_from_file(
-        str(_py), _py.stem,
-        param_overrides=_BUILTIN_PARAM_OVERRIDES.get(_py.stem),
-    )) is not None
+    if _py.name != "__init__.py" and (s := load_meta_from_file(str(_py), _py.stem)) is not None
 ]
 
 # Script 啟用狀態持久化 — 儲存於 config/script_states.json

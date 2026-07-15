@@ -2,7 +2,7 @@ __meta__ = {
     "name": "Breakout",
     "description": "通道突破策略",
     "type": "strategy",
-    "default_params": {"lookback": 20},
+    "params": {"lookback": 20},
 }
 
 
