@@ -5,13 +5,14 @@ __meta__ = {
     "default_params": {"period": 9},
 }
 
+from scripts.engine import ScriptContext
 
-def calc(ctx):
+def calc(ctx: ScriptContext):
     """
     KD 指標 (Stochastic Oscillator)
     預設參數: 週期=9, M1=3, M2=3
     """
-    period = int(ctx.param("period", 9))
+    period = int(ctx.param("period"))
     
     # 計算 RSV
     low_min = ctx.low.rolling(window=period).min()

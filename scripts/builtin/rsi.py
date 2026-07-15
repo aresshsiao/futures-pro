@@ -6,8 +6,9 @@ __meta__ = {
     "default_params": {"period": 14, "overbought": 70, "oversold": 30},
 }
 
+from scripts.engine import ScriptContext
 
-def calc(ctx):
+def calc(ctx: ScriptContext):
     """
     RSI (Relative Strength Index)
 
@@ -16,7 +17,7 @@ def calc(ctx):
       overbought: 超買線 (預設 70)
       oversold: 超賣線 (預設 30)
     """
-    period = ctx.param("period", 14)
+    period = ctx.param("period")
 
     delta = ctx.close.diff()
     gain = delta.where(delta > 0, 0).rolling(period).mean()
@@ -24,6 +25,6 @@ def calc(ctx):
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
 
-    overbought = ctx.param("overbought", 70)
-    oversold = ctx.param("oversold", 30)
+    overbought = ctx.param("overbought")
+    oversold = ctx.param("oversold")
     ctx.sub_plot("RSI", rsi, color="#06b6d4", ref_lines=[overbought, oversold], label=True)

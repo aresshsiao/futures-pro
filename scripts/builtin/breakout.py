@@ -16,7 +16,7 @@ def on_bar(ctx):
     參數:
       lookback: 回看週期 (預設 20)
     """
-    lookback = ctx.param("lookback", 20)
+    lookback = ctx.param("lookback")
 
     if len(ctx.data) < lookback + 2:
         return

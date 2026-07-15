@@ -18,9 +18,10 @@ _COLORS = [
 
 _WIDTHS = [1, 2, 3, 4]
 
+from scripts.engine import ScriptContext
 
-def calc(ctx):
-    raw = str(ctx.param("periods", "60,300,1200"))
+def calc(ctx: ScriptContext):
+    raw = str(ctx.param("periods"))
     periods = [int(p.strip()) for p in raw.split(",") if p.strip().isdigit()]
 
     for i, period in enumerate(periods):
