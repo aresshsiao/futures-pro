@@ -30,5 +30,5 @@ def calc(ctx):
     d = k.ewm(alpha=1/3, adjust=False).mean()
     
     # 畫在獨立子圖 (subplot) 中
-    ctx.sub_plot("K", k, color="#f59e0b", ref_lines=[80, 20])
-    ctx.sub_plot("D", d, color="#3b82f6")
+    ctx.sub_plot("K", k, color="#f59e0b", ref_lines=[80, 20], label=True)
+    ctx.sub_plot("D", d, color="#3b82f6", label=True)

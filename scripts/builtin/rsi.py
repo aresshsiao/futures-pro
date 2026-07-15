@@ -26,4 +26,4 @@ def calc(ctx):
 
     overbought = ctx.param("overbought", 70)
     oversold = ctx.param("oversold", 30)
-    ctx.sub_plot("RSI", rsi, color="#06b6d4", ref_lines=[overbought, oversold])
+    ctx.sub_plot("RSI", rsi, color="#06b6d4", ref_lines=[overbought, oversold], label=True)

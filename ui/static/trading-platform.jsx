@@ -399,13 +399,12 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
         ctx.setLineDash([]);
 
         // 右側價格軸標出這條線目前的點數（像 price line 標籤，不用 hover 也看得到）
+        // 背景透明，文字直接用這條線的顏色，不畫實心色塊
         if (lastY != null && seriesObj.label) {
           const color = seriesObj.color || "#f59e0b";
           const label = lastVal.toFixed(0);
           ctx.fillStyle = color;
-          ctx.fillRect(w - 45, lastY - 7, 45, 14);
-          ctx.fillStyle = "#0b0f19";
-          ctx.font = "bold 9px monospace";
+          ctx.font = "10px monospace";
           ctx.textAlign = "right";
           ctx.fillText(label, w - 4, lastY + 3);
         }
@@ -577,6 +576,7 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
         ctx.setLineDash(seriesObj.dash ?? []);
         ctx.beginPath();
         let started = false;
+        let lastY = null, lastVal = null;
 
         const seriesStartIdx = (seriesObj.values.length || 0) - data.length + globalStart;
         for (let i = 0; i < visibleData.length; i++) {
@@ -590,9 +590,18 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
           const y = bottomY - (val / maxVol) * (bottomY - 10);
           if (!started) { ctx.moveTo(x, y); started = true; }
           else ctx.lineTo(x, y);
+          lastY = y; lastVal = val;
         }
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // 右側標出這條線目前的點數，背景透明、文字用線的顏色（跟主圖 Window Price 標籤一致）
+        if (lastY != null && seriesObj.label) {
+          ctx.fillStyle = seriesObj.color || "#f59e0b";
+          ctx.font = "10px monospace";
+          ctx.textAlign = "right";
+          ctx.fillText(lastVal.toLocaleString(), w - 4, lastY + 3);
+        }
       });
     });
 
@@ -744,6 +753,7 @@ function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs
       ctx.setLineDash(line.seriesObj.dash ?? []);
       ctx.beginPath();
       let started = false;
+      let lastY = null, lastVal = null;
       const sStart = (line.seriesObj.values.length || 0) - data.length + globalStart;
       for (let i = 0; i < visibleData.length; i++) {
         const val = line.seriesObj.values[sStart + i];
@@ -752,9 +762,18 @@ function UnifiedSubChart({ data, visibleCount, offset, indicators, scriptOutputs
         const y = toY(val);
         if (!started) { ctx.moveTo(x, y); started = true; }
         else ctx.lineTo(x, y);
+        lastY = y; lastVal = val;
       }
       ctx.stroke();
       ctx.setLineDash([]);
+
+      // 右側標出這條線目前的點數，背景透明、文字用線的顏色（跟主圖 Window Price 標籤一致）
+      if (lastY != null && line.seriesObj.label) {
+        ctx.fillStyle = line.seriesObj.color || "#f59e0b";
+        ctx.font = "10px monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(lastVal.toFixed(1), w - 4, lastY + 3);
+      }
     });
 
     // Legend

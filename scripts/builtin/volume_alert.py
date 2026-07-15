@@ -32,4 +32,4 @@ def calc(ctx):
         if not level:
             continue
         # 水平線 = 整段區間都畫同一個值，前端依此畫出參考線 & 判斷量是否跨越
-        ctx.vol_plot(label, [level] * n, color="#f59e0b")
+        ctx.vol_plot(label, [level] * n, color="#f59e0b", label=True)

@@ -126,15 +126,17 @@ class ScriptContext:
         }
 
     def vol_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",
-                dash: str | list | None = None, width: float = 1.2) -> None:
+                dash: str | list | None = None, width: float = 1.2,
+                label: bool = False) -> None:
         """畫在量圖 (等同 panel="volume")"""
-        self.plot(name, values, color, panel="volume", dash=dash, width=width)
+        self.plot(name, values, color, panel="volume", dash=dash, width=width, label=label)
 
     def sub_plot(self, name: str, values: list | pd.Series, color: str = "#3b82f6",
                 ref_lines: list[float] | None = None,
-                dash: str | list | None = None, width: float = 1.2) -> None:
+                dash: str | list | None = None, width: float = 1.2,
+                label: bool = False) -> None:
         """畫在獨立子圖 (等同 panel="sub")，ref_lines 可指定水平參考線 (如 [80, 20])"""
-        self.plot(name, values, color, panel="sub", dash=dash, width=width)
+        self.plot(name, values, color, panel="sub", dash=dash, width=width, label=label)
         if ref_lines:
             self._plots[name]["ref_lines"] = ref_lines
 

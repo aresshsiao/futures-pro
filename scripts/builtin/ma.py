@@ -16,4 +16,4 @@ def calc(ctx):
     for i, period in enumerate(periods):
         ma = ctx.close.rolling(period).mean()
         color = COLORS[i % len(COLORS)]
-        ctx.plot(f"MA{period}", ma, color=color)
+        ctx.plot(f"MA{period}", ma, color=color, label=True)
