@@ -162,6 +162,7 @@ def setup_event_bridge():
             "timeframe": "1",
             "name": output.name,
             "series": output.series,
+            "alerts": output.alerts,
         })
 
     bus.on("tick", forward_tick)

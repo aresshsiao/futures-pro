@@ -46,7 +46,9 @@ class ScriptContext:
         
         # 指標繪圖暫存 (dict of IndicatorSeries dict)
         self._plots: dict[str, dict] = {}
-        
+        # 這次 calc() 判斷成立、要播報的文字（見 alert()）
+        self._alerts: list[str] = []
+
         self._params = dict(meta.parameters)
 
     # ── 資料存取 ──────────────────────────────────────
@@ -139,6 +141,18 @@ class ScriptContext:
         self.plot(name, values, color, panel="sub", dash=dash, width=width, label=label)
         if ref_lines:
             self._plots[name]["ref_lines"] = ref_lines
+
+    # ── 播報警示 ──────────────────────────────────────
+
+    def alert(self, message: str) -> None:
+        """Script 自己判斷條件成立時呼叫，系統只負責照著念出 message。
+
+        由 script 決定「什麼時候該播」跟「要播什麼」，前端完全不需要知道
+        這個警示背後的條件（例如量能門檻）是什麼，只負責播放。
+        calc() 只會在每根 M1 棒收完時執行一次（見 main.py on_bar_complete），
+        所以同一根棒不會重複呼叫，不需要額外去重。
+        """
+        self._alerts.append(str(message))
 
     # ── 交易訊號 (Strategy) ───────────────────────────
 
@@ -319,6 +333,7 @@ class ScriptEngine:
             return IndicatorOutput(
                 name=meta.name,
                 series=ctx._plots,
+                alerts=ctx._alerts,
             )
         except Exception:
             logger.exception(f"[ScriptEngine] 指標執行錯誤: {meta.name}")

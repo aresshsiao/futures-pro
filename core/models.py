@@ -215,6 +215,9 @@ class IndicatorOutput:
     """指標計算結果 (供繪圖)"""
     name: str
     series: dict[str, dict]  # e.g. {"ma5": {"values": [...], "color": "#f59e0b", "panel": "main"}}
+    # script 自己判斷條件成立時要播報的文字（見 ScriptContext.alert）。
+    # 播放與否、播放什麼完全由 script 決定，前端只負責照著念。
+    alerts: list[str] = field(default_factory=list)
 
 
 @dataclass

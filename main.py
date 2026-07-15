@@ -46,10 +46,9 @@ taifex = TaifexImporter()
 
 # 自動掃描 scripts/builtin/ 目錄，無需手動維護清單。
 # 新增 script 只需將 .py 放入該目錄，並在 __meta__ 中設定 "enabled": True/False。
-# 需要覆蓋參數的特殊 script（如 volume_alert 讀取 settings）在此指定。
-_BUILTIN_PARAM_OVERRIDES: dict[str, dict] = {
-    "volume_alert": {"levels": settings.VOLUME_REFERENCE_LINES},
-}
+# 個別 script 若需要覆蓋參數可在此指定；預設參數應以 script 自己的 __meta__["default_params"]
+# 為主（volume_alert 的爆量門檻之前放在 settings.py 覆蓋，導致改 script 本身沒有用，已移除）。
+_BUILTIN_PARAM_OVERRIDES: dict[str, dict] = {}
 
 from pathlib import Path as _Path
 BUILTIN_SCRIPTS = [
@@ -247,7 +246,10 @@ async def handle_get_history(ws, data: dict):
                 "type": "indicator_output",
                 "timeframe": timeframe,
                 "name": output.name,
-                "series": output.series
+                "series": output.series,
+                # 這裡是歷史資料觸發的重算（切商品/週期、重新整理），不是真的有新棒收完，
+                # 不轉發 alerts，避免使用者一開啟畫面就重播「已經發生過」的語音警示。
+                "alerts": [],
             })
 
 

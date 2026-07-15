@@ -467,7 +467,7 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
 }
 
 // ─── Volume Chart Component ──────────────────────────────────────────
-function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicators = [], setTooltip, refLines = [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }] }) {
+function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicators = [], setTooltip }) {
   const canvasRef = useRef(null);
   const [crosshair, setCrosshair] = useState(null);
 
@@ -549,20 +549,9 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
       ctx.globalAlpha = 1;
     });
 
-    // 成交量水平參考線（由 config/settings.py 的 VOLUME_REFERENCE_LINES 設定）
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 2]);
-    ctx.textAlign = "right";
-    ctx.font = "9px monospace";
-    refLines.forEach(({ level, label }) => {
-      if (level > maxVol) return; // 量太小、超出目前範圍時不畫，不去撐大縱軸
-      const y = bottomY - (level / maxVol) * (bottomY - 10);
-      ctx.strokeStyle = "#f59e0b";
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w - 45, y); ctx.stroke();
-      ctx.fillStyle = "#f59e0b";
-      ctx.fillText(`${label} ${level.toLocaleString()}`, w - 4, y + 3);
-    });
-    ctx.setLineDash([]);
+    // 成交量水平參考線改由下面「Script lines (panel: volume)」通用機制畫出，
+    // 任何 script 只要 vol_plot() 到 panel="volume" 就會被畫出來（含虛線、label 標籤），
+    // 不再限定讀取特定 script（Volume_Alert）的輸出。
 
     // Script lines (panel: volume)
     const globalStart = data.length - offset - visibleData.length;
@@ -620,7 +609,7 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [visibleData, crosshair, refLines]);
+  }, [visibleData, crosshair, scriptOutputs, indicators]);
 
   useEffect(() => { drawVolume(); }, [drawVolume]);
 
@@ -1646,7 +1635,7 @@ function DatabasePage({ send, addHandler }) {
   const [logs, setLogs] = useState([]);
   const [summary, setSummary] = useState([]);
   const [importDir, setImportDir] = useState("data/raw/taifex");
-  const [selectedSymbols, setSelectedSymbols] = useState(["TX"]);
+  const [selectedSymbols, setSelectedSymbols] = useState(["TX", "MTX", "TMF"]);
   const logsEndRef = useRef(null);
 
   const SYMBOL_OPTIONS = [
@@ -2334,21 +2323,6 @@ export default function TradingPlatform() {
   const [indicatorOutputs, setIndicatorOutputs] = useState({});
   const [candleColorScheme, setCandleColorScheme] = useState("green-up");
 
-  // 成交量水平警示線：來自 Volume_Alert Script 的運算結果（取代舊版 /api/config 的寫死設定）
-  // 後端尚未回傳前先用預設值，避免圖表開頭沒有參考線
-  const volumeRefLines = useMemo(() => {
-    const output = indicatorOutputs["Volume_Alert"];
-    if (!output) {
-      return [{ level: 1500, label: "爆大量" }, { level: 400, label: "大量" }];
-    }
-    return Object.entries(output.series)
-      .map(([label, seriesObj]) => {
-        const vals = seriesObj.values || [];
-        return { level: vals[vals.length - 1], label };
-      })
-      .sort((a, b) => b.level - a.level);
-  }, [indicatorOutputs]);
-
   function logout() { clearToken(); setAuthed(false); }
 
   useEffect(() => {
@@ -2377,6 +2351,9 @@ export default function TradingPlatform() {
 
   useEffect(() => {
     const cleanup = addHandler("indicator_output", (msg) => {
+      // Script 自己判斷要播報的文字（ctx.alert()），跟目前圖表看哪個週期無關，一律播放
+      (msg.alerts || []).forEach(text => speakVolumeAlert(text));
+
       if (msg.timeframe && msg.timeframe !== timeframeRef.current) return;
       setIndicatorOutputs(prev => ({ ...prev, [msg.name]: msg }));
     });
@@ -2471,31 +2448,6 @@ export default function TradingPlatform() {
   useEffect(() => { liveM1BarRef.current = liveM1Bar; }, [liveM1Bar]);
   // 切換商品時重置即時棒
   useEffect(() => { setLiveM1Bar(null); }, [chartSymbol]);
-
-  // 成交量語音提示：當前棒的量跨越設定的水平線時播報一次
-  // （同一根棒內每個門檻只播一次，新的一根棒開始後重新計算）
-  // 限定 liveM1Bar 有值（代表正在收即時報價、追蹤的是目前進行中的這根K棒）才檢查，
-  // 避免剛切換商品/週期、或頁面剛拉到歷史資料時，對著早已收完的舊K棒誤報「爆量」。
-  const volumeAlertRef = useRef({ time: null, levels: new Set() });
-
-  useEffect(() => {
-    if (!liveM1Bar) return;
-    if (!klineData.length || !volumeRefLines.length) return;
-    const last = klineData[klineData.length - 1];
-    if (!last) return;
-
-    if (volumeAlertRef.current.time !== last.time) {
-      volumeAlertRef.current = { time: last.time, levels: new Set() };
-    }
-
-    // 由小到大檢查，量持續攀升時依序播報「大量」→「爆大量」
-    [...volumeRefLines].sort((a, b) => a.level - b.level).forEach(({ level, label }) => {
-      if (last.volume >= level && !volumeAlertRef.current.levels.has(level)) {
-        volumeAlertRef.current.levels.add(level);
-        speakVolumeAlert(label);
-      }
-    });
-  }, [klineData, volumeRefLines, liveM1Bar]);
 
   // 只送歷史請求，不在這裡訂閱即時報價——
   // 訂閱後 tick/bar 事件會立刻開始推送，若比 1800 根歷史資料先抵達，
@@ -2607,7 +2559,7 @@ export default function TradingPlatform() {
 
         if (!msg.is_closed) {
           // 即時棒：直接更新 klineData（不等 liveM1Bar effect，減少一次 render cycle）
-          // 同時更新 liveM1Bar 供 volume alert effect 使用
+          // 同時更新 liveM1Bar，供日/週/月聚合與 M1 彙整 effect 使用
           setLiveM1Bar({
             time: barTimeMs,
             open: msg.open, high: msg.high, low: msg.low,
@@ -2892,7 +2844,7 @@ export default function TradingPlatform() {
 
             {/* Volume — 25% */}
             <div style={{ ...panelStyle, flex: 3, position: "relative", minHeight: 0 }}>
-              <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} indicators={enabledIndicators} scriptOutputs={indicatorOutputs} setTooltip={setGlobalTooltip} refLines={volumeRefLines} />
+              <VolumeChart data={klineData} visibleCount={visibleCount} offset={offset} indicators={enabledIndicators} scriptOutputs={indicatorOutputs} setTooltip={setGlobalTooltip} />
             </div>
 
                         {/* Unified SubChart (顯示所有 panel="sub" 的指標) */}

@@ -26,10 +26,16 @@ def calc(ctx):
     ])
 
     n = len(ctx.volume)
+    last_volume = ctx.volume.iloc[-1] if n else 0
     for item in levels:
         level = item.get("level")
         label = item.get("label") or str(level)
         if not level:
             continue
-        # 水平線 = 整段區間都畫同一個值，前端依此畫出參考線 & 判斷量是否跨越
-        ctx.vol_plot(label, [level] * n, color="#f59e0b", label=True)
+        # 水平線 = 整段區間都畫同一個值，前端依此畫出參考線
+        ctx.vol_plot(label, [level] * n, color="#f59e0b", dash="solid", label=True)
+
+        # 最新這根棒的量跨過門檻 → 請系統播報。calc() 只會在每根 M1 棒收完時
+        # 執行一次（main.py on_bar_complete），所以這裡不會對同一根棒重複觸發。
+        if last_volume >= level:
+            ctx.alert(label)
