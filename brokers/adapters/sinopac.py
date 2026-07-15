@@ -7,6 +7,7 @@ brokers/adapters/sinopac.py — 永豐金 Shioaji Adapter
 """
 from __future__ import annotations
 import logging
+import threading
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -21,17 +22,45 @@ logger = logging.getLogger(__name__)
 _SHARED_API = None
 _SHARED_CONNECTED = False
 
+# login() 的 contracts_cb 會依 SecurityType（"Index"/"Stock"/"Future"/"Option"）逐一回呼，
+# 對應該分類的 Contracts 下載完成。這是目前這版 shioaji（1.5.x, Rust 重寫版）唯一
+# 實測有效的等待機制——Contracts.status 會提早回報完成、login() 的 contracts_timeout
+# 參數也沒有真的擋住，都試過會撲空；但官方 changelog 1.5.1 明確寫著
+# "restore login contracts callback compatibility"，所以用回呼來等待。
+_CONTRACTS_READY: dict[str, threading.Event] = {
+    name: threading.Event() for name in ("Index", "Stock", "Future", "Option")
+}
+
+
+def _on_contracts_fetched(*args):
+    """login()/fetch_contracts() 的 contracts_cb；型別上可能不帶參數呼叫，
+    也可能帶一個 SecurityType，兩種都要能處理。"""
+    security_type = args[0] if args else None
+    name = getattr(security_type, "name", None)
+    if name in _CONTRACTS_READY:
+        _CONTRACTS_READY[name].set()
+        logger.info("[SinoPac] Contracts 下載完成: %s", name)
+    else:
+        # 沒帶參數，或型別不是預期的 SecurityType：保守起見全部標記完成，
+        # 避免呼叫端因為等不到特定分類而白白卡滿 timeout。
+        for ev in _CONTRACTS_READY.values():
+            ev.set()
+
+
 def _get_shared_api(credentials):
     global _SHARED_API, _SHARED_CONNECTED
     import shioaji as sj
     if _SHARED_API is None:
         _SHARED_API = sj.Shioaji()
     if not _SHARED_CONNECTED:
+        for ev in _CONTRACTS_READY.values():
+            ev.clear()
         _SHARED_API.login(
             api_key=credentials.get("api_key", ""),
             secret_key=credentials.get("secret_key", ""),
             subscribe_trade=credentials.get("subscribe_trade", True),
-            receive_window=10000
+            receive_window=10000,
+            contracts_cb=_on_contracts_fetched,
         )
         if "cert_path" in credentials:
             _SHARED_API.activate_ca(
@@ -41,6 +70,20 @@ def _get_shared_api(credentials):
             )
         _SHARED_CONNECTED = True
     return _SHARED_API
+
+
+async def _wait_contracts_ready(security_types=("Future", "Index"), timeout: float = 15.0) -> None:
+    """等待 login() 的 contracts_cb 回報指定 SecurityType 下載完成（見上方 _CONTRACTS_READY 說明）。"""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    for name in security_types:
+        ev = _CONTRACTS_READY.get(name)
+        if ev is None or ev.is_set():
+            continue
+        await loop.run_in_executor(None, ev.wait, timeout)
+        if not ev.is_set():
+            logger.warning("[SinoPac] 等待 %s 合約下載逾時 (%.0fs)，仍嘗試繼續執行", name, timeout)
+
 
 def _logout_shared_api():
     global _SHARED_API, _SHARED_CONNECTED
@@ -75,6 +118,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             import shioaji as sj
 
             self._api = _get_shared_api(credentials)
+            await _wait_contracts_ready(("Future", "Index"))
 
             # 全域 tick callback 在 connect 時設定一次，避免每次 subscribe 覆蓋
             @self._api.on_tick_fop_v1()
@@ -100,8 +144,8 @@ class SinoPacQuoteAdapter(QuoteAdapter):
 
             @self._api.on_tick_stk_v1()
             def _on_stk_tick(exchange, tick):
-                # 僅處理加權指數 Y9999
-                if tick.code != "Y9999":
+                # 僅處理加權指數（這版 shioaji 代碼是 "001"，不是舊版的 "Y9999"）
+                if tick.code != "001":
                     return
                 cb = self._tick_callbacks.get("TAIEX")
                 if cb is None:
@@ -168,7 +212,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         self._tick_callbacks[symbol] = callback
         if symbol in self._subscribed:
             return
-        contract = self._get_contract(symbol)
+        contract = await self._get_contract(symbol)
         if contract:
             self._api.quote.subscribe(contract, quote_type="tick", version="v1")
             self._subscribed.add(symbol)
@@ -179,12 +223,12 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         if symbol == "TAIEX":
             return  # 指數無五檔資料
         self._book_callbacks[symbol] = callback
-        contract = self._get_contract(symbol)
+        contract = await self._get_contract(symbol)
         if contract:
             self._api.quote.subscribe(contract, quote_type="bidask", version="v1")
 
     async def unsubscribe(self, symbol: str) -> None:
-        contract = self._get_contract(symbol)
+        contract = await self._get_contract(symbol)
         if contract:
             self._api.quote.unsubscribe(contract, quote_type="tick")
             self._api.quote.unsubscribe(contract, quote_type="bidask")
@@ -206,7 +250,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         import math
         from datetime import date, timedelta
 
-        contract = self._get_contract(symbol)
+        contract = await self._get_contract(symbol)
         if not contract:
             return []
 
@@ -311,21 +355,45 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             logger.exception("[SinoPac] 取得歷史K線失敗 %s %s", symbol, timeframe)
             return []
 
-    def _get_contract(self, symbol: str):
-        """將系統代碼轉換為 Shioaji contract"""
+    def _lookup_contract(self, symbol: str):
+        """單次查詢，不重試、不記 log（給 _get_contract 內部輪詢用）"""
         if symbol == "TAIEX":
             try:
-                return self._api.Contracts.Indexs.TSE["Y9999"]
+                # 加權指數在這版 shioaji 的代碼是 "001"（symbol "TSE001"），不是舊版的 "Y9999"
+                return self._api.Contracts.Indexs.TSE["001"]
             except (KeyError, AttributeError):
-                logger.warning("[SinoPac] 找不到加權指數合約 (Y9999)")
                 return None
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:
-            return self._api.Contracts.Futures[sj_symbol][sj_symbol + "R1"]  # 近月主力, e.g. TXFR1
+            # Contracts.Futures 用 __getitem__ 直接查完整合約代碼（如 "TXFR1"），
+            # 不是先用產品代碼 "TXF" 查一層再查一層——那不是合法的查詢路徑。
+            return self._api.Contracts.Futures[sj_symbol + "R1"]  # 近月主力, e.g. TXFR1
         except (KeyError, AttributeError):
-            logger.warning(f"[SinoPac] 找不到合約: {symbol} → {sj_symbol}")
             return None
+
+    async def _get_contract(self, symbol: str, attempts: int = 6, delay: float = 0.5):
+        """將系統代碼轉換為 Shioaji contract。
+
+        _wait_contracts_ready() 已經是主要的等待機制，這裡的重試只是保險——
+        萬一 contracts_cb 沒被觸發（保守 fallback 已經全部標記完成）或有殘餘的極短暫 race，
+        查一次撲空就直接放棄的話還是可能撲空。
+        """
+        import asyncio
+
+        for attempt in range(1, attempts + 1):
+            contract = self._lookup_contract(symbol)
+            if contract is not None:
+                return contract
+            if attempt < attempts:
+                await asyncio.sleep(delay)
+
+        if symbol == "TAIEX":
+            logger.warning("[SinoPac] 找不到加權指數合約 (001)")
+        else:
+            SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
+            logger.warning(f"[SinoPac] 找不到合約: {symbol} → {SYMBOL_MAP.get(symbol, symbol)}")
+        return None
 
     # Shioaji tick 的 code 欄位格式如 "TXFR1"、"MXFR1"，轉回系統代碼
     _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "TMF": "TMF"}
@@ -352,34 +420,33 @@ class SinoPacQuoteAdapter(QuoteAdapter):
     async def get_options_months(self, _symbol: str = "TXO") -> list[str]:
         """回傳所有 TXO 系列產品的到期月份，格式為 "PRODUCT:delivery_month"。
 
-        使用 api.Contracts.Options.keys() 動態取得所有實際存在的 Option 產品，
-        過濾出 TX 開頭的台指選擇權系列（TXO, TXW1, TXW2, TXW4 等）。
+        目前這版 shioaji（1.5.x Rust 重寫版）的 Contracts.Options 沒有 .keys()
+        （ContractCategory 只支援 __iter__/__getitem__/get），__iter__ 給的是各商品的
+        ContractGroup，逐一走過 group 內的個別合約，用合約自己的 category 欄位
+        （如 TXO/TXW1）取得產品代碼，過濾出台指選擇權系列。
         """
         if not self._api:
             return []
         try:
-            # _block() 等待 StreamProductContracts 完成載入（_fetched=True）；
-            # keys() 本身不呼叫 _block()，若合約尚未完成串流會取到空集合
-            self._api.Contracts.Options._block()
-            all_categories = list(self._api.Contracts.Options.keys())
-            tx_categories = [c for c in all_categories if c.startswith("TX")]
-            logger.info("[SinoPac] option categories found: %s", tx_categories)
+            await _wait_contracts_ready(("Option",))
 
             seen: set[str] = set()
             entries: list[str] = []
-            for prod in tx_categories:
-                try:
-                    prod_contracts = self._api.Contracts.Options[prod]
-                    for c in prod_contracts:
-                        dm = getattr(c, "delivery_month", "")
-                        if not dm:
-                            continue
-                        key = f"{prod}:{dm}"
-                        if key not in seen:
-                            seen.add(key)
-                            entries.append(key)
-                except Exception:
-                    pass
+            for group in self._api.Contracts.Options:
+                for c in group:
+                    prod = getattr(c, "category", "") or ""
+                    if not prod.startswith("TX"):
+                        continue
+                    dm = getattr(c, "delivery_month", "")
+                    if not dm:
+                        continue
+                    key = f"{prod}:{dm}"
+                    if key not in seen:
+                        seen.add(key)
+                        entries.append(key)
+
+            tx_categories = sorted({k.split(":", 1)[0] for k in entries})
+            logger.info("[SinoPac] option categories found: %s", tx_categories)
 
             def sort_key(k: str):
                 prod, dm = k.split(":", 1)
@@ -465,6 +532,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             import shioaji as sj
 
             self._api = _get_shared_api(credentials)
+            await _wait_contracts_ready(("Future",))
 
             self._setup_callbacks()
             self._connected = True
@@ -564,7 +632,7 @@ class SinoPacTradeAdapter(TradeAdapter):
     async def place_order(self, symbol, direction, order_type, qty, price=0.0) -> str:
         import shioaji as sj
 
-        contract = self._get_contract(symbol)
+        contract = await self._get_contract(symbol)
         if not contract:
             return ""
 
@@ -624,10 +692,26 @@ class SinoPacTradeAdapter(TradeAdapter):
         # TODO: 實作
         return []
 
-    def _get_contract(self, symbol):
+    def _lookup_contract(self, symbol):
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
         sj_symbol = SYMBOL_MAP.get(symbol, symbol)
         try:
-            return self._api.Contracts.Futures[sj_symbol][sj_symbol + "R1"]
+            # Contracts.Futures 用 __getitem__ 直接查完整合約代碼（如 "TXFR1"）
+            return self._api.Contracts.Futures[sj_symbol + "R1"]
         except (KeyError, AttributeError):
             return None
+
+    async def _get_contract(self, symbol, attempts: int = 6, delay: float = 0.5):
+        """見 SinoPacQuoteAdapter._get_contract 的說明。"""
+        import asyncio
+
+        for attempt in range(1, attempts + 1):
+            contract = self._lookup_contract(symbol)
+            if contract is not None:
+                return contract
+            if attempt < attempts:
+                await asyncio.sleep(delay)
+
+        SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
+        logger.warning(f"[SinoPac] 找不到合約: {symbol} → {SYMBOL_MAP.get(symbol, symbol)}")
+        return None

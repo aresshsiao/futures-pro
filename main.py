@@ -647,7 +647,8 @@ async def handle_import_taifex(ws, data: dict):
             })
         else:
             parsed = len(result)
-            inserted = db.insert_bars(result)
+            # 本地 CSV 是期交所官方資料，視為最準確的來源，重複的 timestamp 直接覆蓋 DB 既有資料
+            inserted = db.insert_bars(result, replace=True)
             await ws.send_json({
                 "type": "import_result",
                 "source": "local",

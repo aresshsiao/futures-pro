@@ -103,8 +103,14 @@ class Database:
 
     # ── Bars 寫入 ─────────────────────────────────────────────
 
-    def insert_bars(self, bars: list[Bar]) -> int:
-        """批量寫入 M1 K線 (重複時忽略)，回傳實際新增筆數。"""
+    def insert_bars(self, bars: list[Bar], replace: bool = False) -> int:
+        """批量寫入 M1 K線，回傳實際新增/更新筆數。
+
+        replace=False（預設）: 重複的 timestamp 忽略不動，用於券商 API 補資料——
+            API 資料只拿來補洞，DB 現有資料視為優先，不會被覆蓋。
+        replace=True: 重複的 timestamp 直接覆蓋成新值，用於本地 CSV 匯入——
+            期交所官方 CSV 視為最準確的來源，即使 DB 已有同一根棒也要覆蓋更新。
+        """
         by_symbol: dict[str, list] = {}
         for b in bars:
             by_symbol.setdefault(b.symbol, []).append(
@@ -112,11 +118,12 @@ class Database:
                  b.open, b.high, b.low, b.close, b.volume)
             )
 
+        verb = "REPLACE" if replace else "IGNORE"
         before = self._conn.total_changes
         for symbol, rows in by_symbol.items():
             self._ensure_bar_table(symbol)
             self._conn.executemany(
-                f"""INSERT OR IGNORE INTO "{symbol}"
+                f"""INSERT OR {verb} INTO "{symbol}"
                     (timestamp, delivery, open, high, low, close, volume)
                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 rows,
