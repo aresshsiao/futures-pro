@@ -222,10 +222,12 @@ def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = N
         # enabled 優先用呼叫端傳入的值；未傳入則讀 __meta__["enabled"]，預設 False
         if enabled is None:
             enabled = bool(meta_dict.get("enabled", False))
+        interval_sec = meta_dict.get("interval_sec")
         return ScriptMeta(
             id=script_id, name=name, script_type=script_type,
             description=description, enabled=enabled,
             file_path=file_path, parameters=params,
+            interval_sec=interval_sec,
         )
     except Exception:
         logger.exception(f"[ScriptEngine] 讀取 meta 失敗: {file_path}")

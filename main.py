@@ -525,6 +525,11 @@ async def startup_core():
     logger.info("[Core] 自動連線 %s 成功，已訂閱: %s", broker_id, ", ".join(symbols) or "(無)")
 
 
+async def startup_script_timer():
+    """啟動 script 定時器背景任務（跟是否有自動連線券商無關，手動連線一樣會用到）。"""
+    asyncio.create_task(_script_timer_loop())
+
+
 async def handle_broker_config(ws, data: dict):
     """前端: 連線或斷線指定券商
     data.action    = "connect" | "disconnect"
@@ -726,6 +731,61 @@ def on_bar_complete(bar):
 
     for script_id, output in indicator_results.items():
         bus.emit_sync("indicator_output", output)
+
+
+async def _script_timer_loop():
+    """依 script 自己在 __meta__ 宣告的 interval_sec 定時執行，跟 M1 棒收完與否無關。
+
+    只有設定了 interval_sec 的 script（例如報價語音播報想要比 1 分鐘更頻繁）
+    才會額外被這裡觸發；其餘 script 完全不受影響，維持原本只在
+    on_bar_complete（M1 棒收完）時執行一次的行為，避免打亂既有的
+    「calc() 每根棒只跑一次」假設（例如 volume_alert 的爆量判斷）。
+    """
+    import time
+    import pandas as pd
+
+    last_run: dict[tuple[str, str], float] = {}
+    while True:
+        await asyncio.sleep(1)
+
+        timed_metas = [m for m in script_engine.enabled_indicators if m.interval_sec]
+        if not timed_metas:
+            continue
+
+        now = time.monotonic()
+        for symbol in list(_backfilled_symbols):
+            due_metas = [
+                m for m in timed_metas
+                if now - last_run.get((m.id, symbol), 0) >= m.interval_sec
+            ]
+            if not due_metas:
+                continue
+
+            bars = db.get_bars(symbol, limit=1800)
+            if len(bars) < 5:
+                continue
+
+            rows = [
+                {"open": b.open, "high": b.high, "low": b.low,
+                 "close": b.close, "volume": b.volume, "timestamp": b.timestamp}
+                for b in bars
+            ]
+            # 補上目前尚未收完的 live 棒，讓 ctx.close 反映當下最新價，
+            # 而不是卡在上一根已收完 M1 棒的價位。
+            live_bar = bar_builder.get_current_bar(symbol, Timeframe.M1)
+            if live_bar is not None:
+                rows.append({
+                    "open": live_bar.open, "high": live_bar.high, "low": live_bar.low,
+                    "close": live_bar.close, "volume": live_bar.volume,
+                    "timestamp": live_bar.timestamp,
+                })
+            df = pd.DataFrame(rows)
+
+            for meta in due_metas:
+                last_run[(meta.id, symbol)] = now
+                output = script_engine.run_indicator(meta.id, df)
+                if output:
+                    bus.emit_sync("indicator_output", output)
 
 
 async def handle_toggle_script(ws, data: dict):
@@ -956,6 +1016,8 @@ def setup():
 
     # Core Service 啟動 hook — event loop ready 後自動連線券商 + 訂閱預設商品
     register_startup_hook(startup_core)
+    # script 定時器（interval_sec）— 與是否自動連線券商無關，一律啟動
+    register_startup_hook(startup_script_timer)
 
     # 載入內建 Script（指標 / 策略）
     for meta in BUILTIN_SCRIPTS:

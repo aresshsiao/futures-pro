@@ -202,6 +202,9 @@ class ScriptMeta:
     enabled: bool = False
     file_path: str = ""
     parameters: dict = field(default_factory=dict)  # 可調參數 & 預設值
+    # 設定後，該 script 除了在 M1 棒收完時執行，也會依此秒數定時額外執行一次
+    # （例如報價語音播報想要比 1 分鐘更頻繁）。None = 只在 M1 棒收完時執行。
+    interval_sec: Optional[int] = None
 
 
 @dataclass

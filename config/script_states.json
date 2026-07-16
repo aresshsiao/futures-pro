@@ -2,7 +2,9 @@
   "breakout": false,
   "kd": true,
   "ma": true,
+  "price_ticker": false,
   "rsi": false,
+  "sp_line": true,
   "volume_alert": true,
   "window_price": true
 }
