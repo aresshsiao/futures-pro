@@ -5,8 +5,8 @@ __meta__ = {
     "enabled": True,
     "params": {
         "levels": [
-            {"level": 1500, "label": "夜盤大量"},
-            {"level": 400, "label": "日盤大量"},
+            {"level": 1500, "label": "日盤大量"},
+            {"level": 400, "label": "夜盤大量"},
         ]
     },
 }

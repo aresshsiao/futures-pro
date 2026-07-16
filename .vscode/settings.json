@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "/home/aress/.venv/bin/python",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
+}
