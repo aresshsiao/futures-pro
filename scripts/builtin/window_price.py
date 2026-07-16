@@ -3,7 +3,7 @@ __meta__ = {
     "description": "Window最高/最低水平線",
     "type": "indicator",
     "params": {
-        "periods": "60,300,1200",
+        "periods": [60, 300, 1200],
     },
 }
 
@@ -21,8 +21,7 @@ _WIDTHS = [1, 2, 3, 4]
 from scripts.engine import ScriptContext
 
 def calc(ctx: ScriptContext):
-    raw = str(ctx.param("periods"))
-    periods = [int(p.strip()) for p in raw.split(",") if p.strip().isdigit()]
+    periods = ctx.param("periods")
 
     for i, period in enumerate(periods):
         color_h, color_l = _COLORS[i % len(_COLORS)]
