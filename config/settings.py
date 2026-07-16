@@ -19,7 +19,7 @@ SERVER_PORT = 8888
 # 執行 `python scripts/gen_password_hash.py` 產生 AUTH_PASSWORD_HASH
 AUTH_SECRET_KEY = "change-this-secret-key-in-production"
 AUTH_PASSWORD_HASH = "$2b$12$KbKksoOf0aPH1v8m0IPmZ.aXtOc3w3w8NSkCzKjVccAzHpCCPTrAm"
-AUTH_TOKEN_EXPIRE_HOURS = 24
+AUTH_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 天
 
 # ── 日誌 Logging ─────────────────────────────────────
 # 系統預設的輸出等級 (INFO, DEBUG, WARNING, ERROR)
