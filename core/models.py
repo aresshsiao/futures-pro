@@ -205,6 +205,7 @@ class ScriptMeta:
     # 設定後，該 script 除了在 M1 棒收完時執行，也會依此秒數定時額外執行一次
     # （例如報價語音播報想要比 1 分鐘更頻繁）。None = 只在 M1 棒收完時執行。
     interval_sec: Optional[int] = None
+    last_modified: float = 0.0
 
 
 @dataclass

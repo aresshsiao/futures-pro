@@ -4,17 +4,17 @@ __meta__ = {
     "type": "indicator",
     "enabled": True,
     "params": {
-        "lines": [45500, 45100, 44800, 44500, 44200],
+        "lines": [45700, 45400, 45100, 44800, 44500],
     },
 }
 
 # 每條線的 (顏色, 線寬)，依 lines 順序對應
 _LINE_PARA = [
-    ("#ef4444", "dash", 2),
+    ("#ef4444", "solid", 1),
     ("#ef4444", "dash", 1),
-    ("#E6E61E", "dash", 2),
+    ("#E6E61E", "solid", 1),
     ("#22c55e", "dash", 1),
-    ("#22c55e", "dash", 2),
+    ("#22c55e", "solid", 1),
 ]
 
 from scripts.engine import ScriptContext

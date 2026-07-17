@@ -209,6 +209,12 @@ def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = N
     if not path.exists():
         logger.error(f"[ScriptEngine] 找不到檔案: {path}")
         return None
+        
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        mtime = 0.0
+
     try:
         spec = importlib.util.spec_from_file_location(script_id, path)
         module = importlib.util.module_from_spec(spec)
@@ -228,6 +234,7 @@ def load_meta_from_file(file_path: str, script_id: str, enabled: bool | None = N
             description=description, enabled=enabled,
             file_path=file_path, parameters=params,
             interval_sec=interval_sec,
+            last_modified=mtime,
         )
     except Exception:
         logger.exception(f"[ScriptEngine] 讀取 meta 失敗: {file_path}")
@@ -316,12 +323,33 @@ class ScriptEngine:
         return [s for s in self._scripts.values()
                 if s.enabled and s.script_type == ScriptType.STRATEGY]
 
+    def _check_and_reload(self, script_id: str) -> None:
+        """檢查 script 檔案是否有更新，若有則重新載入"""
+        meta = self._scripts.get(script_id)
+        if not meta:
+            return
+            
+        path = Path(meta.file_path)
+        try:
+            current_mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            return
+            
+        if current_mtime > meta.last_modified:
+            logger.info(f"[ScriptEngine] 偵測到 {meta.name} 已修改，重新載入...")
+            was_enabled = meta.enabled
+            new_meta = load_meta_from_file(meta.file_path, script_id, enabled=was_enabled)
+            if new_meta:
+                self.load_script(new_meta)
+
     # ── 執行 ──────────────────────────────────────────
 
     def run_indicator(
         self, script_id: str, bars: pd.DataFrame
     ) -> Optional[IndicatorOutput]:
         """執行指標 Script，回傳繪圖資料"""
+        self._check_and_reload(script_id)
+        
         meta = self._scripts.get(script_id)
         module = self._modules.get(script_id)
         if not meta or not module or not meta.enabled:
@@ -343,6 +371,8 @@ class ScriptEngine:
         self, script_id: str, bars: pd.DataFrame
     ) -> list[StrategySignal]:
         """執行策略 Script，回傳交易訊號"""
+        self._check_and_reload(script_id)
+        
         meta = self._scripts.get(script_id)
         module = self._modules.get(script_id)
         if not meta or not module or not meta.enabled:

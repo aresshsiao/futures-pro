@@ -4,7 +4,7 @@
   "ma": true,
   "price_ticker": false,
   "rsi": false,
-  "sp_line": true,
   "volume_alert": true,
-  "window_price": true
+  "window_price": true,
+  "sp_line": true
 }
