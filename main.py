@@ -959,7 +959,9 @@ async def handle_get_options_t_quote(ws, data: dict):
     """前端: 取得選擇權 T 字報價快照"""
     symbol = data.get("symbol", "TXO")
     month = data.get("month", "")
-    t_quote_data = await quote.get_options_t_quote(symbol, month)
+    spot_price = float(data.get("spot_price", 0.0) or 0.0)
+    trading_dates = db.get_trading_dates()
+    t_quote_data = await quote.get_options_t_quote(symbol, month, spot_price, trading_dates)
     await ws.send_json({
         "type": "options_t_quote",
         "symbol": symbol,

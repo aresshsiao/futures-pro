@@ -80,8 +80,15 @@ class QuoteAdapter(ABC):
         ...
 
     @abstractmethod
-    async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
-        """取得指定月份的所有選擇權 T 字報價 (含 Call/Put 快照)"""
+    async def get_options_t_quote(
+        self, symbol: str, month: str, spot_price: float = 0.0, trading_dates: list[str] | None = None,
+    ) -> list[dict]:
+        """取得指定月份的所有選擇權 T 字報價 (含 Call/Put 快照)
+
+        spot_price > 0 時，會額外用 Black-76 反推 ATM 隱含波動率，
+        套用到每個履約價算出理論價，回傳 callPremium/putPremium = 市價 - 理論價。
+        trading_dates 是交易日曆，用來把到期時間 T 精算到實際交易分鐘數。
+        """
         ...
 
 

@@ -2123,6 +2123,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const [selectedContract, setSelectedContract] = useState("");
   const [quoteData, setQuoteData] = useState([]);
   const [taiexIndex, setTaiexIndex] = useState({ price: 0, change: 0, change_pct: 0 });
+  const [centerOnAtm, setCenterOnAtm] = useState(true); // 成交置中 toggle（比照閃電下單），關閉後資料刷新不會打斷手動捲動
 
   // Fetch months on mount or when connection is established
   useEffect(() => {
@@ -2185,6 +2186,11 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
     return () => { clean1(); clean2(); };
   }, [addHandler, selectedContract]);
 
+  // currentPrice 常常在 tick 就變，用 ref 存最新值給 3 秒輪詢用，
+  // 避免每次 currentPrice 一變就重設 interval（那樣輪詢間隔會一直被打斷）
+  const currentPriceRef = useRef(currentPrice);
+  useEffect(() => { currentPriceRef.current = currentPrice; }, [currentPrice]);
+
   // When selectedContract changes, fetch data and poll every 3 seconds
   useEffect(() => {
     if (!selectedContract || !send) return;
@@ -2192,7 +2198,9 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
     // reset data when changing contract
     setQuoteData([]);
 
-    const fetchQuotes = () => send("get_options_t_quote", { symbol: "TXO", month: selectedContract });
+    const fetchQuotes = () => send("get_options_t_quote", {
+      symbol: "TXO", month: selectedContract, spot_price: currentPriceRef.current,
+    });
     fetchQuotes();
 
     const interval = setInterval(fetchQuotes, 3000);
@@ -2201,9 +2209,9 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
 
   const displayData = quoteData;
 
-  // Auto-scroll to ATM
+  // Auto-scroll to ATM（centerOnAtm 關閉時不搶走使用者手動捲動的位置）
   useEffect(() => {
-    if (scrollRef.current && displayData.length > 0) {
+    if (centerOnAtm && scrollRef.current && displayData.length > 0) {
       const atmIndex = displayData.reduce((closestIdx, row, idx) => {
         const closestDiff = Math.abs(displayData[closestIdx].strike - currentPrice);
         const currentDiff = Math.abs(row.strike - currentPrice);
@@ -2216,9 +2224,9 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
       const scrollTop = (atmIndex * rowHeight) - (containerHeight / 2) + (rowHeight / 2) + headerHeight;
       scrollRef.current.scrollTop = Math.max(0, scrollTop);
     }
-  }, [currentPrice, displayData.length]);
+  }, [centerOnAtm, currentPrice, displayData.length]);
 
-  const T_GRID = "45px 55px 60px 55px 45px";
+  const T_GRID = "32px 48px 48px 56px 48px 48px 32px";
 
   const renderValue = (val) => {
     if (val === undefined || val === null || val === 0) return "--";
@@ -2229,6 +2237,13 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
     if (change === undefined || change === null || change === 0) return "--";
     const color = change > 0 ? COLORS.up : change < 0 ? COLORS.down : COLORS.text;
     return <span style={{ color }}>{change > 0 ? `+${change}` : change}</span>;
+  };
+
+  // 溢價 = 市價 - 理論價，顏色比照漲跌欄：正值(市價高於理論價)用 up 色、負值用 down 色
+  const renderPremium = (val) => {
+    if (val === undefined || val === null || val === 0) return "--";
+    const color = val > 0 ? COLORS.up : COLORS.down;
+    return <span style={{ color }}>{val > 0 ? `+${val.toFixed(1)}` : val.toFixed(1)}</span>;
   };
 
   return (
@@ -2254,6 +2269,19 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
           <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>
             {brokerConfig?.quote?.connected ? "連線中" : "無連線"}
           </span>
+          <button
+            onClick={() => setCenterOnAtm(!centerOnAtm)}
+            style={{
+              fontSize: 9, fontWeight: 600, padding: "2px 6px",
+              background: centerOnAtm ? "rgba(59,130,246,0.15)" : "transparent",
+              border: `1px solid ${centerOnAtm ? COLORS.accent : COLORS.border}`,
+              color: centerOnAtm ? COLORS.accent : COLORS.textMuted,
+              borderRadius: 3, cursor: "pointer", transition: "all 0.2s"
+            }}
+            title={centerOnAtm ? "點擊關閉價平置中" : "點擊開啟價平置中"}
+          >
+            {centerOnAtm ? "🎯" : "○"} 價平置中
+          </button>
         </div>
         {onClose && (
           <button onClick={onClose} style={{ background: "none", border: "none", color: COLORS.textDim, cursor: "pointer", fontSize: 14 }}>✕</button>
@@ -2287,17 +2315,19 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
         <div style={{ width: "40%", textAlign: "center", color: COLORS.down, fontWeight: 700, fontSize: 12 }}>賣權 Put</div>
       </div>
 
-      {/* Column Headers */}
-      <div style={{ display: "grid", gridTemplateColumns: T_GRID, borderBottom: `1px solid ${COLORS.border}`, padding: "4px 0", flexShrink: 0, background: COLORS.bgPanel, fontSize: 10, color: COLORS.textMuted, fontWeight: 600 }}>
-        <div style={{ textAlign: "center" }}>漲跌</div>
-        <div style={{ textAlign: "center" }}>成交價</div>
-        <div style={{ textAlign: "center" }}>履約價</div>
-        <div style={{ textAlign: "center" }}>成交價</div>
-        <div style={{ textAlign: "center" }}>漲跌</div>
-      </div>
-
-      {/* Rows */}
+      {/* Rows，欄位表頭跟著捲動容器一起 sticky，避免捲軸只算 body 寬度、跟表頭對不齊 */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden", display: "flex", flexDirection: "column" }}>
+        {/* Column Headers - sticky */}
+        <div style={{ display: "grid", gridTemplateColumns: T_GRID, borderBottom: `1px solid ${COLORS.border}`, padding: "4px 0", flexShrink: 0, background: COLORS.bgPanel, fontSize: 10, color: COLORS.textMuted, fontWeight: 600, position: "sticky", top: 0, zIndex: 10 }}>
+          <div style={{ textAlign: "center" }}>溢價</div>
+          <div style={{ textAlign: "center" }}>漲跌</div>
+          <div style={{ textAlign: "center" }}>成交價</div>
+          <div style={{ textAlign: "center" }}>履約價</div>
+          <div style={{ textAlign: "center" }}>成交價</div>
+          <div style={{ textAlign: "center" }}>漲跌</div>
+          <div style={{ textAlign: "center" }}>溢價</div>
+        </div>
+
         {!brokerConfig?.quote?.connected ? (
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textMuted, fontSize: 13, minHeight: 100 }}>無連線...</div>
         ) : displayData.length === 0 ? (
@@ -2306,13 +2336,16 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
           const diffToAtm = Math.abs(row.strike - currentPrice);
           const isAtm = diffToAtm < 25;
 
+          // 溢價 = 市價 - Black-76 理論價，後端用 ATM 反推的隱含波動率算出
           return (
             <div key={row.strike} style={{ display: "grid", gridTemplateColumns: T_GRID, alignItems: "center", height: 26, borderBottom: `1px solid ${COLORS.border}15`, fontSize: 11, fontFamily: "monospace", fontWeight: 600 }}>
+              <div style={{ textAlign: "center" }}>{renderPremium(row.callPremium)}</div>
               <div style={{ textAlign: "center", paddingRight: 4 }}>{renderChange(row.callChange)}</div>
               <div style={{ textAlign: "center", color: COLORS.up }}>{renderValue(row.callPrice)}</div>
               <div style={{ textAlign: "center", background: isAtm ? "rgba(250,204,21,0.15)" : "rgba(255,255,255,0.03)", color: isAtm ? "#facc15" : COLORS.text, borderLeft: `1px solid ${COLORS.border}`, borderRight: `1px solid ${COLORS.border}` }}>{row.strike}</div>
               <div style={{ textAlign: "center", color: COLORS.down }}>{renderValue(row.putPrice)}</div>
               <div style={{ textAlign: "center", paddingLeft: 4 }}>{renderChange(row.putChange)}</div>
+              <div style={{ textAlign: "center" }}>{renderPremium(row.putPremium)}</div>
             </div>
           );
         })}
@@ -2774,7 +2807,7 @@ export default function TradingPlatform() {
         <div style={{ display: page === "trading" ? "flex" : "none", height: "100%", padding: 8, gap: 8, overflow: "hidden" }}>
           {/* 選擇權 T字報價表 - 放在左側 */}
           {showTQuote && (
-            <div style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+            <div style={{ width: 340, flexShrink: 0, display: "flex", flexDirection: "column" }}>
               <OptionsTQuote
                 brokerConfig={brokerConfig}
                 connected={connected}

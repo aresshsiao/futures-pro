@@ -112,7 +112,9 @@ class QuoteModule:
             return []
         return await self._adapter.get_options_months(symbol)
 
-    async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
+    async def get_options_t_quote(
+        self, symbol: str, month: str, spot_price: float = 0.0, trading_dates: list[str] | None = None,
+    ) -> list[dict]:
         if not self.is_connected:
             return []
-        return await self._adapter.get_options_t_quote(symbol, month)
+        return await self._adapter.get_options_t_quote(symbol, month, spot_price, trading_dates)

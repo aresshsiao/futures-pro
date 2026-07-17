@@ -7,8 +7,9 @@ brokers/adapters/sinopac.py — 永豐金 Shioaji Adapter
 """
 from __future__ import annotations
 import logging
+import math
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from core.models import (
@@ -94,6 +95,87 @@ def _logout_shared_api():
             pass
         _SHARED_CONNECTED = False
 
+
+# ── 選擇權理論價 (Black-76) ─────────────────────────────
+# 台指選擇權標的用期貨價 F 而非現貨指數，Black-76 不需要另外假設股利率。
+_RISK_FREE_RATE = 0.015  # 無風險利率假設（年化），台灣短率概估，非即時牌告值
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _black76_price(F: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
+    """T<=0 或 sigma<=0 時退化為內含價值（到期或無波動率可用）"""
+    if T <= 0 or sigma <= 0 or F <= 0 or K <= 0:
+        return max(F - K, 0.0) if is_call else max(K - F, 0.0)
+    sqrt_t = math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * sqrt_t)
+    d2 = d1 - sigma * sqrt_t
+    disc = math.exp(-r * T)
+    if is_call:
+        return disc * (F * _norm_cdf(d1) - K * _norm_cdf(d2))
+    return disc * (K * _norm_cdf(-d2) - F * _norm_cdf(-d1))
+
+
+def _implied_vol_black76(target: float, F: float, K: float, T: float, r: float, is_call: bool) -> Optional[float]:
+    """二分法反推隱含波動率。選項價會隨 sigma 單調遞增，二分法穩定不用算 vega。"""
+    if target <= 0 or T <= 0 or F <= 0 or K <= 0:
+        return None
+    lo, hi = 1e-4, 5.0  # 年化波動率搜尋範圍：0.01% ~ 500%
+    if target <= _black76_price(F, K, T, r, lo, is_call):
+        return lo
+    if target >= _black76_price(F, K, T, r, hi, is_call):
+        return None  # 超出合理範圍（例：嚴重偏離市場的殘留舊報價），放棄反推
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if _black76_price(F, K, T, r, mid, is_call) > target:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2
+
+
+# 台指期貨/選擇權日盤 08:45-13:45、夜盤 15:00-隔日05:00
+_DAY_START, _DAY_END = (8, 45), (13, 45)
+_NIGHT_START, _NIGHT_END = (15, 0), (5, 0)  # 隔天
+_TRADING_MINUTES_PER_DAY = (13 * 60 + 45 - (8 * 60 + 45)) + (24 * 60 - (15 * 60) + 5 * 60)  # 300+840=1140
+_TRADING_DAYS_PER_YEAR = 252  # 年交易日數概估，台灣期交所歷年約在此區間
+_TRADING_MINUTES_PER_YEAR = _TRADING_MINUTES_PER_DAY * _TRADING_DAYS_PER_YEAR
+
+
+def _trading_minutes_between(now: datetime, until: datetime, trading_dates: list[str]) -> float:
+    """算 now~until 之間「實際會有交易」的分鐘數，扣掉日夜盤中間收盤、週末、假日。
+
+    trading_dates 是已排序的 'YYYY-MM-DD' 交易日清單（來自 db.get_trading_dates()）。
+    到期日當天的夜盤不算（該契約最後交易日沒有夜盤），這裡不用特別處理——
+    until 通常就設在到期日 13:30，自然會把當天的夜盤區間截掉。
+    """
+    if until <= now or not trading_dates:
+        return 0.0
+
+    # now 若落在前一個交易日的夜盤裡（跨過午夜），要往前多抓一天
+    lo = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    hi = until.strftime("%Y-%m-%d")
+    relevant = [d for d in trading_dates if lo <= d <= hi]
+    if not relevant:
+        return 0.0
+
+    total_seconds = 0.0
+    for d in relevant:
+        day = datetime.strptime(d, "%Y-%m-%d")
+        day_start = day.replace(hour=_DAY_START[0], minute=_DAY_START[1])
+        day_end = day.replace(hour=_DAY_END[0], minute=_DAY_END[1])
+        night_start = day.replace(hour=_NIGHT_START[0], minute=_NIGHT_START[1])
+        night_end = (day + timedelta(days=1)).replace(hour=_NIGHT_END[0], minute=_NIGHT_END[1])
+
+        for seg_start, seg_end in ((day_start, day_end), (night_start, night_end)):
+            clip_start = max(seg_start, now)
+            clip_end = min(seg_end, until)
+            if clip_end > clip_start:
+                total_seconds += (clip_end - clip_start).total_seconds()
+
+    return total_seconds / 60.0
 
 
 class SinoPacQuoteAdapter(QuoteAdapter):
@@ -470,9 +552,17 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             logger.error("[SinoPac] get_options_months error: %s", e)
             return []
 
-    async def get_options_t_quote(self, symbol: str, month: str) -> list[dict]:
+    async def get_options_t_quote(
+        self, symbol: str, month: str, spot_price: float = 0.0, trading_dates: list[str] | None = None,
+    ) -> list[dict]:
         """month 格式為 "PRODUCT:delivery_month"，例如 "TXW1:202607" 或 "TXO:202607W1"。
         舊格式（純 delivery_month 字串）仍相容，預設 product 為 TXO。
+
+        spot_price > 0 時，用 Black-76（標的 = 期貨價 F，不需股利率）先從最接近價平的
+        履約價反推隱含波動率，再套用同一個波動率算每個履約價的理論價，
+        回傳 callPremium/putPremium = 市價 - 理論價。
+        trading_dates 是交易日曆（'YYYY-MM-DD' 排序清單），用來把到期時間 T 精算到
+        「實際交易分鐘數」（扣掉日夜盤中間收盤、週末、假日），沒給就退化成日曆時間概算。
         """
         if not self._api:
             return []
@@ -500,20 +590,98 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             logger.debug("[SinoPac] get_options_t_quote: %d snapshots received", len(snapshots))
 
             strikes: dict = {}
+            call_snap_by_strike: dict = {}
+            put_snap_by_strike: dict = {}
+            delivery_date_str = None
             for contract, snap in zip(contracts, snapshots):
                 s = contract.strike_price
+                if delivery_date_str is None:
+                    delivery_date_str = contract.delivery_date
                 if s not in strikes:
                     strikes[s] = {"strike": s, "callPrice": 0, "callChange": 0, "putPrice": 0, "putChange": 0}
                 price = snap.close if snap.close > 0 else 0
+                # snapshot.change_price 本身已經是有正負號的漲跌點數（跟 tick.price_chg 慣例一致），不必再另外套 change_type 判斷方向
+                change = float(getattr(snap, "change_price", 0.0) or 0.0)
                 if contract.option_right == sj.constant.OptionRight.Call:
                     strikes[s]["callPrice"] = price
+                    strikes[s]["callChange"] = change
+                    if price > 0:
+                        call_snap_by_strike[s] = price
                 else:
                     strikes[s]["putPrice"] = price
+                    strikes[s]["putChange"] = change
+                    if price > 0:
+                        put_snap_by_strike[s] = price
+
+            if spot_price > 0 and delivery_date_str:
+                self._apply_theoretical_premium(
+                    strikes, spot_price, delivery_date_str, call_snap_by_strike, put_snap_by_strike, trading_dates,
+                )
 
             return [strikes[s] for s in sorted(strikes.keys())]
         except Exception as e:
             logger.exception("[SinoPac] get_options_t_quote error")
             return []
+
+    def _apply_theoretical_premium(
+        self, strikes: dict, F_hint: float, delivery_date_str: str,
+        call_snap_by_strike: dict, put_snap_by_strike: dict, trading_dates: list[str] | None,
+    ) -> None:
+        """就地在 strikes[*] 補上 callPremium/putPremium = 市價 - Black-76 理論價
+
+        F_hint（外部傳入的 TX 期貨現價）只當作「找哪個履約價當 ATM」的參考，
+        不直接拿來算理論價——TX 期貨跟 TXO 選擇權本身有各自的基差，兩者不一定同步，
+        直接用 TX 價格當 F 會讓 call/put 用同一個 IV 卻算出不一致的理論價（違反 put-call parity）。
+        改成優先用「該履約價 call/put 都有成交價」的那組，用 put-call parity 反推選擇權
+        自己內含的等效期貨價，理論價才會跟市場的 call/put 相對關係一致。
+        """
+        try:
+            expiry = datetime.strptime(delivery_date_str, "%Y/%m/%d") + timedelta(hours=13, minutes=30)
+        except ValueError:
+            logger.warning("[SinoPac] 無法解析選擇權到期日: %s", delivery_date_str)
+            return
+
+        now = datetime.now()
+        if trading_dates:
+            minutes_left = _trading_minutes_between(now, expiry, trading_dates)
+            minutes_left = max(minutes_left, 1.0)  # 到期前最後一刻至少留 1 分鐘避免除以 0
+            T = minutes_left / _TRADING_MINUTES_PER_YEAR
+        else:
+            # 沒有交易日曆可用時的備援：退化成日曆時間概算（不精確，但至少不會整個掛掉）
+            seconds_left = max((expiry - now).total_seconds(), 60)
+            T = seconds_left / (365 * 24 * 3600)
+        r = _RISK_FREE_RATE
+
+        # 找離 F_hint 最近、且 call/put 都有成交價的履約價，用 put-call parity 反推 F：
+        # Call - Put = e^(-rT)(F-K)  =>  F = K + (Call-Put)*e^(rT)
+        parity_candidates = sorted(
+            (k for k in strikes if k in call_snap_by_strike and k in put_snap_by_strike),
+            key=lambda k: abs(k - F_hint),
+        )
+        if parity_candidates:
+            atm_strike = parity_candidates[0]
+            F = atm_strike + (call_snap_by_strike[atm_strike] - put_snap_by_strike[atm_strike]) * math.exp(r * T)
+        else:
+            # 找不到 call/put 都有成交價的履約價（太冷門的月份/週別），退回用外部現價定位 ATM
+            atm_strike = min(strikes.keys(), key=lambda k: abs(k - F_hint))
+            F = F_hint
+
+        iv = None
+        if atm_strike in call_snap_by_strike:
+            iv = _implied_vol_black76(call_snap_by_strike[atm_strike], F, atm_strike, T, r, is_call=True)
+        if iv is None and atm_strike in put_snap_by_strike:
+            iv = _implied_vol_black76(put_snap_by_strike[atm_strike], F, atm_strike, T, r, is_call=False)
+        if iv is None:
+            logger.debug("[SinoPac] get_options_t_quote: ATM %.0f 反推隱含波動率失敗，略過理論價計算", atm_strike)
+            return
+
+        for k, row in strikes.items():
+            theo_call = _black76_price(F, k, T, r, iv, is_call=True)
+            theo_put = _black76_price(F, k, T, r, iv, is_call=False)
+            if row["callPrice"] > 0:
+                row["callPremium"] = round(row["callPrice"] - theo_call, 2)
+            if row["putPrice"] > 0:
+                row["putPremium"] = round(row["putPrice"] - theo_put, 2)
 
 
 class SinoPacTradeAdapter(TradeAdapter):
