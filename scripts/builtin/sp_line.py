@@ -10,11 +10,11 @@ __meta__ = {
 
 # 每條線的 (顏色, 線寬)，依 lines 順序對應
 _LINE_PARA = [
-    ("#ef4444", "solid", 1),
-    ("#ef4444", "dash", 1),
-    ("#E6E61E", "solid", 1),
-    ("#22c55e", "dash", 1),
-    ("#22c55e", "solid", 1),
+    ("#ff0000", "solid", 1),
+    ("#b92525", "dash", 1),
+    ("#FFFF00", "solid", 1),
+    ("#23c35d", "dash", 1),
+    ("#00ff5e", "solid", 1),
 ]
 
 from scripts.engine import ScriptContext

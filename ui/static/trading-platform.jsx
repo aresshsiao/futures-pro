@@ -161,7 +161,7 @@ function LoginPage({ onLogin }) {
 // ─── WebSocket Hook ───────────────────────────────────────────────────
 function useWebSocket(url) {
   const wsRef = useRef(null);
-  const handlersRef = useRef({});
+  const handlersRef = useRef({}); // type -> Set<fn>，同一 type 可以有多個元件各自訂閱
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -179,8 +179,8 @@ function useWebSocket(url) {
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
-          const handler = handlersRef.current[msg.type];
-          if (handler) handler(msg);
+          const handlers = handlersRef.current[msg.type];
+          if (handlers) handlers.forEach(fn => fn(msg));
         } catch (_) { }
       };
 
@@ -203,10 +203,12 @@ function useWebSocket(url) {
     }
   }, []);
 
-  // addHandler returns a cleanup function
+  // addHandler returns a cleanup function。同一 type 可被多個元件各自 addHandler，
+  // 彼此獨立（不會像過去單一 slot 那樣互相覆蓋掉對方的 handler）。
   const addHandler = useCallback((type, fn) => {
-    handlersRef.current[type] = fn;
-    return () => { delete handlersRef.current[type]; };
+    if (!handlersRef.current[type]) handlersRef.current[type] = new Set();
+    handlersRef.current[type].add(fn);
+    return () => { handlersRef.current[type]?.delete(fn); };
   }, []);
 
   return { send, addHandler, connected };
@@ -2131,6 +2133,26 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   useEffect(() => {
     if (connected && send) send("subscribe", { symbol: "TAIEX" });
   }, [connected, send]);
+
+  // 現貨收盤後不會再有新 tick 進來，先用日K（今天 vs 昨天收盤）算出種子值，
+  // 避免元件剛掛載、還沒等到即時 tick 時畫面一直卡在 "--"，
+  // 也避免漲跌點數用寫死的 0 而顯示成「平盤」這種誤導的假象
+  useEffect(() => {
+    if (connected && send) send("get_history", { symbol: "TAIEX", timeframe: "日", count: 2 });
+  }, [connected, send]);
+
+  useEffect(() => {
+    if (!addHandler) return;
+    return addHandler("history_bars", (msg) => {
+      if (msg.symbol !== "TAIEX" || msg.timeframe !== "日" || !msg.bars || msg.bars.length === 0) return;
+      const todayClose = msg.bars[msg.bars.length - 1].close;
+      const prevClose = msg.bars.length >= 2 ? msg.bars[msg.bars.length - 2].close : null;
+      const change = prevClose ? todayClose - prevClose : 0;
+      const changePct = prevClose ? (change / prevClose) * 100 : 0;
+      // 若即時 tick 已經先到，不要用歷史種子值覆蓋掉正確的漲跌資訊
+      setTaiexIndex(prev => (prev.price > 0 ? prev : { price: todayClose, change, change_pct: changePct }));
+    });
+  }, [addHandler]);
 
   // Listen for TAIEX index tick
   useEffect(() => {
