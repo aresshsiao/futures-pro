@@ -2124,6 +2124,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const [quoteData, setQuoteData] = useState([]);
   const [taiexIndex, setTaiexIndex] = useState({ price: 0, change: 0, change_pct: 0 });
   const [centerOnAtm, setCenterOnAtm] = useState(true); // 成交置中 toggle（比照閃電下單），關閉後資料刷新不會打斷手動捲動
+  const [selectedStrikes, setSelectedStrikes] = useState(() => new Set()); // 點選列 highlight，可複選，再點一次取消該列
 
   // Fetch months on mount or when connection is established
   useEffect(() => {
@@ -2335,10 +2336,26 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
         ) : displayData.map((row) => {
           const diffToAtm = Math.abs(row.strike - currentPrice);
           const isAtm = diffToAtm < 25;
+          const isSelected = selectedStrikes.has(row.strike);
 
           // 溢價 = 市價 - Black-76 理論價，後端用 ATM 反推的隱含波動率算出
           return (
-            <div key={row.strike} style={{ display: "grid", gridTemplateColumns: T_GRID, alignItems: "center", height: 26, borderBottom: `1px solid ${COLORS.border}15`, fontSize: 11, fontFamily: "monospace", fontWeight: 600 }}>
+            <div
+              key={row.strike}
+              onClick={() => setSelectedStrikes(prev => {
+                const next = new Set(prev);
+                if (next.has(row.strike)) next.delete(row.strike); else next.add(row.strike);
+                return next;
+              })}
+              style={{
+                display: "grid", gridTemplateColumns: T_GRID, alignItems: "center", height: 26,
+                borderBottom: `1px solid ${COLORS.border}15`, fontSize: 11, fontFamily: "monospace", fontWeight: 600,
+                cursor: "pointer",
+                outline: isSelected ? `1px solid ${COLORS.accent}` : "none",
+                outlineOffset: -1,
+                background: isSelected ? "rgba(59,130,246,0.12)" : "transparent",
+              }}
+            >
               <div style={{ textAlign: "center" }}>{renderPremium(row.callPremium)}</div>
               <div style={{ textAlign: "center", paddingRight: 4 }}>{renderChange(row.callChange)}</div>
               <div style={{ textAlign: "center", color: COLORS.up }}>{renderValue(row.callPrice)}</div>
