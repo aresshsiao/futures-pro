@@ -451,16 +451,28 @@ class TaifexImporter:
         directory: str | Path = None,
         symbols: list[str] | None = None,
         on_progress=None,
-    ) -> list[Bar]:
+        already_imported: dict[str, dict[str, int]] | None = None,
+    ) -> tuple[list[Bar], list[dict], int]:
         """
         批量匯入整個目錄下的 CSV 和 ZIP 檔案（ZIP 在記憶體中解壓）。
         symbols=None 表示匯入全部支援商品。
 
+        already_imported: {symbol: {filename: file_size}}，若某檔案對「這次要求的每個
+            symbol」都已經記錄過同樣的檔案大小，就整個跳過不解析（同名同大小視為同一版本、
+            已經成功匯入過）。傳 None 表示不做跳過判斷（每次都重新解析）。
+
         on_progress(current, total, filename, bars_so_far):
-            每處理完一個檔案後呼叫，供呼叫端顯示進度。
+            每處理完一個檔案後呼叫（含被跳過的檔案），供呼叫端顯示進度。
+
+        回傳 (bars, manifest, skipped)：
+            bars     — 過濾後的 K 線列表（跳過的檔案不會貢獻任何 bar）
+            manifest — 這次「實際解析」（未被跳過）的檔案清單，供呼叫端寫入 DB 追蹤表：
+                       [{"filename", "file_size", "symbols"}, ...]
+            skipped  — 因已匯入過而跳過的檔案數
         """
         dir_path = Path(directory) if directory else self._raw_dir
         all_bars: list[Bar] = []
+        manifest: list[dict] = []
 
         csv_files = sorted(dir_path.glob("*.csv"))
         zip_files = sorted(dir_path.glob("*.zip"))
@@ -471,19 +483,39 @@ class TaifexImporter:
 
         all_files = csv_files + zip_files
         total = len(all_files)
+        target_symbols = symbols or list(self.KNOWN_SYMBOLS.keys())
+        skipped = 0
 
         for i, f in enumerate(all_files, 1):
+            file_size = f.stat().st_size
+            if already_imported and all(
+                already_imported.get(sym, {}).get(f.name) == file_size
+                for sym in target_symbols
+            ):
+                skipped += 1
+                if on_progress:
+                    on_progress(i, total, f.name, len(all_bars))
+                continue
+
             if f.suffix.lower() == ".csv":
                 bars = self.parse_daily_csv(f)
             else:
                 bars = self._parse_zip_bytes(f.read_bytes(), f.name)
+
+            file_symbols = sorted({b.symbol for b in bars} & set(target_symbols))
+            if file_symbols:
+                manifest.append({"filename": f.name, "file_size": file_size, "symbols": file_symbols})
+
             all_bars.extend(bars)
             if on_progress:
                 on_progress(i, total, f.name, len(all_bars))
 
         result = self._filter_symbols(all_bars, symbols)
-        logger.info("[Taifex] 匯入完成: 共 %d 筆 K 線 (過濾後 %d 筆)", len(all_bars), len(result))
-        return result
+        logger.info(
+            "[Taifex] 匯入完成: 共 %d 筆 K 線 (過濾後 %d 筆，略過 %d 個已匯入檔案)",
+            len(all_bars), len(result), skipped,
+        )
+        return result, manifest, skipped
 
     @staticmethod
     def _filter_symbols(bars: list[Bar], symbols: list[str] | None) -> list[Bar]:

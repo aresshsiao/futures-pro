@@ -52,7 +52,8 @@ class ConnectionManager:
         logger.info(f"[WS] 新連線 ({len(self._connections)} 個)")
 
     def disconnect(self, ws: WebSocket) -> None:
-        self._connections.remove(ws)
+        if ws in self._connections:
+            self._connections.remove(ws)
         logger.info(f"[WS] 斷線 ({len(self._connections)} 個)")
 
     async def broadcast(self, message: dict) -> None:
@@ -204,6 +205,15 @@ async def websocket_endpoint(ws: WebSocket, _: None = Depends(ws_require_auth)):
             msg = json.loads(raw)
             await handle_client_message(ws, msg)
     except WebSocketDisconnect:
+        pass
+    except RuntimeError as e:
+        # manager.broadcast() 在背景協程對同一個 ws 呼叫 send()，若連線這時已經斷了，
+        # send() 失敗會把 application_state 標記成 DISCONNECTED，
+        # 之後這裡的 receive_text() 就會炸出這個 RuntimeError 而不是乾淨的 WebSocketDisconnect。
+        # 長時間操作（如大量 CSV 匯入）中途斷線時特別容易碰到，視同正常斷線處理即可。
+        if "Need to call" not in str(e):
+            raise
+    finally:
         manager.disconnect(ws)
 
 

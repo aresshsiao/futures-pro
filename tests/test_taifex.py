@@ -226,28 +226,78 @@ class TestParseZipBytes:
 
 class TestImportDirectory:
     def test_empty_dir_returns_empty(self, importer, tmp_path):
-        bars = importer.import_directory(tmp_path / "empty")
+        bars, manifest, skipped = importer.import_directory(tmp_path / "empty")
         assert bars == []
+        assert manifest == []
+        assert skipped == 0
 
     def test_import_csv_file(self, importer, tmp_path):
         csv_path = tmp_path / "daily.csv"
         csv_path.write_text(DAILY_CSV, encoding="big5", errors="replace")
-        bars = importer.import_directory(tmp_path)
+        bars, manifest, skipped = importer.import_directory(tmp_path)
         assert len(bars) > 0
+        assert skipped == 0
+
+    def test_import_csv_file_manifest_records_symbols_and_size(self, importer, tmp_path):
+        csv_path = tmp_path / "daily.csv"
+        csv_path.write_text(DAILY_CSV, encoding="big5", errors="replace")
+        bars, manifest, skipped = importer.import_directory(tmp_path)
+        assert len(manifest) == 1
+        entry = manifest[0]
+        assert entry["filename"] == "daily.csv"
+        assert entry["file_size"] == csv_path.stat().st_size
+        assert set(entry["symbols"]) == {"TX", "MTX"}
 
     def test_import_zip_file(self, importer, tmp_path):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr("daily.csv", DAILY_CSV.encode("big5", errors="replace"))
         (tmp_path / "daily.zip").write_bytes(buf.getvalue())
-        bars = importer.import_directory(tmp_path)
+        bars, manifest, skipped = importer.import_directory(tmp_path)
         assert len(bars) > 0
 
     def test_symbol_filter(self, importer, tmp_path):
         csv_path = tmp_path / "daily.csv"
         csv_path.write_text(DAILY_CSV, encoding="big5", errors="replace")
-        bars = importer.import_directory(tmp_path, symbols=["TX"])
+        bars, manifest, skipped = importer.import_directory(tmp_path, symbols=["TX"])
         assert all(b.symbol == "TX" for b in bars)
+
+    def test_already_imported_file_is_skipped(self, importer, tmp_path):
+        csv_path = tmp_path / "daily.csv"
+        csv_path.write_text(DAILY_CSV, encoding="big5", errors="replace")
+        size = csv_path.stat().st_size
+        already_imported = {"TX": {"daily.csv": size}, "MTX": {"daily.csv": size}}
+
+        bars, manifest, skipped = importer.import_directory(
+            tmp_path, symbols=["TX", "MTX"], already_imported=already_imported,
+        )
+        assert bars == []
+        assert manifest == []
+        assert skipped == 1
+
+    def test_partially_imported_file_is_not_skipped(self, importer, tmp_path):
+        csv_path = tmp_path / "daily.csv"
+        csv_path.write_text(DAILY_CSV, encoding="big5", errors="replace")
+        size = csv_path.stat().st_size
+        # 只有 TX 已匯入過，這次還要求 MTX → 不能跳過，仍要重新解析整個檔案
+        already_imported = {"TX": {"daily.csv": size}, "MTX": {}}
+
+        bars, manifest, skipped = importer.import_directory(
+            tmp_path, symbols=["TX", "MTX"], already_imported=already_imported,
+        )
+        assert len(bars) > 0
+        assert skipped == 0
+
+    def test_changed_file_size_is_not_skipped(self, importer, tmp_path):
+        csv_path = tmp_path / "daily.csv"
+        csv_path.write_text(DAILY_CSV, encoding="big5", errors="replace")
+        already_imported = {"TX": {"daily.csv": 1}, "MTX": {"daily.csv": 1}}  # 大小不符
+
+        bars, manifest, skipped = importer.import_directory(
+            tmp_path, symbols=["TX", "MTX"], already_imported=already_imported,
+        )
+        assert len(bars) > 0
+        assert skipped == 0
 
 
 # ─── Integration: 本地 raw 目錄 ──────────────────────────────
@@ -267,7 +317,7 @@ class TestImportLocalRaw:
             pytest.skip(f"{self.RAW_DIR} 沒有任何 ZIP/CSV 檔案")
 
         imp = TaifexImporter(raw_dir=self.RAW_DIR)
-        bars = imp.import_directory()
+        bars, manifest, skipped = imp.import_directory()
         assert isinstance(bars, list)
         assert len(bars) > 0, "raw 目錄有檔案但解析出 0 筆"
 
@@ -278,7 +328,7 @@ class TestImportLocalRaw:
             pytest.skip(f"{self.RAW_DIR} 沒有任何 ZIP/CSV 檔案")
 
         imp = TaifexImporter(raw_dir=self.RAW_DIR)
-        bars = imp.import_directory()
+        bars, manifest, skipped = imp.import_directory()
         for b in bars:
             assert b.high >= b.low,   f"H<L: {b}"
             assert b.volume >= 0,     f"負成交量: {b}"

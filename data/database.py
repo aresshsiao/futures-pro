@@ -93,6 +93,13 @@ class Database:
                 trade_date TEXT PRIMARY KEY,  -- YYYY-MM-DD，為期交所公告的交易日
                 source     TEXT NOT NULL DEFAULT 'zip'  -- 'zip' | 'manual'
             );
+            CREATE TABLE IF NOT EXISTS imported_files (
+                filename    TEXT NOT NULL,
+                symbol      TEXT NOT NULL,
+                file_size   INTEGER NOT NULL,
+                imported_at TEXT NOT NULL,
+                PRIMARY KEY (filename, symbol)
+            );
         """
         self._conn.executescript(sql)
         self._conn.commit()
@@ -130,6 +137,41 @@ class Database:
             )
         self._conn.commit()
         return self._conn.total_changes - before
+
+    # ── 已匯入檔案追蹤 ─────────────────────────────────────────
+
+    def get_imported_files(self, symbols: list[str]) -> dict[str, dict[str, int]]:
+        """回傳 {symbol: {filename: file_size}}，用於匯入時判斷檔案是否已處理過（同名同大小視為同一版本）。"""
+        result: dict[str, dict[str, int]] = {s: {} for s in symbols}
+        if not symbols:
+            return result
+        placeholders = ",".join("?" * len(symbols))
+        rows = self._conn.execute(
+            f"SELECT symbol, filename, file_size FROM imported_files WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        for symbol, filename, file_size in rows:
+            result.setdefault(symbol, {})[filename] = file_size
+        return result
+
+    def mark_files_imported(self, manifest: list[dict]) -> None:
+        """把這次實際匯入（未被跳過）的檔案記錄下來。
+
+        manifest: [{"filename": str, "file_size": int, "symbols": list[str]}, ...]
+        """
+        now = datetime.now().isoformat()
+        rows = [
+            (m["filename"], symbol, m["file_size"], now)
+            for m in manifest for symbol in m["symbols"]
+        ]
+        if not rows:
+            return
+        self._conn.executemany(
+            """INSERT OR REPLACE INTO imported_files (filename, symbol, file_size, imported_at)
+               VALUES (?, ?, ?, ?)""",
+            rows,
+        )
+        self._conn.commit()
 
     # ── Bars 查詢 ─────────────────────────────────────────────
 

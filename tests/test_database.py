@@ -222,6 +222,33 @@ class TestSummary:
         assert ("MTX", "1d") in keys
 
 
+# ─── imported_files 追蹤 ──────────────────────────────────────
+
+class TestImportedFiles:
+    def test_get_imported_files_empty_initially(self, db):
+        result = db.get_imported_files(["TX", "MTX"])
+        assert result == {"TX": {}, "MTX": {}}
+
+    def test_mark_and_get_roundtrip(self, db):
+        db.mark_files_imported([
+            {"filename": "daily.csv", "file_size": 1234, "symbols": ["TX", "MTX"]},
+        ])
+        result = db.get_imported_files(["TX", "MTX", "TMF"])
+        assert result["TX"] == {"daily.csv": 1234}
+        assert result["MTX"] == {"daily.csv": 1234}
+        assert result["TMF"] == {}
+
+    def test_mark_overwrites_previous_size(self, db):
+        db.mark_files_imported([{"filename": "daily.csv", "file_size": 100, "symbols": ["TX"]}])
+        db.mark_files_imported([{"filename": "daily.csv", "file_size": 200, "symbols": ["TX"]}])
+        result = db.get_imported_files(["TX"])
+        assert result["TX"] == {"daily.csv": 200}
+
+    def test_mark_empty_manifest_noop(self, db):
+        db.mark_files_imported([])
+        assert db.get_imported_files(["TX"]) == {"TX": {}}
+
+
 # ─── Integration: 實際 futures.db ────────────────────────────
 
 class TestActualDB:

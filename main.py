@@ -561,9 +561,10 @@ async def startup_core():
         logger.info("[Core] AUTO_CONNECT_BROKER 未設定，等待 UI 手動連線")
         return
 
-    ok, message = await _connect_broker(broker_id, "both")
+    kind = getattr(settings, "AUTO_CONNECT_KIND", "both")
+    ok, message = await _connect_broker(broker_id, kind)
     if not ok:
-        logger.warning("[Core] 自動連線 %s 失敗: %s", broker_id, message)
+        logger.warning("[Core] 自動連線 %s (%s) 失敗: %s", broker_id, kind, message)
         return
 
     symbols = getattr(settings, "DEFAULT_SUBSCRIBE_SYMBOLS", [])
@@ -641,8 +642,13 @@ async def handle_import_taifex(ws, data: dict):
     else:
         symbols = data.get("symbols") or None
         directory = data.get("directory", "data/raw/taifex")
+        # 用 DB 裡「檔名+檔案大小」已匯入紀錄，跳過這次要匯入的 symbols 都已匯入過的檔案
+        target_symbols = symbols or list(taifex.KNOWN_SYMBOLS.keys())
+        already_imported = db.get_imported_files(target_symbols)
         fut = loop.run_in_executor(
-            None, lambda: taifex.import_directory(directory, symbols, on_progress=on_progress)
+            None, lambda: taifex.import_directory(
+                directory, symbols, on_progress=on_progress, already_imported=already_imported,
+            )
         )
 
     ws_alive = True
@@ -695,14 +701,18 @@ async def handle_import_taifex(ws, data: dict):
                 "save_dir": str(taifex._raw_dir),
             })
         else:
-            parsed = len(result)
+            bars, manifest, skipped_files = result
+            parsed = len(bars)
             # 本地 CSV 是期交所官方資料，視為最準確的來源，重複的 timestamp 直接覆蓋 DB 既有資料
-            inserted = db.insert_bars(result, replace=True)
+            inserted = db.insert_bars(bars, replace=True)
+            # 寫入成功才記錄「已匯入」，避免 DB 寫入失敗卻誤標記略過
+            db.mark_files_imported(manifest)
             await ws.send_json({
                 "type": "import_result",
                 "source": "local",
                 "parsed": parsed,
                 "inserted": inserted,
+                "skipped_files": skipped_files,
                 "summary": db.summary(),
             })
     except Exception as e:

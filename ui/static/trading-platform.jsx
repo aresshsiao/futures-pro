@@ -1744,7 +1744,8 @@ function DatabasePage({ send, addHandler }) {
           const dupNote = msg.inserted < msg.parsed
             ? `（${(msg.parsed - msg.inserted).toLocaleString()} 筆已存在略過）`
             : "";
-          addLog(`匯入完成 ✓ — 解析 ${msg.parsed.toLocaleString()} 筆，新增 ${msg.inserted.toLocaleString()} 筆 ${dupNote}`, "success");
+          const fileNote = msg.skipped_files > 0 ? `，另外 ${msg.skipped_files} 個檔案先前已匯入過而跳過` : "";
+          addLog(`匯入完成 ✓ — 解析 ${msg.parsed.toLocaleString()} 筆，新增 ${msg.inserted.toLocaleString()} 筆 ${dupNote}${fileNote}`, "success");
           setSummary(msg.summary || []);
         } else {
           addLog(`操作失敗，請確認來源是否正確`, "error");
