@@ -423,6 +423,54 @@ async def handle_get_orders(ws, data: dict):
     })
 
 
+def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
+    """把每筆成交跟已實現損益（list_profit_loss）比對，補上平倉單的損益。
+
+    list_profit_loss 是「已平倉部位」的彙總（同商品/同出場價可能對應多筆分批成交），
+    沒有可直接對應到單筆成交的 key，因此用「商品代碼 + 出場價格」搜尋還有剩餘口數
+    可分攤的損益紀錄，依成交口數佔比分攤 pnl/fee/tax；開倉單則沒有對應紀錄。
+    """
+    remaining = [dict(r, remaining_qty=r["quantity"]) for r in pnl_records]
+    rows = []
+    for f in fills:
+        row = {
+            "order_id": f.order_id,
+            "symbol": f.symbol,
+            "direction": f.direction.value,
+            "price": f.price,
+            "qty": f.qty,
+            "fee": f.fee,
+            "timestamp": f.timestamp.isoformat(),
+            "pnl": None,
+            "realized_fee": None,
+            "realized_tax": None,
+        }
+        for r in remaining:
+            if r["remaining_qty"] <= 0 or r["symbol"] != f.symbol:
+                continue
+            if abs(r["cover_price"] - f.price) > 1e-6:
+                continue
+            take = min(r["remaining_qty"], f.qty)
+            ratio = take / r["quantity"] if r["quantity"] else 0
+            row["pnl"] = round((row["pnl"] or 0) + r["pnl"] * ratio, 2)
+            row["realized_fee"] = round((row["realized_fee"] or 0) + r["fee"] * ratio, 2)
+            row["realized_tax"] = round((row["realized_tax"] or 0) + r["tax"] * ratio, 2)
+            r["remaining_qty"] -= take
+            break
+        rows.append(row)
+    return rows
+
+
+async def handle_get_fills(ws, data: dict):
+    """前端: 查詢今日成交明細（含已實現損益）"""
+    fills = sorted(trade.fills_today, key=lambda f: f.timestamp, reverse=True)
+    pnl_records = await trade.get_profit_loss_today()
+    await ws.send_json({
+        "type": "fills",
+        "data": _merge_fills_with_pnl(fills, pnl_records),
+    })
+
+
 def _load_broker_credentials(broker_id: str) -> dict:
     """從 config/brokers.yaml 讀取指定券商的 credentials。"""
     import yaml
@@ -1000,6 +1048,7 @@ def setup():
     register_action("get_history", handle_get_history)
     register_action("get_positions", handle_get_positions)
     register_action("get_orders", handle_get_orders)
+    register_action("get_fills", handle_get_fills)
     register_action("broker_status", handle_broker_status)
     register_action("broker_config", handle_broker_config)
     register_action("import_taifex", handle_import_taifex)

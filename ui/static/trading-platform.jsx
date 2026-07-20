@@ -41,15 +41,6 @@ const MOCK_POSITIONS = [
   { id: 3, symbol: "TE", name: "電子期", direction: "多", qty: 1, avgPrice: 920, currentPrice: 915, pnl: -5000, pnlPercent: -0.54 },
 ];
 
-const MOCK_TRADES = [
-  { id: 1, time: "13:42:18", symbol: "TX", direction: "買", price: 17530, qty: 1, status: "成交", fee: 60 },
-  { id: 2, time: "13:38:05", symbol: "MTX", direction: "賣", price: 17545, qty: 2, status: "成交", fee: 24 },
-  { id: 3, time: "13:25:11", symbol: "TX", direction: "買", price: 17420, qty: 1, status: "成交", fee: 60 },
-  { id: 4, time: "13:10:33", symbol: "TE", direction: "買", price: 920, qty: 1, status: "成交", fee: 60 },
-  { id: 5, time: "12:55:47", symbol: "MTX", direction: "賣", price: 17560, qty: 3, status: "成交", fee: 36 },
-  { id: 6, time: "11:22:09", symbol: "TX", direction: "買", price: 17380, qty: 2, status: "已取消", fee: 0 },
-];
-
 const BROKER_LIST = [
   { id: "sinopac", name: "永豐金", status: "connected", type: "both" },
   { id: "fubon", name: "富邦期貨", status: "disconnected", type: "both" },
@@ -1381,7 +1372,46 @@ function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, s
 }
 
 // ─── Trade History Panel ─────────────────────────────────────────────
-function TradeHistoryPanel() {
+function TradeHistoryPanel({ send, addHandler, connected }) {
+  const [trades, setTrades] = useState([]);
+
+  const toRow = useCallback((f) => {
+    const d = new Date(f.timestamp);
+    const time = isNaN(d.getTime()) ? "--:--:--" : d.toLocaleTimeString("zh-TW", { hour12: false });
+    return {
+      id: `${f.order_id}-${f.timestamp}-${f.price}-${f.qty}`,
+      time,
+      symbol: f.symbol,
+      direction: f.direction === "buy" ? "買" : "賣",
+      price: f.price,
+      qty: f.qty,
+      // pnl 只有平倉成交才會有值（後端比對已實現損益後補上），開倉成交是 null
+      pnl: f.pnl ?? null,
+    };
+  }, []);
+
+  // 連線後拉取今日完整成交明細（含已實現損益）
+  useEffect(() => {
+    if (send && connected) send("get_fills");
+  }, [send, connected]);
+
+  useEffect(() => {
+    if (!addHandler) return;
+    return addHandler("fills", (msg) => {
+      setTrades((msg.data || []).map(toRow));
+    });
+  }, [addHandler, toRow]);
+
+  // 即時成交回報：新成交先插到最上方（此時還沒有損益），
+  // 延遲重新拉取一次完整清單，讓平倉單補上券商那邊剛結算好的損益
+  useEffect(() => {
+    if (!addHandler) return;
+    return addHandler("fill", (msg) => {
+      setTrades(prev => [toRow(msg), ...prev]);
+      if (send) setTimeout(() => send("get_fills"), 1500);
+    });
+  }, [addHandler, toRow, send]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{
@@ -1390,7 +1420,7 @@ function TradeHistoryPanel() {
       }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.text }}>成交明細</span>
         <span style={{ fontSize: 9, color: COLORS.textDim }}>
-          今日 {MOCK_TRADES.filter(t => t.status === "成交").length} 筆
+          今日 {trades.length} 筆
         </span>
       </div>
 
@@ -1398,19 +1428,31 @@ function TradeHistoryPanel() {
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ color: COLORS.textMuted, fontSize: 9, borderBottom: `1px solid ${COLORS.border}`, position: "sticky", top: 0, background: COLORS.bgPanel }}>
-              {["時間", "商品", "方向", "價格", "口"].map(h => (
+              {["時間", "商品", "方向", "價格", "口", "損益"].map(h => (
                 <th key={h} style={{ padding: "4px 6px", textAlign: h === "時間" ? "left" : "right", fontWeight: 500 }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {MOCK_TRADES.filter(t => t.status === "成交").map(t => (
+            {trades.length === 0 ? (
+              <tr>
+                <td colSpan={6} style={{ padding: "16px 6px", textAlign: "center", color: COLORS.textDim, fontSize: 10 }}>
+                  今日尚無成交
+                </td>
+              </tr>
+            ) : trades.map(t => (
               <tr key={t.id} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
                 <td style={{ padding: "4px 6px", textAlign: "left", color: COLORS.textDim, fontFamily: "monospace", fontSize: 9 }}>{t.time}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontWeight: 600 }}>{t.symbol}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", fontWeight: 600, color: t.direction === "買" ? COLORS.up : COLORS.down }}>{t.direction}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{t.price}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{t.qty}</td>
+                <td style={{
+                  padding: "4px 6px", textAlign: "right", fontFamily: "monospace",
+                  color: t.pnl == null ? COLORS.textDim : t.pnl >= 0 ? COLORS.up : COLORS.down
+                }}>
+                  {t.pnl == null ? "-" : `${t.pnl >= 0 ? "+" : ""}${t.pnl.toLocaleString()}`}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3000,7 +3042,7 @@ export default function TradingPlatform() {
             </div>
             {/* 成交明細 - 30% */}
             <div style={{ ...panelStyle, flex: 3, minHeight: 0, display: "flex", flexDirection: "column" }}>
-              <TradeHistoryPanel />
+              <TradeHistoryPanel send={send} addHandler={addHandler} connected={connected} />
             </div>
           </div>
         </div>

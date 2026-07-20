@@ -173,3 +173,11 @@ class TradeAdapter(ABC):
     async def get_fills_today(self) -> list[Fill]:
         """查詢今日成交明細"""
         ...
+
+    async def get_profit_loss_today(self) -> list[dict]:
+        """查詢今日已實現損益（依券商而定，非所有券商都支援，預設回傳空列表）
+
+        每筆為 dict: {symbol, quantity, cover_price, pnl, fee, tax}，
+        用於比對成交明細中的平倉成交，補上該筆的已實現損益。
+        """
+        return []

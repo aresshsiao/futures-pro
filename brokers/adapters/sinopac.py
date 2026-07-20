@@ -770,22 +770,30 @@ class SinoPacTradeAdapter(TradeAdapter):
             if not self._on_fill_cb:
                 return
             try:
+                from datetime import datetime
                 from core.models import Fill, Direction
+                # trade_id 官方文件標註「同 FuturesOrder 的 id」，即委託序號本身；
+                # ordno 前 5 碼為委託序號、後 3 碼為成交序號，可視為此筆成交的唯一 ID。
                 trade_id = msg.get('trade_id', '')
+                ordno = msg.get('ordno', '')
                 action = msg.get('action', '')
                 code = msg.get('code', '')
                 price = msg.get('price', 0.0)
                 qty = msg.get('quantity', 0)
-                
+                ts = msg.get('ts')
+
                 symbol = self._code_to_symbol(code) or code
                 direction = Direction.BUY if action == 'Buy' else Direction.SELL
-                
+
                 f = Fill(
-                    broker_order_id=trade_id,
+                    order_id=trade_id,
                     symbol=symbol,
                     direction=direction,
-                    qty=qty,
                     price=price,
+                    qty=qty,
+                    fee=0.0,
+                    timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
+                    broker_fill_id=ordno,
                 )
                 self._on_fill_cb(f)
             except Exception as e:
@@ -857,8 +865,59 @@ class SinoPacTradeAdapter(TradeAdapter):
         return []
 
     async def get_fills_today(self) -> list[Fill]:
-        # TODO: 實作
-        return []
+        """查詢今日成交明細（含連線前已成交的部分）"""
+        try:
+            self._api.update_status(self._api.futopt_account)
+            trades = self._api.list_trades()
+        except Exception:
+            logger.exception("[SinoPac Trade] get_fills_today 查詢失敗")
+            return []
+
+        fills: list[Fill] = []
+        for trade in trades:
+            deals = getattr(trade.status, "deals", None) or []
+            if not deals:
+                continue
+            code = trade.contract.code
+            symbol = self._code_to_symbol(code) or code
+            direction = Direction.BUY if trade.order.action == "Buy" else Direction.SELL
+            for deal in deals:
+                ts = getattr(deal, "ts", None)
+                fills.append(Fill(
+                    order_id=trade.order.id,
+                    symbol=symbol,
+                    direction=direction,
+                    price=deal.price,
+                    qty=deal.quantity,
+                    fee=0.0,
+                    timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
+                    broker_fill_id=str(getattr(deal, "seq", "")),
+                ))
+
+        fills.sort(key=lambda f: f.timestamp, reverse=True)
+        return fills
+
+    async def get_profit_loss_today(self) -> list[dict]:
+        """查詢今日已實現損益（list_profit_loss，只涵蓋已平倉的部位）"""
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            records = self._api.list_profit_loss(self._api.futopt_account, today, today)
+        except Exception:
+            logger.exception("[SinoPac Trade] get_profit_loss_today 查詢失敗")
+            return []
+
+        result = []
+        for r in records:
+            code = getattr(r, "code", "")
+            result.append({
+                "symbol": self._code_to_symbol(code) or code,
+                "quantity": getattr(r, "quantity", 0),
+                "cover_price": getattr(r, "cover_price", 0.0),
+                "pnl": getattr(r, "pnl", 0.0) or 0.0,
+                "fee": getattr(r, "fee", 0) or 0,
+                "tax": getattr(r, "tax", 0) or 0,
+            })
+        return result
 
     def _lookup_contract(self, symbol):
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}

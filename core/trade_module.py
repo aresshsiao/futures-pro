@@ -60,6 +60,8 @@ class TradeModule:
             positions = await adapter.get_positions()
             for pos in positions:
                 self._positions[pos.symbol] = pos
+            # 同步今日成交明細
+            self._fills = await adapter.get_fills_today()
             await self.bus.emit("trade_connected", adapter.name)
         return ok
 
@@ -240,3 +242,9 @@ class TradeModule:
     @property
     def fills_today(self) -> list[Fill]:
         return list(self._fills)
+
+    async def get_profit_loss_today(self) -> list[dict]:
+        """查詢今日已實現損益，用於比對成交明細補上平倉損益"""
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_profit_loss_today()
