@@ -68,6 +68,11 @@ class Database:
                 if "delivery" not in cols:
                     self._conn.execute(f'DROP TABLE "{symbol}"')
                     logger.info("[Database] 已刪除舊 %s 資料表，需重新匯入資料", symbol)
+                elif "from_csv" not in cols:
+                    # 既有資料保留，不 drop：來源不明，保守標成 from_csv=0（可被券商資料覆蓋/補正），
+                    # 之後只要重新匯入一次官方 CSV，對應日期就會自動升級成 from_csv=1。
+                    self._conn.execute(f'ALTER TABLE "{symbol}" ADD COLUMN from_csv INTEGER NOT NULL DEFAULT 0')
+                    logger.info("[Database] %s 資料表新增 from_csv 欄位（既有資料預設為 0）", symbol)
 
         self._conn.commit()
 
@@ -80,7 +85,8 @@ class Database:
                 high      REAL NOT NULL,
                 low       REAL NOT NULL,
                 close     REAL NOT NULL,
-                volume    INTEGER NOT NULL
+                volume    INTEGER NOT NULL,
+                from_csv  INTEGER NOT NULL DEFAULT 0
             );
         """
 
@@ -110,31 +116,54 @@ class Database:
 
     # ── Bars 寫入 ─────────────────────────────────────────────
 
-    def insert_bars(self, bars: list[Bar], replace: bool = False) -> int:
+    def insert_bars(self, bars: list[Bar], from_csv: bool = False) -> int:
         """批量寫入 M1 K線，回傳實際新增/更新筆數。
 
-        replace=False（預設）: 重複的 timestamp 忽略不動，用於券商 API 補資料——
-            API 資料只拿來補洞，DB 現有資料視為優先，不會被覆蓋。
-        replace=True: 重複的 timestamp 直接覆蓋成新值，用於本地 CSV 匯入——
-            期交所官方 CSV 視為最準確的來源，即使 DB 已有同一根棒也要覆蓋更新。
+        from_csv=False（預設）: 券商 API 查詢 / 即時 tick 建棒的結果。只有在該筆目前
+            不是來自 CSV、且資料內容真的有變動時才會覆蓋既有資料——讓券商資料可以持續
+            補正、補洞，但絕不會覆蓋已經由官方 CSV 匯入過的資料。
+        from_csv=True: 期交所官方 CSV 匯入，視為最準確的來源，一律覆蓋（含蓋掉舊的
+            券商來源資料），並把該筆標記為 from_csv=1，之後就不會再被券商資料覆蓋。
         """
         by_symbol: dict[str, list] = {}
         for b in bars:
             by_symbol.setdefault(b.symbol, []).append(
                 (int(b.timestamp.timestamp()), b.delivery,
-                 b.open, b.high, b.low, b.close, b.volume)
+                 b.open, b.high, b.low, b.close, b.volume, int(from_csv))
             )
 
-        verb = "REPLACE" if replace else "IGNORE"
         before = self._conn.total_changes
         for symbol, rows in by_symbol.items():
             self._ensure_bar_table(symbol)
-            self._conn.executemany(
-                f"""INSERT OR {verb} INTO "{symbol}"
-                    (timestamp, delivery, open, high, low, close, volume)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
+            if from_csv:
+                self._conn.executemany(
+                    f"""INSERT OR REPLACE INTO "{symbol}"
+                        (timestamp, delivery, open, high, low, close, volume, from_csv)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+            else:
+                self._conn.executemany(
+                    f"""INSERT INTO "{symbol}"
+                        (timestamp, delivery, open, high, low, close, volume, from_csv)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(timestamp) DO UPDATE SET
+                            delivery = excluded.delivery,
+                            open = excluded.open,
+                            high = excluded.high,
+                            low = excluded.low,
+                            close = excluded.close,
+                            volume = excluded.volume
+                        WHERE "{symbol}".from_csv = 0 AND (
+                            "{symbol}".delivery != excluded.delivery OR
+                            "{symbol}".open != excluded.open OR
+                            "{symbol}".high != excluded.high OR
+                            "{symbol}".low != excluded.low OR
+                            "{symbol}".close != excluded.close OR
+                            "{symbol}".volume != excluded.volume
+                        )""",
+                    rows,
+                )
         self._conn.commit()
         return self._conn.total_changes - before
 

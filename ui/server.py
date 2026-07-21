@@ -66,7 +66,10 @@ class ConnectionManager:
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self._connections.remove(ws)
+            # broadcast() 逐一 await send_text() 期間，另一個協程（如 websocket_endpoint
+            # 的 finally 區塊）可能已經把同一個 ws 從 _connections 移除掉了，這裡要防重複移除。
+            if ws in self._connections:
+                self._connections.remove(ws)
 
 
 manager = ConnectionManager()

@@ -104,15 +104,20 @@ async def handle_cancel_order(ws, data: dict):
     await ws.send_json({"type": "cancel_result", "success": ok})
 
 
-async def _backfill_gap(symbol: str, minutes: int = 1800) -> None:
+async def _backfill_gap(symbol: str, minutes: int = 6000) -> None:
     """訂閱即時報價前，先用券商 API 補一段固定範圍的歷史 M1 K棒寫入 DB。
 
     BarBuilder 只用即時 tick 現場堆棒，完全不知道『之前』發生過什麼事——
     伺服器離線期間的 K 棒不會自動補上。這裡不用「DB 最新一筆 ~ 現在」來算缺口，
     是因為缺口可能不在資料尾端：例如伺服器斷線又恢復、跑了一小段又重啟，
     DB 尾端會有一小段「新」資料，但更早之前那段離線期間的洞仍然沒被補到。
-    固定抓最近 `minutes` 根寫入 DB（insert_bars 是 INSERT OR IGNORE），
-    不論洞在哪個位置都會被填上，重複的資料則會被忽略。
+
+    `minutes` 同時決定「跟券商查幾天」跟「保留最近幾根」（見
+    SinoPacQuoteAdapter.get_history_bars 的 result[-count:]），所以不能設太小——
+    之前用 1800（≈1.5 個交易日）时，遇到伺服器離線較久或跨週末，實際缺口常常
+    會被裁到「最近 count 根」之外而補不到。6000（≈5 個交易日）留了更寬裕的餘量。
+    現在 insert_bars 已經有 from_csv 保護（見 database.py），券商資料只會覆蓋
+    「還不是官方 CSV 來源」的資料，所以可以放心查大一點的範圍，不怕蓋掉正確資料。
     """
     try:
         m1_bars = await quote.get_history(symbol, Timeframe.M1, minutes)
@@ -687,34 +692,42 @@ async def handle_import_taifex(ws, data: dict):
                 pass
         return
 
+    # 資料要不要寫進 DB，跟這個 WebSocket 連線是否還活著無關——使用者可能只是切頁/
+    # 重整，不代表這次解析出來的資料要被丟棄，否則會變成「匯入完成」卻其實什麼都
+    # 沒寫進去，下次重新整理又要重跑一次（之前這裡曾經是 `if not ws_alive: return`，
+    # 一旦連線在漫長的匯入過程中斷過一次，後面的 insert_bars/mark_files_imported
+    # 就整段被跳過，完全沒有錯誤訊息，非常難察覺）。
+    if source == "download":
+        downloaded, skipped = result
+        response = {
+            "type": "import_result",
+            "source": "download",
+            "downloaded": downloaded,
+            "skipped": skipped,
+            "save_dir": str(taifex._raw_dir),
+        }
+    else:
+        bars, manifest, skipped_files = result
+        parsed = len(bars)
+        # sqlite3 連線不能跨執行緒使用（this._conn 是在主 event loop 執行緒建立的），
+        # 不能丟進 run_in_executor，維持原本直接同步呼叫。
+        # 本地 CSV 是期交所官方資料，視為最準確的來源，重複的 timestamp 直接覆蓋 DB 既有資料
+        inserted = db.insert_bars(bars, from_csv=True)
+        # 寫入成功才記錄「已匯入」，避免 DB 寫入失敗卻誤標記略過
+        db.mark_files_imported(manifest)
+        response = {
+            "type": "import_result",
+            "source": "local",
+            "parsed": parsed,
+            "inserted": inserted,
+            "skipped_files": skipped_files,
+            "summary": db.summary(),
+        }
+
     if not ws_alive:
         return
-
     try:
-        if source == "download":
-            downloaded, skipped = result
-            await ws.send_json({
-                "type": "import_result",
-                "source": "download",
-                "downloaded": downloaded,
-                "skipped": skipped,
-                "save_dir": str(taifex._raw_dir),
-            })
-        else:
-            bars, manifest, skipped_files = result
-            parsed = len(bars)
-            # 本地 CSV 是期交所官方資料，視為最準確的來源，重複的 timestamp 直接覆蓋 DB 既有資料
-            inserted = db.insert_bars(bars, replace=True)
-            # 寫入成功才記錄「已匯入」，避免 DB 寫入失敗卻誤標記略過
-            db.mark_files_imported(manifest)
-            await ws.send_json({
-                "type": "import_result",
-                "source": "local",
-                "parsed": parsed,
-                "inserted": inserted,
-                "skipped_files": skipped_files,
-                "summary": db.summary(),
-            })
+        await ws.send_json(response)
     except Exception as e:
         logger.warning("[import_taifex] WebSocket 已關閉，無法發送結果: %s", e)
 

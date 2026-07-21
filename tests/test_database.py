@@ -105,6 +105,53 @@ class TestInsertBars:
         assert db.get_bar_count("MTX", Timeframe.D1) == 1
 
 
+# ─── from_csv 保護（CSV 資料不會被券商資料覆蓋） ──────────────
+
+class TestFromCsvProtection:
+    def test_broker_data_does_not_overwrite_csv(self, db):
+        csv_bar = _make_bar(close=18050.0)
+        db.insert_bars([csv_bar], from_csv=True)
+
+        broker_bar = _make_bar(close=99999.0)  # 同一根棒，內容不同
+        changed = db.insert_bars([broker_bar], from_csv=False)
+
+        assert changed == 0
+        stored = db.get_bars("TX")[0]
+        assert stored.close == 18050.0
+
+    def test_csv_overwrites_previous_broker_data(self, db):
+        broker_bar = _make_bar(close=99999.0)
+        db.insert_bars([broker_bar], from_csv=False)
+
+        csv_bar = _make_bar(close=18050.0)
+        changed = db.insert_bars([csv_bar], from_csv=True)
+
+        assert changed == 1
+        stored = db.get_bars("TX")[0]
+        assert stored.close == 18050.0
+
+    def test_broker_data_refreshes_previous_broker_data_when_changed(self, db):
+        db.insert_bars([_make_bar(close=100.0)], from_csv=False)
+        changed = db.insert_bars([_make_bar(close=200.0)], from_csv=False)
+
+        assert changed == 1
+        stored = db.get_bars("TX")[0]
+        assert stored.close == 200.0
+
+    def test_broker_data_noop_when_unchanged(self, db):
+        db.insert_bars([_make_bar(close=100.0)], from_csv=False)
+        changed = db.insert_bars([_make_bar(close=100.0)], from_csv=False)
+
+        assert changed == 0
+
+    def test_csv_reimport_always_counts_as_change(self, db):
+        db.insert_bars([_make_bar(close=100.0)], from_csv=True)
+        changed = db.insert_bars([_make_bar(close=100.0)], from_csv=True)
+
+        # from_csv 一律 INSERT OR REPLACE，即使內容相同也視為一次覆蓋
+        assert changed == 1
+
+
 # ─── get_bars ────────────────────────────────────────────────
 
 class TestGetBars:
