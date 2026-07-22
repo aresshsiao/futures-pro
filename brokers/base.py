@@ -83,13 +83,34 @@ class QuoteAdapter(ABC):
     async def get_options_t_quote(
         self, symbol: str, month: str, spot_price: float = 0.0, trading_dates: list[str] | None = None,
     ) -> list[dict]:
-        """取得指定月份的所有選擇權 T 字報價 (含 Call/Put 快照)
+        """取得指定月份的所有選擇權 T 字報價 (含 Call/Put 快照)，一次性請求式查詢。
 
         spot_price > 0 時，會額外用 Black-76 反推 ATM 隱含波動率，
         套用到每個履約價算出理論價，回傳 callPremium/putPremium = 市價 - 理論價。
         trading_dates 是交易日曆，用來把到期時間 T 精算到實際交易分鐘數。
+
+        注意：這是請求式查詢，不適合被前端反覆輪詢當即時 feed 用（永豐金文件明講
+        snapshots 這類查詢重複輪詢會被停權）。即時更新請改用下面的訂閱式方法。
         """
         ...
+
+    async def subscribe_options_t_quote(
+        self, symbol: str, month: str, callback: Callable[[list[dict]], None],
+        spot_price: float = 0.0, trading_dates: list[str] | None = None,
+    ) -> None:
+        """訂閱指定月份選擇權鏈的即時報價（call+put 全履約價），透過 callback 持續推送
+        更新後的完整鏈快照（含理論價，若支援）。取代 get_options_t_quote 的輪詢用法。
+        預設不支援（回傳即結束），依券商而定。
+        """
+        return
+
+    async def update_options_spot_price(self, symbol: str, month: str, spot_price: float) -> None:
+        """更新某條已訂閱選擇權鏈用於理論價計算的現貨/期貨價，不需要重新訂閱。"""
+        return
+
+    async def unsubscribe_options_t_quote(self, symbol: str, month: str) -> None:
+        """取消訂閱指定月份選擇權鏈的即時報價。"""
+        return
 
 
 class TradeAdapter(ABC):

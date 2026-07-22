@@ -1027,7 +1027,9 @@ async def handle_get_options_months(ws, data: dict):
 
 
 async def handle_get_options_t_quote(ws, data: dict):
-    """前端: 取得選擇權 T 字報價快照"""
+    """前端: 取得選擇權 T 字報價快照（一次性請求，供手動刷新用；
+    不要拿來做輪詢——snapshots() 是請求式查詢，反覆輪詢會被永豐金停權，
+    即時更新請改走 subscribe_options_t_quote）。"""
     symbol = data.get("symbol", "TXO")
     month = data.get("month", "")
     spot_price = float(data.get("spot_price", 0.0) or 0.0)
@@ -1039,6 +1041,32 @@ async def handle_get_options_t_quote(ws, data: dict):
         "month": month,
         "data": t_quote_data,
     })
+
+
+async def handle_subscribe_options_t_quote(ws, data: dict):
+    """前端: 訂閱選擇權鏈即時報價（取代對 get_options_t_quote 的輪詢）。
+    更新會透過 EventBus "option_chain_update" → forward_option_chain 廣播給所有連線，
+    不是只回給發起訂閱的這個 ws（跟 tick/bar 的推播方式一致）。"""
+    symbol = data.get("symbol", "TXO")
+    month = data.get("month", "")
+    spot_price = float(data.get("spot_price", 0.0) or 0.0)
+    trading_dates = db.get_trading_dates()
+    await quote.subscribe_options_t_quote(symbol, month, spot_price, trading_dates)
+
+
+async def handle_update_options_spot_price(ws, data: dict):
+    """前端: 現價變動時更新，讓已訂閱鏈的理論價計算跟上最新報價，不需要重新訂閱。"""
+    symbol = data.get("symbol", "TXO")
+    month = data.get("month", "")
+    spot_price = float(data.get("spot_price", 0.0) or 0.0)
+    await quote.update_options_spot_price(symbol, month, spot_price)
+
+
+async def handle_unsubscribe_options_t_quote(ws, data: dict):
+    """前端: 取消訂閱選擇權鏈（切換月份或關閉面板時呼叫）。"""
+    symbol = data.get("symbol", "TXO")
+    month = data.get("month", "")
+    await quote.unsubscribe_options_t_quote(symbol, month)
 
 
 async def on_strategy_signal(signal):
@@ -1083,6 +1111,9 @@ def setup():
     register_action("add_script", handle_add_script)
     register_action("get_options_months", handle_get_options_months)
     register_action("get_options_t_quote", handle_get_options_t_quote)
+    register_action("subscribe_options_t_quote", handle_subscribe_options_t_quote)
+    register_action("update_options_spot_price", handle_update_options_spot_price)
+    register_action("unsubscribe_options_t_quote", handle_unsubscribe_options_t_quote)
 
     # 事件接線
     bus.on("bar", on_bar_complete)

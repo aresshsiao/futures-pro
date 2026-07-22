@@ -118,3 +118,25 @@ class QuoteModule:
         if not self.is_connected:
             return []
         return await self._adapter.get_options_t_quote(symbol, month, spot_price, trading_dates)
+
+    async def subscribe_options_t_quote(
+        self, symbol: str, month: str, spot_price: float = 0.0, trading_dates: list[str] | None = None,
+    ) -> None:
+        """訂閱選擇權鏈即時報價，取代 get_options_t_quote 的輪詢用法。"""
+        if not self.is_connected:
+            return
+
+        def on_update(rows: list[dict]) -> None:
+            self.bus.emit_sync("option_chain_update", symbol, month, rows)
+
+        await self._adapter.subscribe_options_t_quote(symbol, month, on_update, spot_price, trading_dates)
+
+    async def update_options_spot_price(self, symbol: str, month: str, spot_price: float) -> None:
+        if not self.is_connected:
+            return
+        await self._adapter.update_options_spot_price(symbol, month, spot_price)
+
+    async def unsubscribe_options_t_quote(self, symbol: str, month: str) -> None:
+        if not self.is_connected:
+            return
+        await self._adapter.unsubscribe_options_t_quote(symbol, month)

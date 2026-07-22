@@ -169,6 +169,14 @@ def setup_event_bridge():
             "alerts": output.alerts,
         })
 
+    async def forward_option_chain(symbol: str, month: str, rows: list[dict]):
+        await manager.broadcast({
+            "type": "options_t_quote",
+            "symbol": symbol,
+            "month": month,
+            "data": rows,
+        })
+
     bus.on("tick", forward_tick)
     bus.on("bar", forward_bar)
     bus.on("indicator_output", forward_indicator_output)
@@ -178,6 +186,7 @@ def setup_event_bridge():
     bus.on("order_cancelled", forward_order)
     bus.on("order_filled", forward_fill)
     bus.on("position_update", forward_position)
+    bus.on("option_chain_update", forward_option_chain)
 
     async def forward_quote_con(name):
         await manager.broadcast({"type": "broker_status_update", "kind": "quote", "connected": True, "name": name})
