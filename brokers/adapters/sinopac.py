@@ -6,6 +6,7 @@ brokers/adapters/sinopac.py — 永豐金 Shioaji Adapter
 文件: https://sinotrade.github.io/
 """
 from __future__ import annotations
+import asyncio
 import logging
 import math
 import threading
@@ -189,6 +190,18 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         self._tick_callbacks: dict[str, Callable] = {}
         self._book_callbacks: dict[str, Callable] = {}
         self._subscribed: set[str] = set()  # 已訂閱的 symbol，避免重複呼叫 Shioaji
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # ── 選擇權鏈即時報價（訂閱式，取代 snapshots() 輪詢）──
+        # chain_key 格式為 "PROD:delivery_month"，跟 get_options_t_quote 的 month 參數一致
+        self._option_chain_cache: dict[str, dict[float, dict]] = {}       # chain_key -> {strike: row}
+        self._option_code_index: dict[str, tuple[str, float, bool]] = {}  # contract code -> (chain_key, strike, is_call)
+        self._option_chain_contracts: dict[str, list] = {}                # chain_key -> [contract, ...]（已訂閱的合約，供取消訂閱用）
+        self._option_chain_callback: dict[str, Callable[[list[dict]], None]] = {}
+        self._option_chain_delivery_date: dict[str, str] = {}
+        self._option_chain_spot_price: dict[str, float] = {}
+        self._option_chain_trading_dates: dict[str, Optional[list[str]]] = {}
+        self._option_push_pending: set[str] = set()  # 正在等待 debounce flush 的 chain_key
 
     async def connect(self, **credentials) -> bool:
         """
@@ -199,6 +212,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
         try:
             import shioaji as sj
 
+            self._loop = asyncio.get_running_loop()
             self._api = _get_shared_api(credentials)
             await _wait_contracts_ready(("Future", "Index"))
 
@@ -275,6 +289,28 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 )
                 cb(book)
 
+            @self._api.on_quote_fop_v1()
+            def _on_option_quote(exchange, quote):
+                """選擇權鏈即時報價（訂閱式，取代 snapshots() 輪詢——
+                snapshots() 是請求式查詢，官方文件明講不能當即時 feed 反覆輪詢，
+                違規會被停權，見 subscribe_options_t_quote）。"""
+                info = self._option_code_index.get(quote.code)
+                if info is None:
+                    return
+                chain_key, strike, is_call = info
+                row = self._option_chain_cache.setdefault(chain_key, {}).setdefault(
+                    strike, {"strike": strike, "callPrice": 0, "callChange": 0, "putPrice": 0, "putChange": 0}
+                )
+                price = float(getattr(quote, "close", 0.0) or 0.0)
+                change = float(getattr(quote, "change_price", 0.0) or 0.0)
+                if is_call:
+                    row["callPrice"] = price
+                    row["callChange"] = change
+                else:
+                    row["putPrice"] = price
+                    row["putChange"] = change
+                self._schedule_option_push(chain_key)
+
             self._connected = True
             logger.info("[SinoPac Quote] 登入成功")
             return True
@@ -316,6 +352,105 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             self._api.quote.unsubscribe(contract, quote_type="bidask")
         self._tick_callbacks.pop(symbol, None)
         self._book_callbacks.pop(symbol, None)
+
+    # ── 選擇權鏈即時報價（訂閱式）──────────────────────
+
+    @staticmethod
+    def _option_chain_key(symbol: str, month: str) -> str:
+        if ":" in month:
+            return month
+        return f"{symbol or 'TXO'}:{month}"
+
+    async def subscribe_options_t_quote(
+        self, symbol: str, month: str, callback: Callable[[list[dict]], None],
+        spot_price: float = 0.0, trading_dates: list[str] | None = None,
+    ) -> None:
+        """訂閱指定月份選擇權鏈（call+put 全履約價）的即時報價，取代 get_options_t_quote
+        的輪詢用法。同一條鏈重複訂閱只會更新 callback/spot_price，不會重打 Shioaji。"""
+        chain_key = self._option_chain_key(symbol, month)
+        self._option_chain_callback[chain_key] = callback
+        self._option_chain_spot_price[chain_key] = spot_price
+        self._option_chain_trading_dates[chain_key] = trading_dates
+
+        if chain_key in self._option_chain_contracts:
+            return  # 已經訂閱過這條鏈，只是換了 callback/spot_price
+
+        prod, dm = chain_key.split(":", 1)
+        prod_contracts = getattr(self._api.Contracts.Options, prod, None)
+        if prod_contracts is None:
+            logger.warning("[SinoPac] options product not found: %s", prod)
+            return
+        contracts = [c for c in prod_contracts if c.delivery_month == dm]
+        if not contracts:
+            logger.warning("[SinoPac] subscribe_options_t_quote: no contracts for %s %s", prod, dm)
+            return
+
+        import shioaji as sj
+
+        for c in contracts:
+            is_call = c.option_right == sj.constant.OptionRight.Call
+            self._option_code_index[c.code] = (chain_key, c.strike_price, is_call)
+            self._api.quote.subscribe(c, quote_type=sj.constant.QuoteType.Quote, version="v1")
+
+        self._option_chain_contracts[chain_key] = contracts
+        self._option_chain_cache.setdefault(chain_key, {})
+        self._option_chain_delivery_date[chain_key] = contracts[0].delivery_date
+        logger.info("[SinoPac] 已訂閱選擇權鏈即時報價: %s (%d 口合約)", chain_key, len(contracts))
+
+    async def update_options_spot_price(self, symbol: str, month: str, spot_price: float) -> None:
+        """更新某條已訂閱選擇權鏈用於理論價計算的現貨/期貨價，不需要重新訂閱。"""
+        chain_key = self._option_chain_key(symbol, month)
+        if chain_key in self._option_chain_contracts:
+            self._option_chain_spot_price[chain_key] = spot_price
+
+    async def unsubscribe_options_t_quote(self, symbol: str, month: str) -> None:
+        chain_key = self._option_chain_key(symbol, month)
+        contracts = self._option_chain_contracts.pop(chain_key, None)
+        if not contracts:
+            return
+        for c in contracts:
+            try:
+                self._api.quote.unsubscribe(c, quote_type="quote")
+            except Exception:
+                pass
+            self._option_code_index.pop(c.code, None)
+        self._option_chain_callback.pop(chain_key, None)
+        self._option_chain_cache.pop(chain_key, None)
+        self._option_chain_delivery_date.pop(chain_key, None)
+        self._option_chain_spot_price.pop(chain_key, None)
+        self._option_chain_trading_dates.pop(chain_key, None)
+        logger.info("[SinoPac] 已取消訂閱選擇權鏈: %s", chain_key)
+
+    def _schedule_option_push(self, chain_key: str) -> None:
+        """從 Shioaji callback 執行緒排程一次 debounced 推送（合併短時間內的多筆更新）。"""
+        if not self._loop or chain_key in self._option_push_pending:
+            return
+        self._option_push_pending.add(chain_key)
+        self._loop.call_soon_threadsafe(
+            lambda: self._loop.create_task(self._flush_option_push(chain_key))
+        )
+
+    async def _flush_option_push(self, chain_key: str) -> None:
+        await asyncio.sleep(0.2)  # 200ms debounce，避免整條鏈同時跳動時狂發訊息
+        self._option_push_pending.discard(chain_key)
+
+        cb = self._option_chain_callback.get(chain_key)
+        chain = self._option_chain_cache.get(chain_key)
+        if not cb or not chain:
+            return
+
+        strikes = {k: dict(v) for k, v in chain.items()}  # 複製快照，避免計算中途被下一筆 tick 修改
+        spot_price = self._option_chain_spot_price.get(chain_key, 0.0)
+        delivery_date_str = self._option_chain_delivery_date.get(chain_key)
+        trading_dates = self._option_chain_trading_dates.get(chain_key)
+        if spot_price > 0 and delivery_date_str:
+            call_snap_by_strike = {k: v["callPrice"] for k, v in strikes.items() if v["callPrice"] > 0}
+            put_snap_by_strike = {k: v["putPrice"] for k, v in strikes.items() if v["putPrice"] > 0}
+            self._apply_theoretical_premium(
+                strikes, spot_price, delivery_date_str, call_snap_by_strike, put_snap_by_strike, trading_dates,
+            )
+
+        cb([strikes[k] for k in sorted(strikes.keys())])
 
     async def get_history_bars(self, symbol: str, timeframe: Timeframe, count: int = 200) -> list[Bar]:
         """
