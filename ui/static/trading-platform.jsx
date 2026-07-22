@@ -2168,6 +2168,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const [taiexIndex, setTaiexIndex] = useState({ price: 0, change: 0, change_pct: 0 });
   const [centerOnAtm, setCenterOnAtm] = useState(true); // 成交置中 toggle（比照閃電下單），關閉後資料刷新不會打斷手動捲動
   const [selectedStrikes, setSelectedStrikes] = useState(() => new Set()); // 點選列 highlight，可複選，再點一次取消該列
+  const [isAutoFetchEnabled, setIsAutoFetchEnabled] = useState(true); // 是否自動輪詢報價
 
   // Fetch months on mount or when connection is established
   useEffect(() => {
@@ -2235,12 +2236,14 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const currentPriceRef = useRef(currentPrice);
   useEffect(() => { currentPriceRef.current = currentPrice; }, [currentPrice]);
 
-  // When selectedContract changes, fetch data and poll every 3 seconds
+  // reset data when changing contract
   useEffect(() => {
-    if (!selectedContract || !send) return;
-
-    // reset data when changing contract
     setQuoteData([]);
+  }, [selectedContract]);
+
+  // When selectedContract or isAutoFetchEnabled changes, fetch data and poll every 3 seconds
+  useEffect(() => {
+    if (!selectedContract || !send || !isAutoFetchEnabled) return;
 
     const fetchQuotes = () => send("get_options_t_quote", {
       symbol: "TXO", month: selectedContract, spot_price: currentPriceRef.current,
@@ -2249,7 +2252,7 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
 
     const interval = setInterval(fetchQuotes, 3000);
     return () => clearInterval(interval);
-  }, [selectedContract, send]);
+  }, [selectedContract, send, isAutoFetchEnabled]);
 
   const displayData = quoteData;
 
@@ -2313,6 +2316,20 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
           <span style={{ fontSize: 10, color: COLORS.textDim, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4 }}>
             {brokerConfig?.quote?.connected ? "連線中" : "無連線"}
           </span>
+          <button
+            onClick={() => setIsAutoFetchEnabled(!isAutoFetchEnabled)}
+            style={{
+              fontSize: 9, fontWeight: 600, padding: "2px 6px",
+              background: isAutoFetchEnabled ? "rgba(34,197,94,0.15)" : "transparent",
+              border: `1px solid ${isAutoFetchEnabled ? COLORS.up : COLORS.border}`,
+              color: isAutoFetchEnabled ? COLORS.up : COLORS.textMuted,
+              borderRadius: 3, cursor: "pointer", transition: "all 0.2s",
+              marginRight: 4
+            }}
+            title={isAutoFetchEnabled ? "點擊暫停報價更新" : "點擊啟動報價更新"}
+          >
+            {isAutoFetchEnabled ? "▶ 啟動中" : "⏸ 已暫停"}
+          </button>
           <button
             onClick={() => setCenterOnAtm(!centerOnAtm)}
             style={{
