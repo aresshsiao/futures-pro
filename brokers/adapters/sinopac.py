@@ -385,6 +385,15 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             logger.warning("[SinoPac] subscribe_options_t_quote: no contracts for %s %s", prod, dm)
             return
 
+        if spot_price > 0:
+            strikes = sorted(list(set(c.strike_price for c in contracts)))
+            atm_strike = min(strikes, key=lambda x: abs(x - spot_price))
+            atm_idx = strikes.index(atm_strike)
+            start_idx = max(0, atm_idx - 20)
+            end_idx = min(len(strikes), atm_idx + 21)
+            target_strikes = set(strikes[start_idx:end_idx])
+            contracts = [c for c in contracts if c.strike_price in target_strikes]
+
         import shioaji as sj
 
         for c in contracts:
@@ -404,15 +413,16 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             self._option_chain_spot_price[chain_key] = spot_price
 
     async def unsubscribe_options_t_quote(self, symbol: str, month: str) -> None:
+        import shioaji as sj
         chain_key = self._option_chain_key(symbol, month)
         contracts = self._option_chain_contracts.pop(chain_key, None)
         if not contracts:
             return
         for c in contracts:
             try:
-                self._api.quote.unsubscribe(c, quote_type="quote")
-            except Exception:
-                pass
+                self._api.quote.unsubscribe(c, quote_type=sj.constant.QuoteType.Quote, version="v1")
+            except Exception as e:
+                logger.error(f"[SinoPac] unsubscribe_options_t_quote error: {e}")
             self._option_code_index.pop(c.code, None)
         self._option_chain_callback.pop(chain_key, None)
         self._option_chain_cache.pop(chain_key, None)

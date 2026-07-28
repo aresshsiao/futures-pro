@@ -2236,45 +2236,29 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const currentPriceRef = useRef(currentPrice);
   useEffect(() => { currentPriceRef.current = currentPrice; }, [currentPrice]);
 
-<<<<<<< HEAD
   // reset data when changing contract
   useEffect(() => {
     setQuoteData([]);
   }, [selectedContract]);
 
-  // When selectedContract or isAutoFetchEnabled changes, fetch data and poll every 3 seconds
+  // 切換月份時或啟動開關改變時，訂閱/取消訂閱該月份選擇權鏈的即時報價
   useEffect(() => {
-    if (!selectedContract || !send || !isAutoFetchEnabled) return;
+    if (!selectedContract || !send || !connected || !isAutoFetchEnabled) return;
 
-    const fetchQuotes = () => send("get_options_t_quote", {
-=======
-  // 切換月份時訂閱該月份選擇權鏈的即時報價（取代原本每 3 秒 get_options_t_quote 輪詢——
-  // snapshots() 是請求式查詢，官方文件明講不能當即時 feed 反覆輪詢，違規會被永豐金停權）
-  useEffect(() => {
-    if (!selectedContract || !send || !connected) return;
-
-    setQuoteData([]); // 換合約時先清空，避免短暫顯示上一個月份的殘留資料
     send("subscribe_options_t_quote", {
->>>>>>> 45a676d0db83c572d6a00ecdec907029bedd7f50
       symbol: "TXO", month: selectedContract, spot_price: currentPriceRef.current,
     });
 
-<<<<<<< HEAD
-    const interval = setInterval(fetchQuotes, 3000);
-    return () => clearInterval(interval);
-  }, [selectedContract, send, isAutoFetchEnabled]);
-=======
     return () => {
       send("unsubscribe_options_t_quote", { symbol: "TXO", month: selectedContract });
     };
-  }, [selectedContract, send, connected]);
+  }, [selectedContract, send, connected, isAutoFetchEnabled]);
 
   // currentPrice 變動時把最新現價餵給後端算理論價用，不需要重新訂閱整條鏈
   useEffect(() => {
-    if (!selectedContract || !send || !connected) return;
+    if (!selectedContract || !send || !connected || !isAutoFetchEnabled) return;
     send("update_options_spot_price", { symbol: "TXO", month: selectedContract, spot_price: currentPrice });
-  }, [currentPrice, selectedContract, send, connected]);
->>>>>>> 45a676d0db83c572d6a00ecdec907029bedd7f50
+  }, [currentPrice, selectedContract, send, connected, isAutoFetchEnabled]);
 
   const displayData = quoteData;
 
