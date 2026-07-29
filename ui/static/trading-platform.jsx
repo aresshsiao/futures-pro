@@ -2168,7 +2168,10 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
   const [taiexIndex, setTaiexIndex] = useState({ price: 0, change: 0, change_pct: 0 });
   const [centerOnAtm, setCenterOnAtm] = useState(true); // 成交置中 toggle（比照閃電下單），關閉後資料刷新不會打斷手動捲動
   const [selectedStrikes, setSelectedStrikes] = useState(() => new Set()); // 點選列 highlight，可複選，再點一次取消該列
-  const [isAutoFetchEnabled, setIsAutoFetchEnabled] = useState(true); // 是否自動輪詢報價
+  const [isAutoFetchEnabled, setIsAutoFetchEnabled] = useState(() => {
+    const saved = localStorage.getItem('isAutoFetchEnabled');
+    return saved !== null ? saved === 'true' : true;
+  }); // 是否自動輪詢報價
 
   // Fetch months on mount or when connection is established
   useEffect(() => {
@@ -2323,7 +2326,11 @@ function OptionsTQuote({ brokerConfig, connected, currentPrice = 0, onClose, sen
             {brokerConfig?.quote?.connected ? "連線中" : "無連線"}
           </span>
           <button
-            onClick={() => setIsAutoFetchEnabled(!isAutoFetchEnabled)}
+            onClick={() => {
+              const newVal = !isAutoFetchEnabled;
+              setIsAutoFetchEnabled(newVal);
+              localStorage.setItem('isAutoFetchEnabled', String(newVal));
+            }}
             style={{
               fontSize: 9, fontWeight: 600, padding: "2px 6px",
               background: isAutoFetchEnabled ? "rgba(34,197,94,0.15)" : "transparent",

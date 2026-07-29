@@ -54,6 +54,11 @@ def _get_shared_api(credentials):
     import shioaji as sj
     if _SHARED_API is None:
         _SHARED_API = sj.Shioaji()
+        
+        @_SHARED_API.on_event
+        def _on_event(resp_code: int, event_code: int, info: str, event: str):
+            logger.warning("[SinoPac Event] resp_code=%s event_code=%s info=%s event=%s", resp_code, event_code, info, event)
+
     if not _SHARED_CONNECTED:
         for ev in _CONTRACTS_READY.values():
             ev.clear()
