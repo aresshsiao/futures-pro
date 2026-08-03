@@ -124,6 +124,10 @@ class Database:
             補正、補洞，但絕不會覆蓋已經由官方 CSV 匯入過的資料。
         from_csv=True: 期交所官方 CSV 匯入，視為最準確的來源，一律覆蓋（含蓋掉舊的
             券商來源資料），並把該筆標記為 from_csv=1，之後就不會再被券商資料覆蓋。
+
+        任一商品寫入失敗時，其餘商品仍會繼續寫入並提交；失敗的商品會被記錄下來，
+        最後統一以例外拋出——呼叫端據此就不該把失敗商品標記為「已匯入」
+        （見 main.py handle_import_taifex），避免明明沒寫進 DB 卻被誤判成功。
         """
         by_symbol: dict[str, list] = {}
         for b in bars:
@@ -133,39 +137,54 @@ class Database:
             )
 
         before = self._conn.total_changes
+        failed_symbols: dict[str, str] = {}
         for symbol, rows in by_symbol.items():
-            self._ensure_bar_table(symbol)
-            if from_csv:
-                self._conn.executemany(
-                    f"""INSERT OR REPLACE INTO "{symbol}"
-                        (timestamp, delivery, open, high, low, close, volume, from_csv)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    rows,
-                )
-            else:
-                self._conn.executemany(
-                    f"""INSERT INTO "{symbol}"
-                        (timestamp, delivery, open, high, low, close, volume, from_csv)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(timestamp) DO UPDATE SET
-                            delivery = excluded.delivery,
-                            open = excluded.open,
-                            high = excluded.high,
-                            low = excluded.low,
-                            close = excluded.close,
-                            volume = excluded.volume
-                        WHERE "{symbol}".from_csv = 0 AND (
-                            "{symbol}".delivery != excluded.delivery OR
-                            "{symbol}".open != excluded.open OR
-                            "{symbol}".high != excluded.high OR
-                            "{symbol}".low != excluded.low OR
-                            "{symbol}".close != excluded.close OR
-                            "{symbol}".volume != excluded.volume
-                        )""",
-                    rows,
-                )
+            try:
+                self._ensure_bar_table(symbol)
+                if from_csv:
+                    self._conn.executemany(
+                        f"""INSERT OR REPLACE INTO "{symbol}"
+                            (timestamp, delivery, open, high, low, close, volume, from_csv)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        rows,
+                    )
+                else:
+                    self._conn.executemany(
+                        f"""INSERT INTO "{symbol}"
+                            (timestamp, delivery, open, high, low, close, volume, from_csv)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(timestamp) DO UPDATE SET
+                                delivery = excluded.delivery,
+                                open = excluded.open,
+                                high = excluded.high,
+                                low = excluded.low,
+                                close = excluded.close,
+                                volume = excluded.volume
+                            WHERE "{symbol}".from_csv = 0 AND (
+                                "{symbol}".delivery != excluded.delivery OR
+                                "{symbol}".open != excluded.open OR
+                                "{symbol}".high != excluded.high OR
+                                "{symbol}".low != excluded.low OR
+                                "{symbol}".close != excluded.close OR
+                                "{symbol}".volume != excluded.volume
+                            )""",
+                        rows,
+                    )
+            except sqlite3.Error as e:
+                logger.error("[Database] 寫入 %s 失敗，略過該商品: %s", symbol, e)
+                failed_symbols[symbol] = str(e)
+
         self._conn.commit()
-        return self._conn.total_changes - before
+        inserted = self._conn.total_changes - before
+        self.last_insert_count = inserted
+
+        if failed_symbols:
+            self.last_insert_failed_symbols = set(failed_symbols)
+            raise RuntimeError(
+                f"寫入失敗的商品: {', '.join(failed_symbols)}（其餘商品已成功寫入 {inserted} 筆）"
+            )
+        self.last_insert_failed_symbols = set()
+        return inserted
 
     # ── 已匯入檔案追蹤 ─────────────────────────────────────────
 

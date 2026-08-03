@@ -247,7 +247,7 @@ function CandlestickChart({ data, indicators = [], scriptOutputs = {}, timeframe
           let next = Math.round(c * factor);
           // 確保至少變動 1 根，避免根數少時因四捨五入卡住不動
           if (next === c) next = c + (e.deltaY > 0 ? 1 : -1);
-          return clamp(next, 10, 1800);
+          return clamp(next, 10, 3600);
         });
       }
     };
@@ -520,7 +520,7 @@ function VolumeChart({ data, visibleCount, offset, scriptOutputs = {}, indicator
       curV += vStep;
     }
 
-    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:45", "10:30", "11:15", "12:00", "12:30", "13:00", "13:30", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "04:00"]);
+    const targetTimes = new Set(["08:45", "09:00", "09:15", "09:30", "10:00", "10:30", "11:00", "12:00", "12:30", "13:00", "13:30", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "20:30", "21:00", "21:30", "22:00", "22:30", "23:00", "00:00", "01:00", "02:00", "03:00", "04:00"]);
     ctx.textAlign = "center";
     ctx.fillStyle = COLORS.textDim;
     visibleData.forEach((d, i) => {
@@ -896,7 +896,7 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
         newOffset = clampData(newOffset, 0, Math.max(0, data.length - startIdx - 10));
         const newVisibleCount = data.length - newOffset - startIdx;
         setOffset(newOffset);
-        setVisibleCount(clampData(newVisibleCount, 10, 1800));
+        setVisibleCount(clampData(newVisibleCount, 10, 3600));
       }
     };
     const handleMouseUp = () => { dragRef.current = null; };
@@ -2542,7 +2542,7 @@ export default function TradingPlatform() {
           const sym = chartSymbolRef.current;
           const tf = timeframeRef.current;
           const isLarge = ["日", "周", "月"].includes(tf);
-          send("get_history", { symbol: sym, timeframe: tf, count: isLarge ? 500 : 1800 });
+          send("get_history", { symbol: sym, timeframe: tf, count: isLarge ? 500 : 3600 });
         } else {
           localStorage.removeItem("autoConnectBrokerId");
         }
@@ -2595,7 +2595,7 @@ export default function TradingPlatform() {
   useEffect(() => { setLiveM1Bar(null); }, [chartSymbol]);
 
   // 只送歷史請求，不在這裡訂閱即時報價——
-  // 訂閱後 tick/bar 事件會立刻開始推送，若比 1800 根歷史資料先抵達，
+  // 訂閱後 tick/bar 事件會立刻開始推送，若比 3600 根歷史資料先抵達，
   // 畫面會先出現只有「目前這一根」棒的空窗。改成等 history_bars 確定回來
   // 之後（見下方 handler），才真正送出 subscribe。
   const subscribedRef = useRef(new Set());
@@ -2608,7 +2608,7 @@ export default function TradingPlatform() {
     send("get_history", {
       symbol: chartSymbol,
       timeframe,
-      count: isLarge ? 500 : 1800,
+      count: isLarge ? 500 : 3600,
     });
   }, [connected, chartSymbol, timeframe]);
 
@@ -2631,7 +2631,7 @@ export default function TradingPlatform() {
             setRawM1([]);
           } else {
             setRawM1(prev => {
-              // 避免為了刷價格而取 count=1 的請求，覆蓋掉正常的 1800 根歷史資料
+              // 避免為了刷價格而取 count=1 的請求，覆蓋掉正常的 3600 根歷史資料
               if (msg.bars.length === 1 && prev.length > 1) {
                 return prev;
               }

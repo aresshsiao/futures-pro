@@ -174,7 +174,7 @@ async def handle_get_history(ws, data: dict):
 
     # DB 優先策略：server 一直在跑，DB 已有最新資料，browser refresh 不需要重打 API
     # 只有 DB 完全沒有該商品資料時，才去打 SinoPac API（第一次載入或換商品）
-    db_limit = 999_999 if timeframe in ("日", "周", "月") else max(count, 1800)
+    db_limit = 999_999 if timeframe in ("日", "周", "月") else max(count, 3600)
     db_bars = db.get_bars(symbol, limit=db_limit)
 
     DB_SUFFICIENT = 200  # DB 至少要有這麼多 M1 才算有效（約 3 小時台指期資料）
@@ -712,9 +712,24 @@ async def handle_import_taifex(ws, data: dict):
         # sqlite3 連線不能跨執行緒使用（this._conn 是在主 event loop 執行緒建立的），
         # 不能丟進 run_in_executor，維持原本直接同步呼叫。
         # 本地 CSV 是期交所官方資料，視為最準確的來源，重複的 timestamp 直接覆蓋 DB 既有資料
-        inserted = db.insert_bars(bars, from_csv=True)
+        failed_symbols: set[str] = set()
+        try:
+            inserted = db.insert_bars(bars, from_csv=True)
+        except RuntimeError as e:
+            # 某些商品寫入失敗——只有實際寫入成功的商品才能標記「已匯入」，
+            # 否則失敗的商品（例如 MTX/TMF）會被誤判成已匯入，下次匯入時被跳過，
+            # 但 DB 裡其實沒有那個商品的資料。
+            logger.error("[import_taifex] insert_bars 部分失敗: %s", e)
+            failed_symbols = getattr(db, "last_insert_failed_symbols", set())
+            inserted = getattr(db, "last_insert_count", 0)
+
         # 寫入成功才記錄「已匯入」，避免 DB 寫入失敗卻誤標記略過
-        db.mark_files_imported(manifest)
+        safe_manifest = [
+            {**m, "symbols": [s for s in m["symbols"] if s not in failed_symbols]}
+            for m in manifest
+        ]
+        safe_manifest = [m for m in safe_manifest if m["symbols"]]
+        db.mark_files_imported(safe_manifest)
         response = {
             "type": "import_result",
             "source": "local",
@@ -723,6 +738,8 @@ async def handle_import_taifex(ws, data: dict):
             "skipped_files": skipped_files,
             "summary": db.summary(),
         }
+        if failed_symbols:
+            response["error"] = f"以下商品寫入失敗，未標記為已匯入，下次會重新嘗試: {', '.join(sorted(failed_symbols))}"
 
     if not ws_alive:
         return

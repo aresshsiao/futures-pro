@@ -152,6 +152,58 @@ class TestFromCsvProtection:
         assert changed == 1
 
 
+# ─── 部分商品寫入失敗時的隔離 ───────────────────────────────────
+# 對應真實回報過的 bug：一批匯入裡 TX 寫入成功，但 MTX/TMF 寫入失敗，
+# 卻仍被上層標記成「已匯入」，導致下次匯入被誤判為已處理而跳過。
+
+class _FlakyConnProxy:
+    """sqlite3.Connection 是不可變的 C extension type，無法 setattr（不論 instance
+    或 class 層級），所以改用代理物件包一層，只攔截 executemany，其餘都轉發給
+    真正的連線。"""
+
+    def __init__(self, real_conn, blocked_table: str):
+        self._real_conn = real_conn
+        self._blocked_table = blocked_table
+
+    def executemany(self, sql, rows):
+        if f'"{self._blocked_table}"' in sql:
+            raise sqlite3.OperationalError("simulated failure")
+        return self._real_conn.executemany(sql, rows)
+
+    def __getattr__(self, name):
+        return getattr(self._real_conn, name)
+
+
+class TestInsertBarsPartialFailure:
+    @staticmethod
+    def _patch_executemany_to_fail_for(monkeypatch, db, blocked_table: str):
+        monkeypatch.setattr(db, "_conn", _FlakyConnProxy(db._conn, blocked_table))
+
+    def test_failing_symbol_does_not_block_others(self, db, monkeypatch):
+        tx = _make_bar(symbol="TX")
+        mtx = _make_bar(symbol="MTX")
+        self._patch_executemany_to_fail_for(monkeypatch, db, "MTX")
+
+        with pytest.raises(RuntimeError):
+            db.insert_bars([tx, mtx], from_csv=True)
+
+        # TX 仍應成功寫入並提交，不因 MTX 失敗而遺失
+        assert db.get_bar_count("TX") == 1
+        # MTX 失敗，資料庫裡不應該有它的資料
+        assert db.get_bar_count("MTX") == 0
+
+    def test_failed_symbols_are_reported_for_caller_to_skip_marking(self, db, monkeypatch):
+        tx = _make_bar(symbol="TX")
+        mtx = _make_bar(symbol="MTX")
+        self._patch_executemany_to_fail_for(monkeypatch, db, "MTX")
+
+        with pytest.raises(RuntimeError):
+            db.insert_bars([tx, mtx], from_csv=True)
+
+        # 呼叫端 (main.py) 靠這個欄位判斷哪些商品不能標記為「已匯入」
+        assert db.last_insert_failed_symbols == {"MTX"}
+
+
 # ─── get_bars ────────────────────────────────────────────────
 
 class TestGetBars:
