@@ -2,8 +2,16 @@
 sinopac:
   api_key: "YOUR_API_KEY_HERE"
   secret_key: "YOUR_SECRET_KEY_HERE"
-  
-  # 若有需要憑證下單，請提供憑證相關設定：
+
+  # ── 模擬交易 ───────────────────────────────────────
+  # true  → 連到永豐金的模擬環境：帳號、下單、回報、庫存查詢全部照跑，
+  #         但成交只發生在券商測試主機上，不會動到真實資金，適合驗證下單流程。
+  #         模擬環境沒有憑證機制，下面的 cert_* 設定會被自動忽略。
+  # false → 正式環境（預設）。下單即為真實交易，務必確認後再開啟。
+  # 註：切換此設定需重新連線（Shioaji 的 simulation 是建構子參數，無法即時切換）。
+  simulation: true
+
+  # 若有需要憑證下單（正式環境），請提供憑證相關設定：
   # cert_path: "/path/to/your/cert.pfx"
   # cert_password: "YOUR_CERT_PASSWORD"
   # person_id: "YOUR_ID_NUMBER"

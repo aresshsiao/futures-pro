@@ -81,7 +81,10 @@ def _save_script_states() -> None:
 # ═══════════════════════════════════════════════════════════
 
 async def handle_place_order(ws, data: dict):
-    """前端: 下單"""
+    """前端: 下單
+
+    octype / time_in_force 為選配（新倉平倉別、委託有效期），不給就用券商預設。
+    """
     order = await trade.place_order(
         symbol=data["symbol"],
         direction=Direction(data["direction"]),
@@ -89,12 +92,16 @@ async def handle_place_order(ws, data: dict):
         qty=data["qty"],
         price=data.get("price", 0),
         source=data.get("source", "manual"),
+        octype=data.get("octype", "auto"),
+        time_in_force=data.get("time_in_force", "ROD"),
     )
     if order:
         await ws.send_json({
             "type": "order_result",
             "order_id": order.id,
             "status": order.status.value,
+            "broker_order_id": order.broker_order_id,
+            "simulation": trade.is_simulation,
         })
 
 
@@ -102,6 +109,16 @@ async def handle_cancel_order(ws, data: dict):
     """前端: 刪單"""
     ok = await trade.cancel_order(data["order_id"])
     await ws.send_json({"type": "cancel_result", "success": ok})
+
+
+async def handle_modify_order(ws, data: dict):
+    """前端: 改價/改量（期交所規則：改量只能減量，改價只對限價單有效）"""
+    ok = await trade.modify_order(
+        data["order_id"],
+        new_price=data.get("price", 0),
+        new_qty=data.get("qty", 0),
+    )
+    await ws.send_json({"type": "modify_result", "success": ok, "order_id": data["order_id"]})
 
 
 async def _backfill_gap(symbol: str, minutes: int = 6000) -> None:
@@ -476,6 +493,111 @@ async def handle_get_fills(ws, data: dict):
     })
 
 
+# ── 帳務 / 券商端查詢 ─────────────────────────────────
+
+async def handle_get_account(ws, data: dict):
+    """前端: 查詢帳戶總覽（保證金、餘額、帳戶清單）
+
+    模擬環境一樣查得到，是確認模擬單有沒有真的成交最直接的地方。
+    """
+    await ws.send_json({
+        "type": "account_info",
+        "simulation": trade.is_simulation,
+        "connected": trade.is_connected,
+        "margin": await trade.get_margin(),
+        "balance": await trade.get_account_balance(),
+        "accounts": await trade.list_accounts(),
+    })
+
+
+async def handle_get_broker_orders(ws, data: dict):
+    """前端: 查詢券商端未成交委託（含本程式以外下的單）"""
+    orders = await trade.get_open_orders()
+    await ws.send_json({
+        "type": "broker_orders",
+        "data": [
+            {
+                "id": o.id,
+                "broker_order_id": o.broker_order_id,
+                "symbol": o.symbol,
+                "direction": o.direction.value,
+                "order_type": o.order_type.value,
+                "price": o.price,
+                "qty": o.qty,
+                "filled_qty": o.filled_qty,
+                "avg_fill_price": o.avg_fill_price,
+                "status": o.status.value,
+            }
+            for o in orders
+        ],
+    })
+
+
+async def handle_get_profit_loss(ws, data: dict):
+    """前端: 查詢區間已實現損益（begin/end 為 'YYYY-MM-DD'，省略=今日）"""
+    begin = data.get("begin_date", "")
+    end = data.get("end_date", "")
+    await ws.send_json({
+        "type": "profit_loss",
+        "begin_date": begin,
+        "end_date": end,
+        "data": await trade.get_profit_loss(begin, end),
+        "summary": await trade.get_profit_loss_summary(begin, end),
+    })
+
+
+async def handle_get_position_detail(ws, data: dict):
+    """前端: 查詢倉位逐筆進場明細"""
+    await ws.send_json({
+        "type": "position_detail",
+        "data": await trade.get_position_detail(int(data.get("detail_id", 0) or 0)),
+    })
+
+
+async def handle_get_settlements(ws, data: dict):
+    """前端: 查詢交割款（T / T+1 / T+2）"""
+    await ws.send_json({"type": "settlements", "data": await trade.get_settlements()})
+
+
+async def handle_refresh_account(ws, data: dict):
+    """前端: 重新跟券商同步倉位與今日成交"""
+    await trade.refresh_from_broker()
+    await ws.send_json({"type": "account_refreshed", "success": trade.is_connected})
+
+
+async def handle_get_ticks(ws, data: dict):
+    """前端: 查詢歷史逐筆成交明細"""
+    rows = await quote.get_ticks(
+        data["symbol"],
+        date=data.get("date", ""),
+        query_type=data.get("query_type", "AllDay"),
+        time_start=data.get("time_start", ""),
+        time_end=data.get("time_end", ""),
+        last_count=int(data.get("last_count", 0) or 0),
+    )
+    await ws.send_json({"type": "ticks", "symbol": data["symbol"], "data": rows})
+
+
+async def handle_get_snapshot(ws, data: dict):
+    """前端: 查詢多商品即時快照（一次性查詢，勿當即時 feed 輪詢）"""
+    symbols = data.get("symbols") or ([data["symbol"]] if data.get("symbol") else [])
+    await ws.send_json({"type": "snapshot", "data": await quote.get_snapshot(symbols)})
+
+
+async def handle_get_contract_info(ws, data: dict):
+    """前端: 查詢合約規格（漲跌停、參考價、到期日等）"""
+    await ws.send_json({
+        "type": "contract_info",
+        "symbol": data["symbol"],
+        "data": await quote.get_contract_info(data["symbol"]),
+    })
+
+
+async def handle_get_api_usage(ws, data: dict):
+    """前端: 查詢券商 API 流量用量（抓不到歷史資料時先看這個）"""
+    await ws.send_json({"type": "api_usage", "data": await quote.get_api_usage()})
+
+
 def _load_broker_credentials(broker_id: str) -> dict:
     """從 config/brokers.yaml 讀取指定券商的 credentials。"""
     import yaml
@@ -502,6 +624,8 @@ async def handle_broker_status(ws, data: dict):
             "broker_id": getattr(trade._adapter, "broker_id", None) if trade._adapter else None,
             "name":      trade.broker_name,
             "connected": trade.is_connected,
+            # 模擬帳號：下單走券商測試主機，不會動到真實資金
+            "simulation": trade.is_simulation,
         }
     })
 
@@ -538,6 +662,9 @@ async def _connect_broker(broker_id: str, kind: str = "both") -> tuple[bool, str
     credentials = _load_broker_credentials(broker_id)
     if not credentials:
         return False, "找不到 credentials，請檢查 config/brokers.yaml"
+
+    if credentials.get("simulation"):
+        logger.warning("[BrokerConfig] %s 以「模擬環境」連線，下單不會動到真實資金", broker_id)
 
     ok_quote = True
     ok_trade = True
@@ -618,6 +745,7 @@ async def handle_broker_config(ws, data: dict):
         "connected": ok,
         "broker_id": broker_id,
         "kind": kind,
+        "simulation": trade.is_simulation,
         "message": message,
     })
 
@@ -1112,11 +1240,22 @@ def setup():
     # WebSocket action handlers
     register_action("place_order", handle_place_order)
     register_action("cancel_order", handle_cancel_order)
+    register_action("modify_order", handle_modify_order)
     register_action("subscribe", handle_subscribe)
     register_action("get_history", handle_get_history)
     register_action("get_positions", handle_get_positions)
     register_action("get_orders", handle_get_orders)
     register_action("get_fills", handle_get_fills)
+    register_action("get_account", handle_get_account)
+    register_action("get_broker_orders", handle_get_broker_orders)
+    register_action("get_profit_loss", handle_get_profit_loss)
+    register_action("get_position_detail", handle_get_position_detail)
+    register_action("get_settlements", handle_get_settlements)
+    register_action("refresh_account", handle_refresh_account)
+    register_action("get_ticks", handle_get_ticks)
+    register_action("get_snapshot", handle_get_snapshot)
+    register_action("get_contract_info", handle_get_contract_info)
+    register_action("get_api_usage", handle_get_api_usage)
     register_action("broker_status", handle_broker_status)
     register_action("broker_config", handle_broker_config)
     register_action("import_taifex", handle_import_taifex)

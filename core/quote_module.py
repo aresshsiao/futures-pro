@@ -140,3 +140,34 @@ class QuoteModule:
         if not self.is_connected:
             return
         await self._adapter.unsubscribe_options_t_quote(symbol, month)
+
+    # ── 其他行情查詢 ──────────────────────────────────
+
+    async def get_ticks(
+        self, symbol: str, date: str = "", query_type: str = "AllDay",
+        time_start: str = "", time_end: str = "", last_count: int = 0,
+    ) -> list[dict]:
+        """取得歷史逐筆成交明細"""
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_ticks(
+            symbol, date, query_type, time_start, time_end, last_count
+        )
+
+    async def get_snapshot(self, symbols: list[str]) -> list[dict]:
+        """取得多商品即時快照（一次性查詢，不可輪詢）"""
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_snapshot(symbols)
+
+    async def get_contract_info(self, symbol: str) -> dict:
+        """取得合約規格（漲跌停、參考價、到期日等）"""
+        if not self.is_connected:
+            return {}
+        return await self._adapter.get_contract_info(symbol)
+
+    async def get_api_usage(self) -> dict:
+        """查詢券商 API 流量用量"""
+        if not self.is_connected:
+            return {}
+        return await self._adapter.get_api_usage()

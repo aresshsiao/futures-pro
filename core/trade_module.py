@@ -84,9 +84,14 @@ class TradeModule:
         qty: int,
         price: float = 0.0,
         source: str = "manual",
+        octype: str = "auto",
+        time_in_force: str = "ROD",
     ) -> Optional[Order]:
         """
         下單入口。觸價單在本地管理，其餘送至券商。
+
+        octype / time_in_force 為券商層的選配參數（新倉平倉別、委託有效期），
+        不支援的券商會自行忽略。
         """
         order_id = str(uuid.uuid4())[:8]
         order = Order(
@@ -117,7 +122,7 @@ class TradeModule:
             return order
 
         broker_id = await self._adapter.place_order(
-            symbol, direction, order_type, qty, price
+            symbol, direction, order_type, qty, price, octype, time_in_force
         )
         order.broker_order_id = broker_id
         order.status = OrderStatus.SUBMITTED
@@ -248,3 +253,94 @@ class TradeModule:
         if not self.is_connected:
             return []
         return await self._adapter.get_profit_loss_today()
+
+    # ── 改單 ──────────────────────────────────────────
+
+    async def modify_order(self, order_id: str, new_price: float = 0, new_qty: int = 0) -> bool:
+        """改價/改量。觸價單直接改本地紀錄，已送出的單請求券商改單。"""
+        order = self._orders.get(order_id)
+        if not order or not order.is_active:
+            return False
+
+        if order.status == OrderStatus.STOP_WAITING:
+            if new_price:
+                order.price = new_price
+            if new_qty:
+                order.qty = new_qty
+            self.bus.emit_sync("order_update", order)
+            return True
+
+        if not self.is_connected:
+            return False
+
+        ok = await self._adapter.modify_order(order.broker_order_id, new_price, new_qty)
+        if ok:
+            if new_price:
+                order.price = new_price
+            if new_qty:
+                order.qty = new_qty
+            self.bus.emit_sync("order_update", order)
+        return ok
+
+    # ── 帳務查詢（透傳券商 adapter）────────────────────
+
+    @property
+    def is_simulation(self) -> bool:
+        """目前的交易連線是否為模擬帳號"""
+        return bool(self._adapter and self._adapter.is_simulation)
+
+    async def refresh_from_broker(self) -> None:
+        """重新跟券商同步倉位與今日成交（連線中途重整、或想確認模擬單有無成交時用）"""
+        if not self.is_connected:
+            return
+        positions = await self._adapter.get_positions()
+        self._positions = {p.symbol: p for p in positions}
+        self._fills = await self._adapter.get_fills_today()
+        self.bus.emit_sync("position_update", None)
+
+    async def get_open_orders(self) -> list[Order]:
+        """查詢券商端未成交委託（與本地 active_orders 不同：含本程式以外下的單）"""
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_open_orders()
+
+    async def list_accounts(self) -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.list_accounts()
+
+    async def get_account_balance(self) -> dict:
+        if not self.is_connected:
+            return {}
+        return await self._adapter.get_account_balance()
+
+    async def get_margin(self) -> dict:
+        """查詢期貨保證金專戶（權益數、可用餘額、風險指標…）"""
+        if not self.is_connected:
+            return {}
+        return await self._adapter.get_margin()
+
+    async def get_position_detail(self, detail_id: int = 0) -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_position_detail(detail_id)
+
+    async def get_settlements(self) -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_settlements()
+
+    async def get_profit_loss(self, begin_date: str = "", end_date: str = "") -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_profit_loss(begin_date, end_date)
+
+    async def get_profit_loss_summary(self, begin_date: str = "", end_date: str = "") -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_profit_loss_summary(begin_date, end_date)
+
+    async def get_profit_loss_detail(self, detail_id: int = 0) -> list[dict]:
+        if not self.is_connected:
+            return []
+        return await self._adapter.get_profit_loss_detail(detail_id)

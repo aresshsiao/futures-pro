@@ -112,6 +112,40 @@ class QuoteAdapter(ABC):
         """取消訂閱指定月份選擇權鏈的即時報價。"""
         return
 
+    # ── 其他行情查詢（選配，預設不支援）────────────────
+
+    async def get_ticks(
+        self,
+        symbol: str,
+        date: str = "",
+        query_type: str = "AllDay",
+        time_start: str = "",
+        time_end: str = "",
+        last_count: int = 0,
+    ) -> list[dict]:
+        """取得歷史逐筆成交明細。
+
+        query_type: "AllDay"（全日）| "RangeTime"（time_start~time_end）| "LastCount"（最後 last_count 筆）
+        每筆為 dict: {ts, close, volume, bid_price, bid_volume, ask_price, ask_volume, tick_type}
+        """
+        return []
+
+    async def get_snapshot(self, symbols: list[str]) -> list[dict]:
+        """取得多商品的即時快照（開高低收、量、漲跌幅等）。
+
+        注意：這是請求式查詢，不可當即時 feed 反覆輪詢（券商會停權），
+        即時報價請用 subscribe_tick / subscribe_orderbook。
+        """
+        return []
+
+    async def get_contract_info(self, symbol: str) -> dict:
+        """取得合約規格（代碼、名稱、到期日、漲跌停、參考價等）。"""
+        return {}
+
+    async def get_api_usage(self) -> dict:
+        """查詢 API 流量用量: {bytes, limit_bytes, remaining_bytes, connections}"""
+        return {}
+
 
 class TradeAdapter(ABC):
     """
@@ -147,10 +181,16 @@ class TradeAdapter(ABC):
         order_type: OrderType,
         qty: int,
         price: float = 0.0,
+        octype: str = "auto",
+        time_in_force: str = "ROD",
     ) -> str:
         """
         送出委託。回傳券商端的委託序號 (broker_order_id)。
         price=0 表示市價單。
+
+        octype:        "auto" | "new"（新倉）| "cover"（平倉）| "daytrade"（當沖）
+        time_in_force: "ROD"（當日有效）| "IOC"（立即成交否則取消）| "FOK"（全部成交否則取消）
+        兩者皆為選配，不支援的券商可忽略。
         """
         ...
 
@@ -201,4 +241,50 @@ class TradeAdapter(ABC):
         每筆為 dict: {symbol, quantity, cover_price, pnl, fee, tax}，
         用於比對成交明細中的平倉成交，補上該筆的已實現損益。
         """
+        return []
+
+    # ── 帳務查詢（選配，預設不支援）────────────────────
+
+    @property
+    def is_simulation(self) -> bool:
+        """是否為模擬（測試）帳號。前端用來提示「目前是模擬交易」。"""
+        return False
+
+    async def list_accounts(self) -> list[dict]:
+        """列出登入帳號下的所有交易帳戶。
+
+        每筆為 dict: {account_id, account_type, broker_id, person_id, signed, username}
+        """
+        return []
+
+    async def get_account_balance(self) -> dict:
+        """查詢帳戶餘額（證券交割款），回傳 {balance, date}"""
+        return {}
+
+    async def get_margin(self) -> dict:
+        """查詢期貨保證金專戶。
+
+        回傳 dict（欄位依券商而定），常用: {equity, available_margin,
+        initial_margin, maintenance_margin, risk_indicator, today_balance, ...}
+        """
+        return {}
+
+    async def get_position_detail(self, detail_id: int = 0) -> list[dict]:
+        """查詢倉位的逐筆進場明細。detail_id=0 表示全部。"""
+        return []
+
+    async def get_settlements(self) -> list[dict]:
+        """查詢交割款（T/T+1/T+2）"""
+        return []
+
+    async def get_profit_loss(self, begin_date: str = "", end_date: str = "") -> list[dict]:
+        """查詢區間已實現損益（日期格式 'YYYY-MM-DD'，空字串=今日）"""
+        return []
+
+    async def get_profit_loss_summary(self, begin_date: str = "", end_date: str = "") -> list[dict]:
+        """查詢區間已實現損益彙總（依商品彙總）"""
+        return []
+
+    async def get_profit_loss_detail(self, detail_id: int = 0) -> list[dict]:
+        """查詢單筆已實現損益的進場明細（detail_id 來自 get_profit_loss 的 id）"""
         return []

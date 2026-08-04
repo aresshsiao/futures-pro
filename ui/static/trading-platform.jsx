@@ -2696,7 +2696,7 @@ export default function TradingPlatform() {
             };
             return updated;
           }
-          return [...prev, newBar].slice(-1500);
+          return [...prev, newBar].slice(-3600);
         });
       } else {
         // 分鐘K 只處理 M1 棒
@@ -2733,7 +2733,7 @@ export default function TradingPlatform() {
                   open: msg.open, high: msg.high, low: msg.low,
                   close: msg.close, volume: msg.volume,
                   delivery: last.delivery,
-                }].slice(-1500);
+                }].slice(-3600);
               }
               return prev;
             });
@@ -2794,7 +2794,7 @@ export default function TradingPlatform() {
       }
     }
 
-    const aggregated = [...buckets.values()].sort((a, b) => a.time - b.time).slice(-1500);
+    const aggregated = [...buckets.values()].sort((a, b) => a.time - b.time).slice(-3600);
 
     // 透過 ref 讀取最新的 liveM1Bar，不將其加入 deps（避免每個 tick 重新跑完整聚合）
     const live = liveM1BarRef.current;

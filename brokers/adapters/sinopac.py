@@ -10,12 +10,12 @@ import asyncio
 import logging
 import math
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
 from core.models import (
     Bar, Direction, Fill, Order, OrderBook, OrderBookLevel,
-    OrderType, Position, PositionSide, Tick, Timeframe,
+    OrderStatus, OrderType, Position, PositionSide, Tick, Timeframe,
 )
 from brokers.base import QuoteAdapter, TradeAdapter
 
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _SHARED_API = None
 _SHARED_CONNECTED = False
+_SHARED_SIMULATION = False
 
 # login() 的 contracts_cb 會依 SecurityType（"Index"/"Stock"/"Future"/"Option"）逐一回呼，
 # 對應該分類的 Contracts 下載完成。這是目前這版 shioaji（1.5.x, Rust 重寫版）唯一
@@ -50,11 +51,30 @@ def _on_contracts_fetched(*args):
 
 
 def _get_shared_api(credentials):
-    global _SHARED_API, _SHARED_CONNECTED
+    """取得共用的 Shioaji instance（問價與交易兩個 adapter 共用同一條連線）。
+
+    credentials["simulation"]=True 時走永豐金的模擬環境：帳號、下單、回報、
+    庫存查詢全部照跑，但成交只發生在券商的測試主機上，不會動到真實資金，
+    適合用來驗證整條下單鏈路。模擬環境沒有憑證機制，activate_ca 會失敗，
+    所以這裡直接跳過。
+
+    simulation 是 Shioaji() 的建構子參數，無法在既有 instance 上切換，
+    因此模式改變時必須先登出、丟掉舊 instance 再重建。
+    """
+    global _SHARED_API, _SHARED_CONNECTED, _SHARED_SIMULATION
     import shioaji as sj
+
+    simulation = bool(credentials.get("simulation", False))
+
+    if _SHARED_API is not None and simulation != _SHARED_SIMULATION:
+        logger.info("[SinoPac] 切換至%s環境，重建連線", "模擬" if simulation else "正式")
+        _logout_shared_api()
+        _SHARED_API = None
+
     if _SHARED_API is None:
-        _SHARED_API = sj.Shioaji()
-        
+        _SHARED_API = sj.Shioaji(simulation=simulation)
+        _SHARED_SIMULATION = simulation
+
         @_SHARED_API.on_event
         def _on_event(resp_code: int, event_code: int, info: str, event: str):
             logger.warning("[SinoPac Event] resp_code=%s event_code=%s info=%s event=%s", resp_code, event_code, info, event)
@@ -62,14 +82,19 @@ def _get_shared_api(credentials):
     if not _SHARED_CONNECTED:
         for ev in _CONTRACTS_READY.values():
             ev.clear()
-        _SHARED_API.login(
+        accounts = _SHARED_API.login(
             api_key=credentials.get("api_key", ""),
             secret_key=credentials.get("secret_key", ""),
             subscribe_trade=credentials.get("subscribe_trade", True),
             receive_window=10000,
             contracts_cb=_on_contracts_fetched,
         )
-        if "cert_path" in credentials:
+        logger.info(
+            "[SinoPac] 登入成功（%s環境），可用帳戶 %s 個",
+            "模擬" if simulation else "正式",
+            len(accounts) if accounts else 0,
+        )
+        if credentials.get("cert_path") and not simulation:
             _SHARED_API.activate_ca(
                 ca_path=credentials["cert_path"],
                 ca_passwd=credentials.get("cert_password", ""),
@@ -77,6 +102,64 @@ def _get_shared_api(credentials):
             )
         _SHARED_CONNECTED = True
     return _SHARED_API
+
+
+def _is_simulation() -> bool:
+    """目前共用連線是否處於模擬環境。"""
+    return _SHARED_SIMULATION
+
+
+# ── Shioaji 回傳值正規化 ────────────────────────────────
+# Shioaji 1.5.x 是 Rust 重寫版，同一個欄位在 callback（dict）與查詢 API（物件）
+# 兩條路徑拿到的型別不一樣：一邊是字串，一邊是 enum 物件。
+# 這幾個 helper 把兩邊統一成 Python 基本型別，順便讓結果可以直接丟進 WebSocket。
+
+def _enum_str(v) -> str:
+    """取 enum 的字串值；本來就是字串就原樣回傳。"""
+    if v is None:
+        return ""
+    return str(getattr(v, "value", v))
+
+
+def _json_safe(v):
+    """轉成 JSON 可序列化的型別（enum → 字串、date → ISO 字串）。"""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _json_safe(x) for k, x in v.items()}
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    return _enum_str(v)
+
+
+def _obj_to_dict(obj) -> dict:
+    """Shioaji 的查詢結果物件都有 .dict()，轉成 JSON 安全的 dict。"""
+    if obj is None:
+        return {}
+    raw = None
+    if hasattr(obj, "dict"):
+        try:
+            raw = obj.dict()
+        except Exception:
+            raw = None
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): _json_safe(v) for k, v in raw.items()}
+
+
+# Shioaji 委託狀態 → 系統 OrderStatus
+_SHIOAJI_STATUS_MAP = {
+    "PendingSubmit": OrderStatus.PENDING,     # 傳送中
+    "PreSubmitted":  OrderStatus.PENDING,     # 預約單（盤前）
+    "Submitted":     OrderStatus.SUBMITTED,   # 委託成功
+    "PartFilled":    OrderStatus.PARTIAL,
+    "Filled":        OrderStatus.FILLED,
+    "Cancelled":     OrderStatus.CANCELLED,
+    "Failed":        OrderStatus.REJECTED,
+    "Inactive":      OrderStatus.REJECTED,    # 失效（例如超過有效期）
+}
 
 
 async def _wait_contracts_ready(security_types=("Future", "Index"), timeout: float = 15.0) -> None:
@@ -317,7 +400,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                 self._schedule_option_push(chain_key)
 
             self._connected = True
-            logger.info("[SinoPac Quote] 登入成功")
+            logger.info("[SinoPac Quote] 登入成功%s", "（模擬環境）" if _is_simulation() else "")
             return True
         except Exception:
             logger.exception("[SinoPac Quote] 登入失敗")
@@ -587,6 +670,175 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             logger.exception("[SinoPac] 取得歷史K線失敗 %s %s", symbol, timeframe)
             return []
 
+    # ── 其他行情查詢 ──────────────────────────────────
+    # 以下都是請求式（非訂閱）查詢，Shioaji 皆為同步阻塞呼叫，
+    # 一律用 run_in_executor 丟到執行緒，避免凍結 asyncio event loop。
+
+    async def get_ticks(
+        self,
+        symbol: str,
+        date: str = "",
+        query_type: str = "AllDay",
+        time_start: str = "",
+        time_end: str = "",
+        last_count: int = 0,
+    ) -> list[dict]:
+        """取得歷史逐筆成交明細（api.ticks）。
+
+        date 空字串 = 今日。query_type:
+          AllDay    — 整個交易日
+          RangeTime — time_start ~ time_end（格式 "HH:MM:SS.ffffff"）
+          LastCount — 最後 last_count 筆（上限 2000）
+        """
+        import shioaji as sj
+
+        contract = await self._get_contract(symbol)
+        if not contract:
+            return []
+
+        qt_map = {
+            "AllDay": sj.TicksQueryType.AllDay,
+            "RangeTime": sj.TicksQueryType.RangeTime,
+            "LastCount": sj.TicksQueryType.LastCount,
+        }
+        qt = qt_map.get(query_type, sj.TicksQueryType.AllDay)
+        query_date = date or datetime.now().strftime("%Y-%m-%d")
+
+        kwargs = {"contract": contract, "date": query_date, "query_type": qt}
+        if qt == sj.TicksQueryType.RangeTime:
+            kwargs["time_start"] = time_start
+            kwargs["time_end"] = time_end
+        elif qt == sj.TicksQueryType.LastCount:
+            kwargs["last_cnt"] = last_count or 100
+
+        try:
+            loop = asyncio.get_running_loop()
+            ticks = await loop.run_in_executor(None, lambda: self._api.ticks(**kwargs))
+        except Exception:
+            logger.exception("[SinoPac] 取得逐筆成交失敗 %s %s", symbol, query_date)
+            return []
+
+        ts_list = list(getattr(ticks, "ts", []) or [])
+        if not ts_list:
+            return []
+
+        def _col(name):
+            return list(getattr(ticks, name, []) or [])
+
+        close, volume = _col("close"), _col("volume")
+        bid_p, bid_v = _col("bid_price"), _col("bid_volume")
+        ask_p, ask_v = _col("ask_price"), _col("ask_volume")
+        tick_type = _col("tick_type")
+
+        def _at(seq, i, default=0):
+            return seq[i] if i < len(seq) else default
+
+        rows = []
+        for i, ts in enumerate(ts_list):
+            rows.append({
+                # ts 是奈秒時間戳，轉成前端慣用的毫秒
+                "time": int(ts) // 1_000_000,
+                "price": float(_at(close, i, 0.0)),
+                "volume": int(_at(volume, i, 0)),
+                "bid_price": float(_at(bid_p, i, 0.0)),
+                "bid_volume": int(_at(bid_v, i, 0)),
+                "ask_price": float(_at(ask_p, i, 0.0)),
+                "ask_volume": int(_at(ask_v, i, 0)),
+                # tick_type: 1=外盤(買方成交) 2=內盤(賣方成交) 0=無法判斷
+                "tick_type": int(_at(tick_type, i, 0)),
+            })
+        logger.info("[SinoPac] %s %s 逐筆成交 %d 筆", symbol, query_date, len(rows))
+        return rows
+
+    async def get_snapshot(self, symbols: list[str]) -> list[dict]:
+        """取得多商品即時快照（api.snapshots）。
+
+        這是請求式查詢，永豐金明確禁止當即時 feed 反覆輪詢（會被停權），
+        只適合用在「開盤前先補一次現價」這類一次性場合；
+        持續更新請用 subscribe_tick / subscribe_orderbook。
+        """
+        contracts = []
+        for sym in symbols:
+            c = await self._get_contract(sym)
+            if c is not None:
+                contracts.append((sym, c))
+        if not contracts:
+            return []
+
+        try:
+            loop = asyncio.get_running_loop()
+            snaps = await loop.run_in_executor(
+                None, lambda: self._api.snapshots([c for _, c in contracts])
+            )
+        except Exception:
+            logger.exception("[SinoPac] 取得快照失敗: %s", symbols)
+            return []
+
+        rows = []
+        for (sym, _), s in zip(contracts, snaps or []):
+            rows.append({
+                "symbol": sym,
+                "code": getattr(s, "code", ""),
+                "time": int(getattr(s, "ts", 0) or 0) // 1_000_000,
+                "open": float(getattr(s, "open", 0.0) or 0.0),
+                "high": float(getattr(s, "high", 0.0) or 0.0),
+                "low": float(getattr(s, "low", 0.0) or 0.0),
+                "close": float(getattr(s, "close", 0.0) or 0.0),
+                "average_price": float(getattr(s, "average_price", 0.0) or 0.0),
+                "change_price": float(getattr(s, "change_price", 0.0) or 0.0),
+                "change_rate": float(getattr(s, "change_rate", 0.0) or 0.0),
+                "volume": int(getattr(s, "volume", 0) or 0),
+                "total_volume": int(getattr(s, "total_volume", 0) or 0),
+                "buy_price": float(getattr(s, "buy_price", 0.0) or 0.0),
+                "buy_volume": int(getattr(s, "buy_volume", 0) or 0),
+                "sell_price": float(getattr(s, "sell_price", 0.0) or 0.0),
+                "sell_volume": int(getattr(s, "sell_volume", 0) or 0),
+                "yesterday_volume": int(getattr(s, "yesterday_volume", 0) or 0),
+            })
+        return rows
+
+    async def get_contract_info(self, symbol: str) -> dict:
+        """取得合約規格（漲跌停、參考價、到期日等），下單前檢查價格範圍用。"""
+        contract = await self._get_contract(symbol)
+        if not contract:
+            return {}
+
+        fields = (
+            "code", "symbol", "name", "category", "exchange", "unit",
+            "delivery_month", "delivery_date", "underlying_kind",
+            "limit_up", "limit_down", "reference", "update_date",
+        )
+        info = {"symbol_id": symbol}
+        for f in fields:
+            v = getattr(contract, f, None)
+            if v is None:
+                continue
+            info[f] = v if isinstance(v, (int, float, str)) else str(v)
+        return info
+
+    async def get_api_usage(self) -> dict:
+        """查詢今日 API 流量用量（api.usage）。
+
+        永豐金對每日下載量有上限，歷史資料抓太兇會被擋，
+        排查「突然抓不到資料」時先看這個。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            u = await loop.run_in_executor(None, self._api.usage)
+        except Exception:
+            logger.exception("[SinoPac] 查詢 API 用量失敗")
+            return {}
+
+        used = int(getattr(u, "bytes", 0) or 0)
+        limit = int(getattr(u, "limit_bytes", 0) or 0)
+        return {
+            "connections": int(getattr(u, "connections", 0) or 0),
+            "bytes": used,
+            "limit_bytes": limit,
+            "remaining_bytes": int(getattr(u, "remaining_bytes", 0) or 0),
+            "used_pct": round(used / limit * 100, 2) if limit else 0.0,
+        }
+
     def _lookup_contract(self, symbol: str):
         """單次查詢，不重試、不記 log（給 _get_contract 內部輪詢用）"""
         if symbol == "TAIEX":
@@ -844,17 +1096,26 @@ class SinoPacTradeAdapter(TradeAdapter):
         self._connected = False
         self._on_order_cb: Optional[Callable] = None
         self._on_fill_cb: Optional[Callable] = None
+        # broker_order_id → shioaji Trade 物件。
+        # cancel_order()/update_order() 只吃 Trade 物件本身（不是委託序號字串），
+        # 所以下單當下就得留著；重啟後要刪先前掛的單，則靠 _sync_trades() 從券商補回。
+        self._trades: dict[str, object] = {}
 
     async def connect(self, **credentials) -> bool:
         try:
-            import shioaji as sj
-
             self._api = _get_shared_api(credentials)
             await _wait_contracts_ready(("Future",))
 
             self._setup_callbacks()
             self._connected = True
-            logger.info("[SinoPac Trade] 登入成功 (含憑證)")
+            account = self._account()
+            logger.info(
+                "[SinoPac Trade] 登入成功%s，期貨帳戶=%s",
+                "（模擬環境，不會動到真實資金）" if _is_simulation() else "",
+                getattr(account, "account_id", None) or "無",
+            )
+            if account is None:
+                logger.warning("[SinoPac Trade] 找不到期貨帳戶（futopt_account），將無法下單")
             return True
         except Exception:
             logger.exception("[SinoPac Trade] 登入失敗")
@@ -863,9 +1124,23 @@ class SinoPacTradeAdapter(TradeAdapter):
     async def disconnect(self) -> None:
         _logout_shared_api()
         self._connected = False
+        self._trades.clear()
 
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def is_simulation(self) -> bool:
+        return _is_simulation()
+
+    def _account(self):
+        """目前使用的期貨/選擇權帳戶（登入後由 Shioaji 自動指定預設帳戶）。"""
+        return getattr(self._api, "futopt_account", None)
+
+    async def _run(self, fn, *args, **kwargs):
+        """Shioaji 的查詢/下單都是同步阻塞呼叫，丟到執行緒避免凍結 event loop。"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
     _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "TMF": "TMF"}
 
@@ -876,117 +1151,253 @@ class SinoPacTradeAdapter(TradeAdapter):
                 return symbol
         return None
 
+    # ── 委託/成交回報 ─────────────────────────────────
+
     def _setup_callbacks(self):
-        def on_order(stat, msg):
-            if not self._on_order_cb:
-                return
+        """設定回報 callback。
+
+        Shioaji 只有 set_order_callback 一個入口，委託回報與成交回報都從這裡進來，
+        靠第一個參數 stat（OrderState）區分：
+          FuturesOrder / StockOrder → 委託狀態變更
+          FuturesDeal  / StockDeal  → 成交明細
+        （這版 shioaji 沒有 set_deal_callback，之前掛在那上面的成交回報等於沒接上。）
+        """
+        def on_event(stat, msg):
+            state = _enum_str(stat)
             try:
-                from core.models import Order, OrderStatus, Direction, OrderType
-                order_dict = msg.get('order', {})
-                status_dict = msg.get('status', {})
-                contract_dict = msg.get('contract', {})
-                
-                broker_id = order_dict.get('id', '')
-                code = contract_dict.get('code', '')
-                symbol = self._code_to_symbol(code) or code
-                
-                direction = Direction.BUY if order_dict.get('action') == 'Buy' else Direction.SELL
-                qty = order_dict.get('quantity', 0)
-                price = order_dict.get('price', 0.0)
-                
-                status = OrderStatus.SUBMITTED
-                cancel_qty = status_dict.get('cancel_quantity', 0)
-                if cancel_qty > 0:
-                    status = OrderStatus.CANCELLED
-                elif status_dict.get('order_quantity', 0) == 0:
-                    status = OrderStatus.FILLED
-                
-                o = Order(
-                    id=broker_id,
-                    broker_order_id=broker_id,
-                    symbol=symbol,
-                    direction=direction,
-                    order_type=OrderType.LIMIT,
-                    price=price,
-                    qty=qty,
-                    status=status,
-                )
-                o.filled_qty = status_dict.get('deal_quantity', 0)
-                self._on_order_cb(o)
-            except Exception as e:
-                logger.error(f"[SinoPac Trade] on_order error: {e}")
+                if state.endswith("Deal"):
+                    self._handle_deal(msg or {})
+                else:
+                    self._handle_order(msg or {})
+            except Exception:
+                logger.exception("[SinoPac Trade] 處理回報失敗 stat=%s msg=%s", state, msg)
 
-        def on_deal(stat, msg):
-            if not self._on_fill_cb:
-                return
-            try:
-                from datetime import datetime
-                from core.models import Fill, Direction
-                # trade_id 官方文件標註「同 FuturesOrder 的 id」，即委託序號本身；
-                # ordno 前 5 碼為委託序號、後 3 碼為成交序號，可視為此筆成交的唯一 ID。
-                trade_id = msg.get('trade_id', '')
-                ordno = msg.get('ordno', '')
-                action = msg.get('action', '')
-                code = msg.get('code', '')
-                price = msg.get('price', 0.0)
-                qty = msg.get('quantity', 0)
-                ts = msg.get('ts')
+        self._api.set_order_callback(on_event)
 
-                symbol = self._code_to_symbol(code) or code
-                direction = Direction.BUY if action == 'Buy' else Direction.SELL
+    @staticmethod
+    def _resolve_status(raw, qty: int, deal_qty: int, cancel_qty: int) -> OrderStatus:
+        """優先採用券商回報的 status 字串，沒有時才用數量推斷。"""
+        mapped = _SHIOAJI_STATUS_MAP.get(_enum_str(raw))
+        if mapped is not None:
+            return mapped
+        if cancel_qty > 0:
+            return OrderStatus.CANCELLED
+        if qty and deal_qty >= qty:
+            return OrderStatus.FILLED
+        if deal_qty > 0:
+            return OrderStatus.PARTIAL
+        return OrderStatus.SUBMITTED
 
-                f = Fill(
-                    order_id=trade_id,
-                    symbol=symbol,
-                    direction=direction,
-                    price=price,
-                    qty=qty,
-                    fee=0.0,
-                    timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
-                    broker_fill_id=ordno,
-                )
-                self._on_fill_cb(f)
-            except Exception as e:
-                logger.error(f"[SinoPac Trade] on_deal error: {e}")
+    def _handle_order(self, msg: dict) -> None:
+        """委託狀態回報（下單成功/失敗、刪改單結果）"""
+        if not self._on_order_cb:
+            return
 
-        self._api.set_order_callback(on_order)
-        # Note: In some versions of Shioaji, deal callback might be set differently or not exist.
-        # usually set_order_callback handles both, or there is set_deal_callback.
-        if hasattr(self._api, "set_deal_callback"):
-            self._api.set_deal_callback(on_deal)
+        order_dict = msg.get("order", {}) or {}
+        status_dict = msg.get("status", {}) or {}
+        contract_dict = msg.get("contract", {}) or {}
+        operation = msg.get("operation", {}) or {}
 
-    async def place_order(self, symbol, direction, order_type, qty, price=0.0) -> str:
+        broker_id = str(order_dict.get("id", "") or status_dict.get("id", "") or "")
+        code = str(contract_dict.get("code", "") or "")
+        symbol = self._code_to_symbol(code) or code
+
+        qty = int(order_dict.get("quantity", 0) or 0)
+        deal_qty = int(status_dict.get("deal_quantity", 0) or 0)
+        cancel_qty = int(status_dict.get("cancel_quantity", 0) or 0)
+        price_type = _enum_str(order_dict.get("price_type"))
+
+        status = self._resolve_status(status_dict.get("status"), qty, deal_qty, cancel_qty)
+
+        # op_code "00" 才是成功；其餘代表委託/刪改單被券商退回，op_msg 有原因
+        op_code = str(operation.get("op_code", "") or "")
+        if op_code and op_code != "00":
+            status = OrderStatus.REJECTED
+            logger.warning(
+                "[SinoPac Trade] 委託遭拒 %s (%s): %s",
+                broker_id, op_code, operation.get("op_msg", ""),
+            )
+
+        o = Order(
+            id=broker_id,
+            broker_order_id=broker_id,
+            symbol=symbol,
+            direction=Direction.BUY if _enum_str(order_dict.get("action")) == "Buy" else Direction.SELL,
+            # MKP（範圍市價）跟 MKT 一樣不指定價格，都歸為市價單
+            order_type=OrderType.MARKET if price_type in ("MKT", "MKP") else OrderType.LIMIT,
+            price=float(order_dict.get("price", 0.0) or 0.0),
+            qty=qty,
+            status=status,
+        )
+        o.filled_qty = deal_qty
+        self._on_order_cb(o)
+
+    def _handle_deal(self, msg: dict) -> None:
+        """成交回報"""
+        if not self._on_fill_cb:
+            return
+
+        # trade_id 官方文件標註「同 FuturesOrder 的 id」，即委託序號本身；
+        # ordno 前 5 碼為委託序號、後 3 碼為成交序號，可視為此筆成交的唯一 ID。
+        trade_id = str(msg.get("trade_id", "") or "")
+        ordno = str(msg.get("ordno", "") or "")
+        code = str(msg.get("code", "") or "")
+        ts = msg.get("ts")
+
+        f = Fill(
+            order_id=trade_id,
+            symbol=self._code_to_symbol(code) or code,
+            direction=Direction.BUY if _enum_str(msg.get("action")) == "Buy" else Direction.SELL,
+            price=float(msg.get("price", 0.0) or 0.0),
+            qty=int(msg.get("quantity", 0) or 0),
+            fee=0.0,  # 成交回報不含手續費，需另外查 list_profit_loss
+            timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
+            broker_fill_id=ordno,
+        )
+        self._on_fill_cb(f)
+
+    # ── 下單 / 刪改單 ─────────────────────────────────
+
+    async def place_order(
+        self, symbol, direction, order_type, qty, price=0.0,
+        octype: str = "auto", time_in_force: str = "ROD",
+    ) -> str:
+        """送出期貨委託，回傳委託序號（失敗回空字串）。
+
+        octype        新倉/平倉別，預設 auto 交給券商依庫存自動判斷
+        time_in_force ROD 當日有效 / IOC 立即成交否則取消 / FOK 全部成交否則取消
+        """
         import shioaji as sj
+
+        if self._api is None:
+            logger.error("[SinoPac Trade] 未連線，無法下單")
+            return ""
 
         contract = await self._get_contract(symbol)
         if not contract:
             return ""
 
-        action = sj.Action.Buy if direction == Direction.BUY else sj.Action.Sell
-        price_type = sj.FuturesPriceType.MKT if order_type == OrderType.MARKET else sj.FuturesPriceType.LMT
+        account = self._account()
+        if account is None:
+            logger.error("[SinoPac Trade] 沒有可用的期貨帳戶，無法下單")
+            return ""
+
+        # 觸價單由 TradeModule 在本地監控，觸發後才以市價送出，正常不會走到這裡；
+        # 真的收到就當市價單處理，避免被誤送成 price=0 的限價單。
+        if order_type == OrderType.LIMIT:
+            price_type = sj.FuturesPriceType.LMT
+        else:
+            price_type = sj.FuturesPriceType.MKT
+            price = 0
+
+        octype_enum = {
+            "auto": sj.FuturesOCType.Auto,
+            "new": sj.FuturesOCType.New,
+            "cover": sj.FuturesOCType.Cover,
+            "daytrade": sj.FuturesOCType.DayTrade,
+        }.get(str(octype).lower(), sj.FuturesOCType.Auto)
+
+        tif_enum = {
+            "ROD": sj.OrderType.ROD,
+            "IOC": sj.OrderType.IOC,
+            "FOK": sj.OrderType.FOK,
+        }.get(str(time_in_force).upper(), sj.OrderType.ROD)
+
         order_lot = sj.FuturesOrder(
-            action=action,
+            action=sj.Action.Buy if direction == Direction.BUY else sj.Action.Sell,
             price=price,
             quantity=qty,
             price_type=price_type,
-            order_type=sj.OrderType.ROD,
-            account=self._api.futopt_account,
+            order_type=tif_enum,
+            octype=octype_enum,
+            account=account,
         )
-        trade_obj = self._api.place_order(contract, order_lot)
-        return trade_obj.order.id if trade_obj else ""
+
+        try:
+            trade_obj = await self._run(self._api.place_order, contract, order_lot)
+        except Exception:
+            logger.exception("[SinoPac Trade] 下單失敗 %s %s x%s @%s", symbol, direction, qty, price)
+            return ""
+
+        broker_id = str(getattr(getattr(trade_obj, "order", None), "id", "") or "")
+        if broker_id:
+            self._trades[broker_id] = trade_obj
+        logger.info(
+            "[SinoPac Trade] 委託送出%s %s %s %s x%s @%s → %s",
+            "（模擬）" if _is_simulation() else "",
+            symbol, direction.value, _enum_str(price_type), qty, price, broker_id or "(無序號)",
+        )
+        return broker_id
+
+    async def _sync_trades(self) -> list:
+        """跟券商同步今日委託，順便重建 broker_order_id → Trade 對照表。"""
+        if self._api is None:
+            return []
+        try:
+            def _fetch():
+                self._api.update_status(self._account())
+                return self._api.list_trades()
+
+            trades = await self._run(_fetch)
+        except Exception:
+            logger.exception("[SinoPac Trade] 同步委託狀態失敗")
+            return []
+
+        if not isinstance(trades, list):
+            return []
+
+        for t in trades:
+            oid = str(getattr(getattr(t, "order", None), "id", "") or "")
+            if oid:
+                self._trades[oid] = t
+        return trades
+
+    async def _find_trade(self, broker_order_id: str):
+        """取得 Shioaji Trade 物件；本地沒有就跟券商同步一次再找。"""
+        trade = self._trades.get(broker_order_id)
+        if trade is not None:
+            return trade
+        await self._sync_trades()
+        return self._trades.get(broker_order_id)
 
     async def cancel_order(self, broker_order_id: str) -> bool:
+        trade = await self._find_trade(broker_order_id)
+        if trade is None:
+            logger.warning("[SinoPac Trade] 找不到委託 %s，無法刪單", broker_order_id)
+            return False
         try:
-            self._api.cancel_order(broker_order_id)
+            await self._run(self._api.cancel_order, trade)
+            logger.info("[SinoPac Trade] 刪單送出: %s", broker_order_id)
             return True
         except Exception:
+            logger.exception("[SinoPac Trade] 刪單失敗: %s", broker_order_id)
             return False
 
     async def modify_order(self, broker_order_id, new_price=0, new_qty=0) -> bool:
+        """改價/改量。
+
+        期交所規則：改量只能減量，改價只對限價單有效，兩者不能同時改，
+        因此這裡一次只送一種（有給新價就改價，否則改量）。
+        """
+        trade = await self._find_trade(broker_order_id)
+        if trade is None:
+            logger.warning("[SinoPac Trade] 找不到委託 %s，無法改單", broker_order_id)
+            return False
+
+        if new_price:
+            kwargs = {"price": new_price}
+        elif new_qty:
+            kwargs = {"qty": new_qty}
+        else:
+            logger.warning("[SinoPac Trade] 改單未指定新價格或新數量: %s", broker_order_id)
+            return False
+
         try:
-            self._api.update_order(broker_order_id, price=new_price, qty=new_qty)
+            await self._run(lambda: self._api.update_order(trade, **kwargs))
+            logger.info("[SinoPac Trade] 改單送出: %s %s", broker_order_id, kwargs)
             return True
         except Exception:
+            logger.exception("[SinoPac Trade] 改單失敗: %s", broker_order_id)
             return False
 
     def set_on_order_update(self, callback):
@@ -995,50 +1406,100 @@ class SinoPacTradeAdapter(TradeAdapter):
     def set_on_fill(self, callback):
         self._on_fill_cb = callback
 
+    # ── 查詢：倉位 / 委託 / 成交 ───────────────────────
+
     async def get_positions(self) -> list[Position]:
+        """查詢未平倉部位。
+
+        symbol 一律轉回系統代碼（TXFH6 → TX），跟成交回報的口徑一致，
+        Position._get_point_value() 也才查得到正確的每點價值。
+        """
         try:
-            positions = self._api.list_positions(self._api.futopt_account)
-            return [
-                Position(
-                    symbol=p.code,
-                    side=PositionSide.LONG if p.direction == "Buy" else PositionSide.SHORT,
-                    qty=p.quantity,
-                    avg_price=p.price,
-                )
-                for p in positions
-            ]
+            positions = await self._run(self._api.list_positions, self._account())
         except Exception:
+            logger.exception("[SinoPac Trade] 查詢倉位失敗")
             return []
 
+        result: list[Position] = []
+        for p in positions or []:
+            code = str(getattr(p, "code", "") or "")
+            result.append(Position(
+                symbol=self._code_to_symbol(code) or code,
+                side=PositionSide.LONG if _enum_str(getattr(p, "direction", "")) == "Buy" else PositionSide.SHORT,
+                qty=int(getattr(p, "quantity", 0) or 0),
+                avg_price=float(getattr(p, "price", 0.0) or 0.0),
+                current_price=float(getattr(p, "last_price", 0.0) or 0.0),
+            ))
+        return result
+
+    def _trade_to_order(self, trade) -> Optional[Order]:
+        """Shioaji Trade → 系統 Order"""
+        order = getattr(trade, "order", None)
+        status = getattr(trade, "status", None)
+        if order is None or status is None:
+            return None
+
+        code = str(getattr(getattr(trade, "contract", None), "code", "") or "")
+        qty = int(getattr(order, "quantity", 0) or 0)
+        deal_qty = int(getattr(status, "deal_quantity", 0) or 0)
+        cancel_qty = int(getattr(status, "cancel_quantity", 0) or 0)
+        broker_id = str(getattr(order, "id", "") or getattr(status, "id", "") or "")
+        price_type = _enum_str(getattr(order, "price_type", ""))
+
+        o = Order(
+            id=broker_id,
+            broker_order_id=broker_id,
+            symbol=self._code_to_symbol(code) or code,
+            direction=Direction.BUY if _enum_str(getattr(order, "action", "")) == "Buy" else Direction.SELL,
+            order_type=OrderType.MARKET if price_type in ("MKT", "MKP") else OrderType.LIMIT,
+            price=float(getattr(order, "price", 0.0) or 0.0),
+            qty=qty,
+            status=self._resolve_status(getattr(status, "status", None), qty, deal_qty, cancel_qty),
+        )
+        o.filled_qty = deal_qty
+
+        deals = getattr(status, "deals", None) or []
+        filled = sum(int(getattr(d, "quantity", 0) or 0) for d in deals)
+        if filled:
+            amount = sum(
+                float(getattr(d, "price", 0.0) or 0.0) * int(getattr(d, "quantity", 0) or 0)
+                for d in deals
+            )
+            o.avg_fill_price = amount / filled
+        return o
+
     async def get_open_orders(self) -> list[Order]:
-        # TODO: 實作
-        return []
+        """查詢尚未成交（還可刪改）的委託。"""
+        orders: list[Order] = []
+        for trade in await self._sync_trades():
+            try:
+                o = self._trade_to_order(trade)
+            except Exception:
+                logger.exception("[SinoPac Trade] 解析委託失敗: %s", trade)
+                continue
+            if o is not None and o.is_active:
+                orders.append(o)
+        return orders
 
     async def get_fills_today(self) -> list[Fill]:
         """查詢今日成交明細（含連線前已成交的部分）"""
-        try:
-            self._api.update_status(self._api.futopt_account)
-            trades = self._api.list_trades()
-        except Exception:
-            logger.exception("[SinoPac Trade] get_fills_today 查詢失敗")
-            return []
-
         fills: list[Fill] = []
-        for trade in trades:
-            deals = getattr(trade.status, "deals", None) or []
+        for trade in await self._sync_trades():
+            deals = getattr(getattr(trade, "status", None), "deals", None) or []
             if not deals:
                 continue
-            code = trade.contract.code
+            code = str(getattr(getattr(trade, "contract", None), "code", "") or "")
             symbol = self._code_to_symbol(code) or code
-            direction = Direction.BUY if trade.order.action == "Buy" else Direction.SELL
+            order = getattr(trade, "order", None)
+            direction = Direction.BUY if _enum_str(getattr(order, "action", "")) == "Buy" else Direction.SELL
             for deal in deals:
                 ts = getattr(deal, "ts", None)
                 fills.append(Fill(
-                    order_id=trade.order.id,
+                    order_id=str(getattr(order, "id", "") or ""),
                     symbol=symbol,
                     direction=direction,
-                    price=deal.price,
-                    qty=deal.quantity,
+                    price=float(getattr(deal, "price", 0.0) or 0.0),
+                    qty=int(getattr(deal, "quantity", 0) or 0),
                     fee=0.0,
                     timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
                     broker_fill_id=str(getattr(deal, "seq", "")),
@@ -1047,27 +1508,128 @@ class SinoPacTradeAdapter(TradeAdapter):
         fills.sort(key=lambda f: f.timestamp, reverse=True)
         return fills
 
-    async def get_profit_loss_today(self) -> list[dict]:
-        """查詢今日已實現損益（list_profit_loss，只涵蓋已平倉的部位）"""
+    # ── 查詢：帳務 ────────────────────────────────────
+
+    async def list_accounts(self) -> list[dict]:
+        """列出登入後可用的所有帳戶（證券/期貨）。"""
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            records = self._api.list_profit_loss(self._api.futopt_account, today, today)
+            accounts = await self._run(self._api.list_accounts)
         except Exception:
-            logger.exception("[SinoPac Trade] get_profit_loss_today 查詢失敗")
+            logger.exception("[SinoPac Trade] 查詢帳戶清單失敗")
+            return []
+
+        current = getattr(self._account(), "account_id", None)
+        rows = []
+        for a in accounts or []:
+            account_id = str(getattr(a, "account_id", "") or "")
+            rows.append({
+                "account_id": account_id,
+                "account_type": _enum_str(getattr(a, "account_type", "")),
+                "broker_id": str(getattr(a, "broker_id", "") or ""),
+                "person_id": str(getattr(a, "person_id", "") or ""),
+                "username": str(getattr(a, "username", "") or ""),
+                "signed": bool(getattr(a, "signed", False)),
+                "is_default": bool(account_id and account_id == current),
+            })
+        return rows
+
+    async def get_account_balance(self) -> dict:
+        """查詢證券交割帳戶餘額（期貨保證金請看 get_margin）。"""
+        try:
+            b = await self._run(self._api.account_balance)
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢帳戶餘額失敗")
+            return {}
+        if isinstance(b, list):
+            b = b[0] if b else None
+        return _obj_to_dict(b)
+
+    async def get_margin(self) -> dict:
+        """查詢期貨保證金專戶（權益數、可用餘額、原始/維持保證金、風險指標…）。
+
+        模擬環境一樣查得到，是驗證模擬下單有沒有真的成交最直接的地方。
+        """
+        try:
+            m = await self._run(self._api.margin, self._account())
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢保證金失敗")
+            return {}
+        return _obj_to_dict(m)
+
+    async def get_position_detail(self, detail_id: int = 0) -> list[dict]:
+        """查詢倉位的逐筆進場明細（detail_id=0 → 全部）。"""
+        try:
+            details = await self._run(self._api.list_position_detail, self._account(), detail_id)
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢倉位明細失敗")
+            return []
+        return [_obj_to_dict(d) for d in details or []]
+
+    async def get_settlements(self) -> list[dict]:
+        """查詢交割款（T / T+1 / T+2）"""
+        try:
+            settlements = await self._run(self._api.list_settlements, self._account())
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢交割款失敗")
+            return []
+        if not isinstance(settlements, list):
+            settlements = [settlements] if settlements else []
+        return [_obj_to_dict(s) for s in settlements]
+
+    async def get_profit_loss(self, begin_date: str = "", end_date: str = "") -> list[dict]:
+        """查詢區間已實現損益（只涵蓋已平倉的部位）。日期空字串 = 今日。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        begin = begin_date or today
+        end = end_date or begin
+
+        try:
+            records = await self._run(self._api.list_profit_loss, self._account(), begin, end)
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢已實現損益失敗 %s~%s", begin, end)
             return []
 
         result = []
-        for r in records:
-            code = getattr(r, "code", "")
+        for r in records or []:
+            code = str(getattr(r, "code", "") or "")
             result.append({
+                "id": getattr(r, "id", 0),               # 供 get_profit_loss_detail 查明細
+                "date": _json_safe(getattr(r, "date", "")),
                 "symbol": self._code_to_symbol(code) or code,
+                "code": code,
+                "direction": _enum_str(getattr(r, "direction", "")),
                 "quantity": getattr(r, "quantity", 0),
+                "entry_price": getattr(r, "entry_price", 0.0),
                 "cover_price": getattr(r, "cover_price", 0.0),
                 "pnl": getattr(r, "pnl", 0.0) or 0.0,
                 "fee": getattr(r, "fee", 0) or 0,
                 "tax": getattr(r, "tax", 0) or 0,
             })
         return result
+
+    async def get_profit_loss_today(self) -> list[dict]:
+        """查詢今日已實現損益（用於比對成交明細補上平倉損益）"""
+        return await self.get_profit_loss()
+
+    async def get_profit_loss_summary(self, begin_date: str = "", end_date: str = "") -> list[dict]:
+        """查詢區間已實現損益彙總（依商品彙總，不逐筆列出）。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        begin = begin_date or today
+        end = end_date or begin
+        try:
+            records = await self._run(self._api.list_profit_loss_summary, self._account(), begin, end)
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢損益彙總失敗 %s~%s", begin, end)
+            return []
+        return [_obj_to_dict(r) for r in records or []]
+
+    async def get_profit_loss_detail(self, detail_id: int = 0) -> list[dict]:
+        """查詢單筆已實現損益的進場明細（detail_id 來自 get_profit_loss 的 id）。"""
+        try:
+            records = await self._run(self._api.list_profit_loss_detail, self._account(), detail_id)
+        except Exception:
+            logger.exception("[SinoPac Trade] 查詢損益明細失敗 id=%s", detail_id)
+            return []
+        return [_obj_to_dict(r) for r in records or []]
 
     def _lookup_contract(self, symbol):
         SYMBOL_MAP = {"TX": "TXF", "MTX": "MXF", "TMF": "TMF"}
