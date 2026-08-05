@@ -114,6 +114,21 @@ def _is_simulation() -> bool:
 # 兩條路徑拿到的型別不一樣：一邊是字串，一邊是 enum 物件。
 # 這幾個 helper 把兩邊統一成 Python 基本型別，順便讓結果可以直接丟進 WebSocket。
 
+def _order_error_text(exc: Exception) -> str:
+    """把 Shioaji 的下單錯誤壓成一句能顯示在畫面上的話。
+
+    原始訊息長這樣（前半段是沒有閱讀價值的 request id）：
+        place_order: request #P2P/v:.../PYAPI/.../ code: 406, detail: Please sign F00200018xxxxx first.
+    有用的只有 detail 後面那段，其中「Please sign ... first」是最常見的一種——
+    帳號沒簽 API 下單同意書，程式端怎麼重送都不會成功。
+    """
+    text = str(exc).strip() or exc.__class__.__name__
+    detail = text.split("detail:", 1)[1].strip() if "detail:" in text else text
+    if "sign" in detail.lower():
+        return f"帳號尚未簽署 API 下單同意書，請至永豐官網完成簽署後重新登入（{detail}）"
+    return detail[:200]
+
+
 def _enum_str(v) -> str:
     """取 enum 的字串值；本來就是字串就原樣回傳。"""
     if v is None:
@@ -1262,23 +1277,28 @@ class SinoPacTradeAdapter(TradeAdapter):
         self, symbol, direction, order_type, qty, price=0.0,
         octype: str = "auto", time_in_force: str = "ROD",
     ) -> str:
-        """送出期貨委託，回傳委託序號（失敗回空字串）。
+        """送出期貨委託，回傳委託序號（失敗回空字串，原因寫在 self.last_error）。
 
         octype        新倉/平倉別，預設 auto 交給券商依庫存自動判斷
         time_in_force ROD 當日有效 / IOC 立即成交否則取消 / FOK 全部成交否則取消
         """
         import shioaji as sj
 
+        self.last_error = ""
+
         if self._api is None:
+            self.last_error = "交易券商未連線"
             logger.error("[SinoPac Trade] 未連線，無法下單")
             return ""
 
         contract = await self._get_contract(symbol)
         if not contract:
+            self.last_error = f"找不到合約: {symbol}"
             return ""
 
         account = self._account()
         if account is None:
+            self.last_error = "沒有可用的期貨帳戶"
             logger.error("[SinoPac Trade] 沒有可用的期貨帳戶，無法下單")
             return ""
 
@@ -1315,17 +1335,34 @@ class SinoPacTradeAdapter(TradeAdapter):
 
         try:
             trade_obj = await self._run(self._api.place_order, contract, order_lot)
-        except Exception:
-            logger.exception("[SinoPac Trade] 下單失敗 %s %s x%s @%s", symbol, direction, qty, price)
+        except Exception as e:
+            self.last_error = _order_error_text(e)
+            logger.error(
+                "[SinoPac Trade] 下單失敗 %s %s x%s @%s: %s",
+                symbol, direction.value, qty, price, self.last_error,
+            )
+            logger.debug("[SinoPac Trade] 下單失敗原始錯誤", exc_info=True)
             return ""
 
         broker_id = str(getattr(getattr(trade_obj, "order", None), "id", "") or "")
-        if broker_id:
-            self._trades[broker_id] = trade_obj
+        if not broker_id:
+            # 沒有委託序號的單既不能刪也不能追蹤成交，當成功記下來只會變成畫面上的幽靈單。
+            # 一律當失敗回報，請使用者去券商端確認實際狀態。
+            status = getattr(trade_obj, "status", None)
+            detail = f"{_enum_str(getattr(status, 'status', ''))} {getattr(status, 'msg', '') or ''}".strip()
+            self.last_error = f"券商未回委託序號，請至券商端確認委託是否成立（{detail}）" if detail \
+                else "券商未回委託序號，請至券商端確認委託是否成立"
+            logger.error(
+                "[SinoPac Trade] 下單未取得委託序號 %s %s x%s @%s: %s",
+                symbol, direction.value, qty, price, detail or "(無狀態)",
+            )
+            return ""
+
+        self._trades[broker_id] = trade_obj
         logger.info(
             "[SinoPac Trade] 委託送出%s %s %s %s x%s @%s → %s",
             "（模擬）" if _is_simulation() else "",
-            symbol, direction.value, _enum_str(price_type), qty, price, broker_id or "(無序號)",
+            symbol, direction.value, _enum_str(price_type), qty, price, broker_id,
         )
         return broker_id
 
@@ -1354,6 +1391,10 @@ class SinoPacTradeAdapter(TradeAdapter):
 
     async def _find_trade(self, broker_order_id: str):
         """取得 Shioaji Trade 物件；本地沒有就跟券商同步一次再找。"""
+        if not broker_order_id:
+            # 空序號永遠找不到，卻會讓每一次呼叫都多打一輪 update_status + list_trades。
+            # 前端「全刪」一次就是幾十發券商 API，白白吃掉流量配額。
+            return None
         trade = self._trades.get(broker_order_id)
         if trade is not None:
             return trade

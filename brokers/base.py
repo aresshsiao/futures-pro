@@ -157,6 +157,11 @@ class TradeAdapter(ABC):
 
     name: str = "base"
 
+    # 最近一次下單/刪改單失敗的原因（券商回的原始訊息）。
+    # place_order 失敗只回空字串，光看回傳值無從得知是保證金不足、帳號未簽署還是斷線，
+    # 上層要拿得到原因才能顯示在畫面上，不然使用者只會看到一句沒資訊量的「下單失敗」。
+    last_error: str = ""
+
     # ── 連線管理 ──────────────────────────────────────
 
     @abstractmethod
@@ -187,6 +192,9 @@ class TradeAdapter(ABC):
         """
         送出委託。回傳券商端的委託序號 (broker_order_id)。
         price=0 表示市價單。
+
+        **失敗一律回空字串**，並把原因寫進 self.last_error（上層以「空字串 = 沒送出去」
+        判定委託被拒絕，所以拿不到委託序號時絕不能回傳假的成功）。
 
         octype:        "auto" | "new"（新倉）| "cover"（平倉）| "daytrade"（當沖）
         time_in_force: "ROD"（當日有效）| "IOC"（立即成交否則取消）| "FOK"（全部成交否則取消）

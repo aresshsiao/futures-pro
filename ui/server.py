@@ -139,6 +139,7 @@ def setup_event_bridge():
             "status": order.status.value,
             "is_active": order.is_active,
             "source": order.source,
+            "reject_reason": order.reject_reason,
         })
 
     async def forward_fill(fill: Fill):

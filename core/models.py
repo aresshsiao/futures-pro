@@ -134,6 +134,7 @@ class Order:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     source: str = "manual"          # "manual" | "script:{name}" | "stop"
+    reject_reason: str = ""         # 被拒絕的原因（券商回的訊息），給前端顯示用
 
     @property
     def remaining_qty(self) -> int:

@@ -98,7 +98,8 @@ async def handle_place_order(ws, data: dict):
     if order:
         rejected = order.status == OrderStatus.REJECTED
         if rejected:
-            message = "下單失敗" if trade.is_connected else "交易券商未連線"
+            # 券商回的原因（保證金不足、帳號未簽署…）比一句「下單失敗」有用太多
+            message = order.reject_reason or ("下單失敗" if trade.is_connected else "交易券商未連線")
         else:
             message = f"{'買' if order.direction == Direction.BUY else '賣'} {order.symbol} x{order.qty}"
         await ws.send_json({

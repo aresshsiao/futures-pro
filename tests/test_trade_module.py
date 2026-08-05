@@ -30,10 +30,11 @@ class FakeAdapter:
     name = "測試券商"
     is_simulation = False
 
-    def __init__(self, connected=True, positions=None, broker_id="B001"):
+    def __init__(self, connected=True, positions=None, broker_id="B001", last_error=""):
         self._connected = connected
         self._positions = positions or []
-        self._broker_id = broker_id
+        self._broker_id = broker_id      # 空字串 = 券商沒收下這張單
+        self.last_error = last_error     # 券商拒絕的原因
         self.placed = []
         self.cancelled = []
 
@@ -261,6 +262,66 @@ class TestOrders:
         assert ok is True
         assert order.status is OrderStatus.CANCELLED
         assert adapter.cancelled == ["B001"]
+
+    def test_order_rejected_when_broker_returns_no_id(self):
+        """券商沒收下（例如帳號未簽署）時回空序號，這時標成「已送出」是最危險的謊——
+        使用者會以為單掛出去了。必須是 REJECTED，而且帶上券商講的原因。"""
+        async def scenario():
+            t = TradeModule()
+            a = FakeAdapter(broker_id="", last_error="帳號尚未簽署 API 下單同意書")
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.BUY, OrderType.LIMIT, 1, price=18000)
+            return order, t
+
+        order, trade = asyncio.run(scenario())
+        assert order.status is OrderStatus.REJECTED
+        assert order.reject_reason == "帳號尚未簽署 API 下單同意書"
+        # 不能進委託簿：券商端沒有這張單，留著只會變成刪不掉的幽靈單
+        assert trade.active_orders == []
+
+    def test_rejected_order_is_not_broadcast_as_placed(self):
+        async def scenario():
+            EventBus().set_main_loop(asyncio.get_running_loop())
+            placed = []
+            EventBus().on("order_placed", lambda o: placed.append(o))
+            t = TradeModule()
+            await connect(t, FakeAdapter(broker_id=""))
+            await t.place_order("TX", Direction.BUY, OrderType.LIMIT, 1, price=18000)
+            await asyncio.sleep(0)
+            return placed
+
+        assert asyncio.run(scenario()) == []
+
+    def test_cancel_without_broker_id_does_not_call_broker(self):
+        """沒有券商序號的單刪不掉，每按一次全刪就對券商多打一發註定失敗的請求。
+        直接本地作廢即可。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.BUY, OrderType.LIMIT, 1, price=18000)
+            order.broker_order_id = ""            # 模擬序號遺失
+            ok = await t.cancel_order(order.id)
+            return ok, order, a
+
+        ok, order, adapter = asyncio.run(scenario())
+        assert ok is True
+        assert order.status is OrderStatus.CANCELLED
+        assert adapter.cancelled == []            # 沒有打到券商
+
+    def test_stop_order_rejection_keeps_reason(self):
+        async def scenario():
+            t = TradeModule()
+            a = FakeAdapter(broker_id="", last_error="保證金不足")
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.BUY, OrderType.STOP_BUY, 1, price=18100)
+            t._check_stop_orders(tick("TX", 18100))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return order
+
+        order = asyncio.run(scenario())
+        assert order.status is OrderStatus.REJECTED
+        assert order.reject_reason == "保證金不足"
 
     def test_active_orders_excludes_finished(self):
         async def scenario():

@@ -1094,13 +1094,18 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         </div>
       </div>
 
-      {/* Hint / 最近一次下單結果 */}
-      <div style={{
-        padding: "2px 8px", fontSize: 8, textAlign: "center",
-        color: feedback ? (feedback.ok ? COLORS.up : COLORS.danger) : COLORS.textMuted,
-        borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, letterSpacing: 0.5,
-        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-      }}>{feedback ? feedback.text : "左鍵下單 ／ 右鍵刪單"}</div>
+      {/* Hint / 最近一次下單結果（失敗原因可能是券商回的長句，換行完整顯示，別讓它被切掉） */}
+      <div
+        title={feedback ? feedback.text : ""}
+        style={{
+          padding: "2px 8px", fontSize: feedback && !feedback.ok ? 10 : 8, textAlign: "center",
+          color: feedback ? (feedback.ok ? COLORS.up : COLORS.danger) : COLORS.textMuted,
+          background: feedback && !feedback.ok ? "rgba(239,68,68,0.12)" : "transparent",
+          borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, letterSpacing: 0.5,
+          lineHeight: 1.35,
+          whiteSpace: feedback && !feedback.ok ? "normal" : "nowrap",
+          overflow: "hidden", textOverflow: "ellipsis",
+        }}>{feedback ? feedback.text : "左鍵下單 ／ 右鍵刪單"}</div>
 
       {/* Price Ladder with sticky header */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden", position: "relative" }} onContextMenu={e => e.preventDefault()}>
@@ -2688,7 +2693,8 @@ export default function TradingPlatform() {
   const showFeedback = useCallback((ok, text) => {
     setOrderFeedback({ ok, text });
     clearTimeout(feedbackTimerRef.current);
-    feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 4000);
+    // 失敗訊息留久一點——被拒絕的原因（未簽署、保證金不足…）是使用者唯一的線索
+    feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), ok ? 4000 : 12000);
   }, []);
 
   useEffect(() => addHandler("order_result", (msg) => {

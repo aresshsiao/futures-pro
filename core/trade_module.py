@@ -123,11 +123,30 @@ class TradeModule:
         if not self.is_connected:
             logger.error("[TradeModule] 未連線，無法下單")
             order.status = OrderStatus.REJECTED
+            order.reject_reason = "交易券商未連線"
             return order
 
-        broker_id = await self._adapter.place_order(
-            symbol, direction, order_type, qty, price, octype, time_in_force
-        )
+        try:
+            broker_id = await self._adapter.place_order(
+                symbol, direction, order_type, qty, price, octype, time_in_force
+            )
+        except Exception as e:
+            logger.exception("[TradeModule] 下單擲出例外: %s %s", direction.value, symbol)
+            broker_id, order.reject_reason = "", str(e)
+
+        # 沒拿到委託序號 = 券商沒收下這張單（保證金不足、帳號未簽署、被風控擋下…）。
+        # 這裡若照樣標成 SUBMITTED，畫面會顯示一張券商端根本不存在的委託：
+        # 使用者以為單已掛出（最危險），而且那張單刪不掉——沒有序號可以送刪單，
+        # 每按一次「全刪」就對券商多打一輪查詢。所以一律當拒絕，也不入委託簿。
+        if not broker_id:
+            order.status = OrderStatus.REJECTED
+            order.reject_reason = order.reject_reason or getattr(self._adapter, "last_error", "") or "券商拒絕委託"
+            logger.error(
+                f"[TradeModule] 委託遭拒: {direction.value} {symbol} "
+                f"{order_type.value} @{price} x{qty} — {order.reject_reason}"
+            )
+            return order
+
         order.broker_order_id = broker_id
         order.status = OrderStatus.SUBMITTED
         self._orders[order_id] = order
@@ -152,6 +171,19 @@ class TradeModule:
             return True
 
         # 已送出的單：請求券商取消
+        if not self.is_connected:
+            logger.error("[TradeModule] 未連線，無法刪單: %s", order_id)
+            return False
+
+        if not order.broker_order_id:
+            # 沒有券商序號的單，券商端不存在，送刪單只是白打一發 API。
+            # 直接本地作廢，免得它永遠賴在畫面上、每次「全刪」都再打一次。
+            logger.warning("[TradeModule] 委託 %s 無券商序號，本地作廢（券商端無此單）", order_id)
+            order.status = OrderStatus.CANCELLED
+            order.updated_at = datetime.now()
+            await self.bus.emit("order_cancelled", order)
+            return True
+
         ok = await self._adapter.cancel_order(order.broker_order_id)
         if ok:
             order.status = OrderStatus.CANCELLED
@@ -202,6 +234,7 @@ class TradeModule:
         if not self.is_connected:
             logger.error("[TradeModule] 未連線，觸價單無法送出: %s", order.id)
             order.status = OrderStatus.REJECTED
+            order.reject_reason = "交易券商未連線"
             await self.bus.emit("order_update", order)
             return
 
@@ -210,9 +243,9 @@ class TradeModule:
             broker_id = await self._adapter.place_order(
                 order.symbol, direction, OrderType.MARKET, order.remaining_qty, 0.0,
             )
-        except Exception:
+        except Exception as e:
             logger.exception("[TradeModule] 觸價單送出失敗: %s", order.id)
-            broker_id = ""
+            broker_id, order.reject_reason = "", str(e)
 
         if broker_id:
             order.broker_order_id = broker_id
@@ -220,7 +253,10 @@ class TradeModule:
             logger.info("[TradeModule] 觸價單已送出市價單: %s → %s", order.id, broker_id)
         else:
             order.status = OrderStatus.REJECTED
-            logger.error("[TradeModule] 觸價單送出失敗: %s", order.id)
+            order.reject_reason = (
+                order.reject_reason or getattr(self._adapter, "last_error", "") or "券商拒絕委託"
+            )
+            logger.error("[TradeModule] 觸價單送出失敗: %s — %s", order.id, order.reject_reason)
 
         order.updated_at = datetime.now()
         await self.bus.emit("order_update", order)
@@ -236,6 +272,10 @@ class TradeModule:
 
     def _on_order_update(self, broker_order: Order) -> None:
         """券商回報: 委託狀態變更"""
+        if not broker_order.broker_order_id:
+            # 沒序號就比對不出是哪一張；硬比會對上序號同樣是空的觸價單（本地單），
+            # 把還在等待觸發的單改成別人的狀態。
+            return
         for order in self._orders.values():
             if order.broker_order_id == broker_order.broker_order_id:
                 order.status = broker_order.status
@@ -329,7 +369,7 @@ class TradeModule:
             self.bus.emit_sync("order_update", order)
             return True
 
-        if not self.is_connected:
+        if not self.is_connected or not order.broker_order_id:
             return False
 
         ok = await self._adapter.modify_order(order.broker_order_id, new_price, new_qty)
