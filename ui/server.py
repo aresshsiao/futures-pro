@@ -128,13 +128,17 @@ def setup_event_bridge():
         await manager.broadcast({
             "type": "order_update",
             "id": order.id,
+            "broker_order_id": order.broker_order_id,
             "symbol": order.symbol,
             "direction": order.direction.value,
             "order_type": order.order_type.value,
             "price": order.price,
             "qty": order.qty,
             "filled_qty": order.filled_qty,
+            "avg_fill_price": order.avg_fill_price,
             "status": order.status.value,
+            "is_active": order.is_active,
+            "source": order.source,
         })
 
     async def forward_fill(fill: Fill):
@@ -149,16 +153,24 @@ def setup_event_bridge():
             "timestamp": fill.timestamp.isoformat(),
         })
 
-    async def forward_position(pos: Position | None):
-        if pos:
-            await manager.broadcast({
-                "type": "position_update",
-                "symbol": pos.symbol,
-                "side": pos.side.value,
-                "qty": pos.qty,
-                "avg_price": pos.avg_price,
-                "unrealized_pnl": pos.unrealized_pnl,
-            })
+    async def forward_positions(positions: list[Position]):
+        """整份倉位清單廣播 — 與 get_positions 的回應同格式，前端共用同一個 handler。"""
+        await manager.broadcast({
+            "type": "positions",
+            "data": [
+                {
+                    "symbol": p.symbol,
+                    "side": p.side.value,
+                    "qty": p.qty,
+                    "avg_price": p.avg_price,
+                    "current_price": p.current_price,
+                    "unrealized_pnl": p.unrealized_pnl,
+                    # 前端拿即時報價自己算浮動損益用（避免每個 tick 都推倉位）
+                    "point_value": p.point_value,
+                }
+                for p in positions or []
+            ],
+        })
 
     async def forward_indicator_output(output: IndicatorOutput):
         await manager.broadcast({
@@ -185,7 +197,7 @@ def setup_event_bridge():
     bus.on("order_update", forward_order)
     bus.on("order_cancelled", forward_order)
     bus.on("order_filled", forward_fill)
-    bus.on("position_update", forward_position)
+    bus.on("positions_update", forward_positions)
     bus.on("option_chain_update", forward_option_chain)
 
     async def forward_quote_con(name):

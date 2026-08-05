@@ -35,11 +35,31 @@ const generateKlineData = (count = 120) => {
   return data;
 };
 
-const MOCK_POSITIONS = [
-  { id: 1, symbol: "TX", name: "台指期", direction: "多", qty: 2, avgPrice: 17420, currentPrice: 17535, pnl: 23000, pnlPercent: 1.32 },
-  { id: 2, symbol: "MTX", name: "小台指", direction: "空", qty: 5, avgPrice: 17560, currentPrice: 17535, pnl: 6250, pnlPercent: 0.71 },
-  { id: 3, symbol: "TE", name: "電子期", direction: "多", qty: 1, avgPrice: 920, currentPrice: 915, pnl: -5000, pnlPercent: -0.54 },
-];
+// 倉位浮動損益：後端只在倉位異動時推整份清單，中間用即時報價自己算，
+// 才不用為了讓損益跳動而每個 tick 都推一次倉位。
+function positionPnl(p, lastPrice) {
+  const cur = lastPrice || p.current_price || p.avg_price;
+  if (!cur || !p.avg_price) return 0;
+  const dir = p.side === "long" ? 1 : -1;
+  return dir * (cur - p.avg_price) * p.qty * (p.point_value || 200);
+}
+
+// 報酬率以「進場價 × 口數」為分母，跟損益同基準
+function positionPnlPct(p, lastPrice) {
+  const cur = lastPrice || p.current_price || p.avg_price;
+  if (!cur || !p.avg_price) return 0;
+  const dir = p.side === "long" ? 1 : -1;
+  return dir * (cur - p.avg_price) / p.avg_price * 100;
+}
+
+const ORDER_TYPE_LABEL = {
+  limit: "限價", market: "市價", stop_buy: "觸價買", stop_sell: "觸價賣",
+};
+
+const ORDER_STATUS_LABEL = {
+  pending: "傳送中", submitted: "委託中", partial: "部分成交",
+  filled: "已成交", cancelled: "已刪單", rejected: "已拒絕", stop_wait: "等待觸發",
+};
 
 const BROKER_LIST = [
   { id: "sinopac", name: "永豐金", status: "connected", type: "both" },
@@ -946,12 +966,28 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 }
 
 // ─── Order Panel (Lightning Order — Price Ladder) ───────────────────
-function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, myBuyOrders, setMyBuyOrders, mySellOrders, setMySellOrders, stopBuys, setStopBuys, stopSells, setStopSells }) {
+function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, orders, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback }) {
   const [qty, setQty] = useState(1);
   const [centerOnPrice, setCenterOnPrice] = useState(true); // 成交置中 toggle
   const scrollRef = useRef(null);
 
   const tickSize = 1;
+
+  // 價格階梯上的委託標記直接由真實委託單推導（不再是本地暫存的假單），
+  // 同一價位可能有多張單，顯示未成交口數的加總。
+  const { buyMap, sellMap, stopBuyMap, stopSellMap } = useMemo(() => {
+    const buy = {}, sell = {}, stopBuy = {}, stopSell = {};
+    for (const o of orders) {
+      if (o.symbol !== activeSymbol) continue;
+      const remaining = (o.qty || 0) - (o.filled_qty || 0);
+      if (remaining <= 0) continue;
+      const target = o.order_type === "stop_buy" ? stopBuy
+        : o.order_type === "stop_sell" ? stopSell
+          : o.direction === "buy" ? buy : sell;
+      target[o.price] = (target[o.price] || 0) + remaining;
+    }
+    return { buyMap: buy, sellMap: sell, stopBuyMap: stopBuy, stopSellMap: stopSell };
+  }, [orders, activeSymbol]);
 
   const ladderData = useMemo(() => {
     const rows = [];
@@ -997,13 +1033,13 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
     }
   }, [centerOnPrice, currentPrice]);
 
-  // Unified handler: left-click = place order, right-click = delete order
-  const handleCell = (setter, price, e) => {
+  // 左鍵下單 / 右鍵刪掉該價位的同類委託（kind: buy | sell | stop_buy | stop_sell）
+  const handleCell = (kind, price, e) => {
     if (e) e.preventDefault();
     if (e && e.type === "contextmenu") {
-      setter(o => { const n = { ...o }; delete n[price]; return n; });
+      cancelOrdersAt(kind, price);
     } else {
-      setter(o => ({ ...o, [price]: (o[price] || 0) + qty }));
+      placeOrder(kind, price, qty);
     }
   };
 
@@ -1058,11 +1094,13 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         </div>
       </div>
 
-      {/* Hint */}
+      {/* Hint / 最近一次下單結果 */}
       <div style={{
-        padding: "2px 8px", fontSize: 8, color: COLORS.textMuted, textAlign: "center",
-        borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, letterSpacing: 0.5
-      }}>左鍵下單 ／ 右鍵刪單</div>
+        padding: "2px 8px", fontSize: 8, textAlign: "center",
+        color: feedback ? (feedback.ok ? COLORS.up : COLORS.danger) : COLORS.textMuted,
+        borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, letterSpacing: 0.5,
+        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+      }}>{feedback ? feedback.text : "左鍵下單 ／ 右鍵刪單"}</div>
 
       {/* Price Ladder with sticky header */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden", position: "relative" }} onContextMenu={e => e.preventDefault()}>
@@ -1084,10 +1122,10 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         {ladderData.map((row) => {
           const isBidZone = row.price < currentPrice;
           const isAskZone = row.price > currentPrice;
-          const hasBuyOrder = myBuyOrders[row.price];
-          const hasSellOrder = mySellOrders[row.price];
-          const hasStopBuy = stopBuys[row.price];
-          const hasStopSell = stopSells[row.price];
+          const hasBuyOrder = buyMap[row.price];
+          const hasSellOrder = sellMap[row.price];
+          const hasStopBuy = stopBuyMap[row.price];
+          const hasStopSell = stopSellMap[row.price];
 
           const cellBase = {
             height: "100%", cursor: "pointer", position: "relative",
@@ -1108,8 +1146,8 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
             }}>
               {/* 觸買 */}
               <div style={cellBase}
-                onClick={e => handleCell(setStopBuys, row.price, e)}
-                onContextMenu={e => handleCell(setStopBuys, row.price, e)}
+                onClick={e => handleCell("stop_buy", row.price, e)}
+                onContextMenu={e => handleCell("stop_buy", row.price, e)}
                 title="左鍵:觸價買 / 右鍵:刪除">
                 {hasStopBuy && <span style={tagStyle(COLORS.warn, "rgba(245,158,11,0.18)")}>{hasStopBuy}</span>}
               </div>
@@ -1119,8 +1157,8 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
                 ...cellBase, justifyContent: "flex-end", paddingRight: 4,
                 background: isBidZone ? `linear-gradient(to right, transparent ${100 - (row.bidQty / maxQty) * 100}%, rgba(239,147,147,0.2) 100%)` : "transparent",
               }}
-                onClick={e => handleCell(setMyBuyOrders, row.price, e)}
-                onContextMenu={e => handleCell(setMyBuyOrders, row.price, e)}
+                onClick={e => handleCell("buy", row.price, e)}
+                onContextMenu={e => handleCell("buy", row.price, e)}
                 title="左鍵:買進 / 右鍵:刪除">
                 {hasBuyOrder && <span style={tagStyle(COLORS.up, "rgba(34,197,94,0.15)")}>{hasBuyOrder}</span>}
               </div>
@@ -1150,16 +1188,16 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
                 ...cellBase, justifyContent: "flex-start", paddingLeft: 4,
                 background: isAskZone ? `linear-gradient(to left, transparent ${100 - (row.askQty / maxQty) * 100}%, rgba(147,176,239,0.2) 100%)` : "transparent",
               }}
-                onClick={e => handleCell(setMySellOrders, row.price, e)}
-                onContextMenu={e => handleCell(setMySellOrders, row.price, e)}
+                onClick={e => handleCell("sell", row.price, e)}
+                onContextMenu={e => handleCell("sell", row.price, e)}
                 title="左鍵:賣出 / 右鍵:刪除">
                 {hasSellOrder && <span style={tagStyle(COLORS.down, "rgba(239,68,68,0.15)")}>{hasSellOrder}</span>}
               </div>
 
               {/* 觸賣 */}
               <div style={cellBase}
-                onClick={e => handleCell(setStopSells, row.price, e)}
-                onContextMenu={e => handleCell(setStopSells, row.price, e)}
+                onClick={e => handleCell("stop_sell", row.price, e)}
+                onContextMenu={e => handleCell("stop_sell", row.price, e)}
                 title="左鍵:觸價賣 / 右鍵:刪除">
                 {hasStopSell && <span style={tagStyle(COLORS.warn, "rgba(245,158,11,0.18)")}>{hasStopSell}</span>}
               </div>
@@ -1177,7 +1215,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       }}>
         <div style={{ textAlign: "left" }}>
           <span style={{ color: COLORS.up, fontWeight: 600 }}>
-            {Object.values(myBuyOrders).reduce((s, v) => s + v, 0) || "—"}
+            {Object.values(buyMap).reduce((s, v) => s + v, 0) || "—"}
           </span>
           <span style={{ marginLeft: 3 }}>買委</span>
         </div>
@@ -1202,7 +1240,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         <div style={{ textAlign: "right" }}>
           <span>賣委</span>
           <span style={{ marginLeft: 3, color: COLORS.down, fontWeight: 600 }}>
-            {Object.values(mySellOrders).reduce((s, v) => s + v, 0) || "—"}
+            {Object.values(sellMap).reduce((s, v) => s + v, 0) || "—"}
           </span>
         </div>
       </div>
@@ -1211,22 +1249,22 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       <div style={{
         display: "flex", gap: 4, padding: "5px 8px", borderTop: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
-        <button onClick={() => setMyBuyOrders({})} style={{
+        <button onClick={() => cancelOrdersByKind("buy")} style={{
           flex: 1, padding: "5px 0", fontSize: 10, fontWeight: 600,
           background: "rgba(34,197,94,0.08)", border: `1px solid rgba(34,197,94,0.25)`,
           color: COLORS.up, borderRadius: 3, cursor: "pointer"
         }}>買單全刪</button>
-        <button style={{
+        <button onClick={() => placeOrder("market_buy", 0, qty)} style={{
           padding: "5px 10px", fontSize: 10, fontWeight: 700,
           background: "linear-gradient(135deg, #16a34a, #22c55e)", border: "none",
           color: "#fff", borderRadius: 3, cursor: "pointer"
         }}>市買</button>
-        <button style={{
+        <button onClick={() => placeOrder("market_sell", 0, qty)} style={{
           padding: "5px 10px", fontSize: 10, fontWeight: 700,
           background: "linear-gradient(135deg, #dc2626, #ef4444)", border: "none",
           color: "#fff", borderRadius: 3, cursor: "pointer"
         }}>市賣</button>
-        <button onClick={() => setMySellOrders({})} style={{
+        <button onClick={() => cancelOrdersByKind("sell")} style={{
           flex: 1, padding: "5px 0", fontSize: 10, fontWeight: 600,
           background: "rgba(239,68,68,0.08)", border: `1px solid rgba(239,68,68,0.25)`,
           color: COLORS.down, borderRadius: 3, cursor: "pointer"
@@ -1237,12 +1275,12 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       <div style={{
         display: "flex", gap: 4, padding: "4px 8px", borderTop: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
-        <button onClick={() => setStopBuys({})} style={{
+        <button onClick={() => cancelOrdersByKind("stop_buy")} style={{
           flex: 1, padding: "4px 0", fontSize: 9, fontWeight: 600,
           background: "rgba(245,158,11,0.08)", border: `1px solid rgba(245,158,11,0.25)`,
           color: COLORS.warn, borderRadius: 3, cursor: "pointer"
         }}>觸買全刪</button>
-        <button onClick={() => setStopSells({})} style={{
+        <button onClick={() => cancelOrdersByKind("stop_sell")} style={{
           flex: 1, padding: "4px 0", fontSize: 9, fontWeight: 600,
           background: "rgba(245,158,11,0.08)", border: `1px solid rgba(245,158,11,0.25)`,
           color: COLORS.warn, borderRadius: 3, cursor: "pointer"
@@ -1254,16 +1292,26 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
 }
 
 // ─── Position & Orders Panel ─────────────────────────────────────────
-function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, setMyBuyOrders, setMySellOrders, setStopBuys, setStopSells }) {
+function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, closePosition }) {
   const [tab, setTab] = useState("positions");
-  const totalPnl = MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0);
 
-  const allOrders = [
-    ...Object.entries(myBuyOrders).map(([p, q]) => ({ price: +p, qty: q, type: "限價買", color: COLORS.up, setter: setMyBuyOrders })),
-    ...Object.entries(mySellOrders).map(([p, q]) => ({ price: +p, qty: q, type: "限價賣", color: COLORS.down, setter: setMySellOrders })),
-    ...Object.entries(stopBuys).map(([p, q]) => ({ price: +p, qty: q, type: "觸價買", color: COLORS.warn, setter: setStopBuys })),
-    ...Object.entries(stopSells).map(([p, q]) => ({ price: +p, qty: q, type: "觸價賣", color: COLORS.warn, setter: setStopSells })),
-  ].sort((a, b) => b.price - a.price);
+  const rows = positions.map(p => {
+    const last = latestPrices[p.symbol];
+    return { ...p, pnl: positionPnl(p, last), pnlPct: positionPnlPct(p, last), last: last || p.current_price };
+  });
+  const totalPnl = rows.reduce((s, p) => s + p.pnl, 0);
+
+  const orderColor = (o) => (
+    o.order_type === "stop_buy" || o.order_type === "stop_sell" ? COLORS.warn
+      : o.direction === "buy" ? COLORS.up : COLORS.down
+  );
+  const orderLabel = (o) => (
+    o.order_type === "stop_buy" || o.order_type === "stop_sell"
+      ? ORDER_TYPE_LABEL[o.order_type]
+      : `${ORDER_TYPE_LABEL[o.order_type] || o.order_type}${o.direction === "buy" ? "買" : "賣"}`
+  );
+
+  const allOrders = [...orders].sort((a, b) => b.price - a.price);
 
   const tabBtn = (id, label, count) => (
     <button key={id} onClick={() => setTab(id)} style={{
@@ -1282,14 +1330,10 @@ function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, s
     </button>
   );
 
-  const deleteOrder = (order) => {
-    order.setter(o => { const n = { ...o }; delete n[order.price]; return n; });
-  };
-
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{ display: "flex", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0 }}>
-        {tabBtn("positions", "倉位", MOCK_POSITIONS.length)}
+        {tabBtn("positions", "倉位", rows.length)}
         {tabBtn("orders", "委託", allOrders.length)}
       </div>
 
@@ -1302,32 +1346,45 @@ function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, s
                 總損益 {totalPnl >= 0 ? "+" : ""}{totalPnl.toLocaleString()}
               </span>
             </div>
-            <div style={{ padding: "0 6px 6px" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr style={{ color: COLORS.textMuted, fontSize: 9, borderBottom: `1px solid ${COLORS.border}`, position: "sticky", top: 34, background: COLORS.bgPanel, zIndex: 9 }}>
-                    {["商品", "方向", "口", "均價", "現價", "損益"].map(h => (
-                      <th key={h} style={{ padding: "3px 4px", textAlign: "right", fontWeight: 500 }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {MOCK_POSITIONS.map(p => (
-                    <tr key={p.id} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
-                      <td style={{ padding: "4px", textAlign: "left", color: COLORS.text, fontWeight: 600 }}>{p.symbol}</td>
-                      <td style={{ padding: "4px", textAlign: "right", color: p.direction === "多" ? COLORS.up : COLORS.down, fontWeight: 600 }}>{p.direction}</td>
-                      <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{p.qty}</td>
-                      <td style={{ padding: "4px", textAlign: "right", color: COLORS.textDim, fontFamily: "monospace" }}>{p.avgPrice}</td>
-                      <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{p.currentPrice}</td>
-                      <td style={{ padding: "4px", textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: p.pnl >= 0 ? COLORS.up : COLORS.down }}>
-                        {p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString()}
-                        <span style={{ fontSize: 9, marginLeft: 2, opacity: 0.7 }}>({p.pnlPercent}%)</span>
-                      </td>
+            {rows.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 20, color: COLORS.textMuted, fontSize: 12 }}>無庫存部位</div>
+            ) : (
+              <div style={{ padding: "0 6px 6px" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ color: COLORS.textMuted, fontSize: 9, borderBottom: `1px solid ${COLORS.border}`, position: "sticky", top: 34, background: COLORS.bgPanel, zIndex: 9 }}>
+                      {["商品", "方向", "口", "均價", "現價", "損益", ""].map((h, i) => (
+                        <th key={i} style={{ padding: "3px 4px", textAlign: "right", fontWeight: 500 }}>{h}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {rows.map(p => (
+                      <tr key={p.symbol} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
+                        <td style={{ padding: "4px", textAlign: "left", color: COLORS.text, fontWeight: 600 }}>{p.symbol}</td>
+                        <td style={{ padding: "4px", textAlign: "right", color: p.side === "long" ? COLORS.up : COLORS.down, fontWeight: 600 }}>
+                          {p.side === "long" ? "多" : "空"}
+                        </td>
+                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{p.qty}</td>
+                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.textDim, fontFamily: "monospace" }}>{p.avg_price}</td>
+                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{p.last || "—"}</td>
+                        <td style={{ padding: "4px", textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: p.pnl >= 0 ? COLORS.up : COLORS.down }}>
+                          {p.pnl >= 0 ? "+" : ""}{Math.round(p.pnl).toLocaleString()}
+                          <span style={{ fontSize: 9, marginLeft: 2, opacity: 0.7 }}>({p.pnlPct.toFixed(2)}%)</span>
+                        </td>
+                        <td style={{ padding: "4px", textAlign: "center" }}>
+                          <button onClick={() => closePosition(p)} title="以市價平掉此部位" style={{
+                            padding: "1px 6px", border: `1px solid rgba(245,158,11,0.35)`,
+                            background: "rgba(245,158,11,0.1)", color: COLORS.warn,
+                            fontSize: 9, borderRadius: 3, cursor: "pointer", whiteSpace: "nowrap"
+                          }}>平倉</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
         )}
 
@@ -1340,19 +1397,27 @@ function PositionOrdersPanel({ myBuyOrders, mySellOrders, stopBuys, stopSells, s
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ color: COLORS.textMuted, fontSize: 9, borderBottom: `1px solid ${COLORS.border}`, position: "sticky", top: 0, background: COLORS.bgPanel, zIndex: 10 }}>
-                      {["類型", "價格", "口數", ""].map((h, i) => (
+                      {["商品", "類型", "價格", "口數", "狀態", ""].map((h, i) => (
                         <th key={i} style={{ padding: "3px 4px", textAlign: h === "" ? "center" : "right", fontWeight: 500 }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {allOrders.map((o, i) => (
-                      <tr key={i} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
-                        <td style={{ padding: "4px", textAlign: "left", color: o.color, fontWeight: 600, fontSize: 10 }}>{o.type}</td>
-                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{o.price}</td>
-                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{o.qty}</td>
+                    {allOrders.map(o => (
+                      <tr key={o.id} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
+                        <td style={{ padding: "4px", textAlign: "left", color: COLORS.text, fontSize: 10 }}>{o.symbol}</td>
+                        <td style={{ padding: "4px", textAlign: "left", color: orderColor(o), fontWeight: 600, fontSize: 10 }}>{orderLabel(o)}</td>
+                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>
+                          {o.order_type === "market" ? "市價" : o.price}
+                        </td>
+                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>
+                          {o.filled_qty > 0 ? `${o.filled_qty}/${o.qty}` : o.qty}
+                        </td>
+                        <td style={{ padding: "4px", textAlign: "right", color: COLORS.textDim, fontSize: 9 }}>
+                          {ORDER_STATUS_LABEL[o.status] || o.status}
+                        </td>
                         <td style={{ padding: "4px", textAlign: "center" }}>
-                          <button onClick={() => deleteOrder(o)} style={{
+                          <button onClick={() => cancelOrder(o)} style={{
                             padding: "1px 8px", border: `1px solid rgba(239,68,68,0.3)`,
                             background: "rgba(239,68,68,0.08)", color: COLORS.danger,
                             fontSize: 9, borderRadius: 3, cursor: "pointer"
@@ -2457,7 +2522,6 @@ export default function TradingPlatform() {
   const wsUrl = authed ? `ws://${window.location.host}/ws?token=${getToken()}` : null;
   const { send, addHandler, connected } = useWebSocket(wsUrl);
 
-  if (!authed) return <LoginPage onLogin={() => setAuthed(true)} />;
   const [showBrokerConfig, setShowBrokerConfig] = useState(false);
   const [showTQuote, setShowTQuote] = useState(true);
   const [brokerConfig, setBrokerConfig] = useState({
@@ -2552,11 +2616,106 @@ export default function TradingPlatform() {
   }, [addHandler]);
   const [clock, setClock] = useState("");
 
-  // Lifted order state (shared between OrderPanel and PositionOrdersPanel)
-  const [myBuyOrders, setMyBuyOrders] = useState({});
-  const [mySellOrders, setMySellOrders] = useState({});
-  const [stopBuys, setStopBuys] = useState({});
-  const [stopSells, setStopSells] = useState({});
+  // 倉位與委託：唯一真相在後端，這裡只放後端推過來的快照
+  // （OrderPanel 的價格階梯與 PositionOrdersPanel 都從這兩份資料推導）
+  const [positions, setPositions] = useState([]);
+  const [orders, setOrders] = useState([]);
+
+  // 連線後拉一次現況；之後倉位由 positions 廣播整份覆蓋、委託由 order_update 逐筆更新
+  useEffect(() => {
+    if (!connected) return;
+    send("get_positions");
+    send("get_orders");
+  }, [connected, send]);
+
+  useEffect(() => addHandler("positions", (msg) => setPositions(msg.data || [])), [addHandler]);
+  useEffect(() => addHandler("orders", (msg) => setOrders(msg.data || [])), [addHandler]);
+
+  useEffect(() => addHandler("order_update", (msg) => {
+    setOrders(prev => {
+      const rest = prev.filter(o => o.id !== msg.id);
+      // 已成交/已刪單/被拒絕的單就不再是「有效委託」，直接移出列表
+      return msg.is_active === false ? rest : [...rest, msg];
+    });
+  }), [addHandler]);
+
+  // 成交會改變庫存，跟後端要一次最新倉位（後端也會主動推，這裡是保險）
+  useEffect(() => addHandler("fill", () => send("get_positions")), [addHandler, send]);
+
+  const placeOrder = useCallback((kind, price, qty) => {
+    if (!qty || qty < 1) return;
+    const KINDS = {
+      buy: { direction: "buy", order_type: "limit" },
+      sell: { direction: "sell", order_type: "limit" },
+      stop_buy: { direction: "buy", order_type: "stop_buy" },
+      stop_sell: { direction: "sell", order_type: "stop_sell" },
+      market_buy: { direction: "buy", order_type: "market" },
+      market_sell: { direction: "sell", order_type: "market" },
+    };
+    const spec = KINDS[kind];
+    if (!spec) return;
+    send("place_order", {
+      symbol: orderSymbol, qty, price: spec.order_type === "market" ? 0 : price, ...spec,
+    });
+  }, [send, orderSymbol]);
+
+  const cancelOrder = useCallback((order) => {
+    send("cancel_order", { order_id: order.id });
+  }, [send]);
+
+  // 委託單的「種類」— 觸價單看 order_type，一般單看買賣方向
+  const orderKind = useCallback((o) => (
+    o.order_type === "stop_buy" || o.order_type === "stop_sell"
+      ? o.order_type
+      : o.direction === "buy" ? "buy" : "sell"
+  ), []);
+
+  const cancelOrdersAt = useCallback((kind, price) => {
+    orders
+      .filter(o => o.symbol === orderSymbol && o.price === price && orderKind(o) === kind)
+      .forEach(o => send("cancel_order", { order_id: o.id }));
+  }, [orders, orderSymbol, orderKind, send]);
+
+  const cancelOrdersByKind = useCallback((kind) => {
+    orders
+      .filter(o => o.symbol === orderSymbol && orderKind(o) === kind)
+      .forEach(o => send("cancel_order", { order_id: o.id }));
+  }, [orders, orderSymbol, orderKind, send]);
+
+  // 下單/刪單結果（失敗時最需要看到原因，例如券商未連線）
+  const [orderFeedback, setOrderFeedback] = useState(null);
+  const feedbackTimerRef = useRef(null);
+  const showFeedback = useCallback((ok, text) => {
+    setOrderFeedback({ ok, text });
+    clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 4000);
+  }, []);
+
+  useEffect(() => addHandler("order_result", (msg) => {
+    showFeedback(msg.success !== false, msg.message || (msg.success === false ? "下單失敗" : "委託送出"));
+  }), [addHandler, showFeedback]);
+
+  useEffect(() => addHandler("cancel_result", (msg) => {
+    if (!msg.success) showFeedback(false, "刪單失敗");
+  }), [addHandler, showFeedback]);
+
+  const totalPositionPnl = useMemo(
+    () => positions.reduce((s, p) => s + positionPnl(p, latestPrices[p.symbol]), 0),
+    [positions, latestPrices],
+  );
+
+  // 平倉：以市價反向送出同口數（多單賣出、空單買進）
+  const closePosition = useCallback((p) => {
+    if (!p.qty) return;
+    send("place_order", {
+      symbol: p.symbol,
+      direction: p.side === "long" ? "sell" : "buy",
+      order_type: "market",
+      qty: p.qty,
+      price: 0,
+      octype: "cover",
+    });
+  }, [send]);
   const [timeframe, setTimeframe] = useState(() => localStorage.getItem("chart_timeframe") ?? "15");
   const [visibleCount, setVisibleCount] = useState(() => { const v = parseInt(localStorage.getItem("chart_visibleCount") ?? "60"); return isNaN(v) ? 60 : v; });
   const [offset, setOffset] = useState(() => { const v = parseInt(localStorage.getItem("chart_offset") ?? "0"); return isNaN(v) ? 0 : v; });
@@ -2827,6 +2986,12 @@ export default function TradingPlatform() {
     overflow: "hidden",
   };
 
+  // 未登入才顯示登入頁。這個判斷必須放在所有 hook 之後——
+  // 提前 return 會讓後面的 hook 在登入前後執行數量不同，
+  // React 會直接拋 "Rendered more hooks than during the previous render"。
+  // 未登入時 wsUrl 為 null，useWebSocket 不會連線，其餘 effect 也都有 connected 防護。
+  if (!authed) return <LoginPage onLogin={() => setAuthed(true)} />;
+
   return (
     <div style={{
       width: "100%", height: "100vh", display: "flex", flexDirection: "column",
@@ -3025,26 +3190,33 @@ export default function TradingPlatform() {
                 <span style={{ fontSize: 9, color: COLORS.textMuted, letterSpacing: 1, fontWeight: 600, textTransform: "uppercase" }}>庫存倉位</span>
                 <span style={{
                   fontSize: 11, fontFamily: "monospace", fontWeight: 700,
-                  color: MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0) >= 0 ? COLORS.up : COLORS.down
+                  color: totalPositionPnl >= 0 ? COLORS.up : COLORS.down
                 }}>
-                  {MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0) >= 0 ? "+" : ""}
-                  {MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0).toLocaleString()}
+                  {totalPositionPnl >= 0 ? "+" : ""}{Math.round(totalPositionPnl).toLocaleString()}
                 </span>
               </div>
               <div style={{ display: "flex", gap: 6, padding: "3px 8px", fontSize: 10, overflowX: "auto" }}>
-                {MOCK_POSITIONS.map(p => (
-                  <div key={p.id} style={{
-                    display: "flex", alignItems: "center", gap: 6, padding: "2px 8px",
-                    background: COLORS.bgCard, borderRadius: 4, whiteSpace: "nowrap",
-                    border: `1px solid ${p.pnl >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`
-                  }}>
-                    <span style={{ color: COLORS.text, fontWeight: 600 }}>{p.symbol}</span>
-                    <span style={{ color: p.direction === "多" ? COLORS.up : COLORS.down, fontWeight: 600 }}>{p.direction}{p.qty}</span>
-                    <span style={{ color: p.pnl >= 0 ? COLORS.up : COLORS.down, fontFamily: "monospace", fontWeight: 600 }}>
-                      {p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString()}
-                    </span>
-                  </div>
-                ))}
+                {positions.length === 0 && (
+                  <span style={{ color: COLORS.textMuted, padding: "2px 4px" }}>無庫存部位</span>
+                )}
+                {positions.map(p => {
+                  const pnl = positionPnl(p, latestPrices[p.symbol]);
+                  return (
+                    <div key={p.symbol} style={{
+                      display: "flex", alignItems: "center", gap: 6, padding: "2px 8px",
+                      background: COLORS.bgCard, borderRadius: 4, whiteSpace: "nowrap",
+                      border: `1px solid ${pnl >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`
+                    }}>
+                      <span style={{ color: COLORS.text, fontWeight: 600 }}>{p.symbol}</span>
+                      <span style={{ color: p.side === "long" ? COLORS.up : COLORS.down, fontWeight: 600 }}>
+                        {p.side === "long" ? "多" : "空"}{p.qty}
+                      </span>
+                      <span style={{ color: pnl >= 0 ? COLORS.up : COLORS.down, fontFamily: "monospace", fontWeight: 600 }}>
+                        {pnl >= 0 ? "+" : ""}{Math.round(pnl).toLocaleString()}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -3056,19 +3228,21 @@ export default function TradingPlatform() {
                 currentPrice={latestPrices[orderSymbol] ?? 17535}
                 orderbook={orderbooks[orderSymbol]}
                 activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
-                myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
-                mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
-                stopBuys={stopBuys} setStopBuys={setStopBuys}
-                stopSells={stopSells} setStopSells={setStopSells}
+                orders={orders}
+                placeOrder={placeOrder}
+                cancelOrdersAt={cancelOrdersAt}
+                cancelOrdersByKind={cancelOrdersByKind}
+                feedback={orderFeedback}
               />
             </div>
             {/* 倉位/委託 - 20% */}
             <div style={{ ...panelStyle, flex: 2, minHeight: 0, display: "flex", flexDirection: "column" }}>
               <PositionOrdersPanel
-                myBuyOrders={myBuyOrders} setMyBuyOrders={setMyBuyOrders}
-                mySellOrders={mySellOrders} setMySellOrders={setMySellOrders}
-                stopBuys={stopBuys} setStopBuys={setStopBuys}
-                stopSells={stopSells} setStopSells={setStopSells}
+                positions={positions}
+                orders={orders}
+                latestPrices={latestPrices}
+                cancelOrder={cancelOrder}
+                closePosition={closePosition}
               />
             </div>
             {/* 成交明細 - 30% */}

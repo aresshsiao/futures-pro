@@ -14,7 +14,7 @@ from config import settings
 from core.event_bus import EventBus
 from core.quote_module import QuoteModule
 from core.trade_module import TradeModule
-from core.models import Direction, OrderType, Timeframe
+from core.models import Direction, OrderStatus, OrderType, Timeframe
 from scripts.engine import load_meta_from_file
 from data.database import Database
 from data.bar_builder import BarBuilder
@@ -96,12 +96,19 @@ async def handle_place_order(ws, data: dict):
         time_in_force=data.get("time_in_force", "ROD"),
     )
     if order:
+        rejected = order.status == OrderStatus.REJECTED
+        if rejected:
+            message = "下單失敗" if trade.is_connected else "交易券商未連線"
+        else:
+            message = f"{'買' if order.direction == Direction.BUY else '賣'} {order.symbol} x{order.qty}"
         await ws.send_json({
             "type": "order_result",
+            "success": not rejected,
             "order_id": order.id,
             "status": order.status.value,
             "broker_order_id": order.broker_order_id,
             "simulation": trade.is_simulation,
+            "message": message,
         })
 
 
@@ -173,6 +180,13 @@ async def handle_subscribe(ws, data: dict):
     await ws.send_json({"type": "subscribed", "symbol": symbol})
 
 
+# 前端圖表最多保留 3600 根 K 棒（見 trading-platform.jsx 的 slice(-3600)），
+# 而前端畫 indicator 是「把 series 尾端對齊 K 棒尾端」——series 比 K 棒短多少，
+# 左邊就有多少根棒畫不出線。所以歷史查詢與 script 重算都必須用同一個窗口，
+# 否則棒收完重算一次，水平線就會從左半邊消失。
+CHART_BAR_WINDOW = 3600
+
+
 async def handle_get_history(ws, data: dict):
     """前端: 取得歷史K線
     - 券商已連線 → 從 API 即時查詢
@@ -191,7 +205,7 @@ async def handle_get_history(ws, data: dict):
 
     # DB 優先策略：server 一直在跑，DB 已有最新資料，browser refresh 不需要重打 API
     # 只有 DB 完全沒有該商品資料時，才去打 SinoPac API（第一次載入或換商品）
-    db_limit = 999_999 if timeframe in ("日", "周", "月") else max(count, 3600)
+    db_limit = 999_999 if timeframe in ("日", "周", "月") else max(count, CHART_BAR_WINDOW)
     db_bars = db.get_bars(symbol, limit=db_limit)
 
     DB_SUFFICIENT = 200  # DB 至少要有這麼多 M1 才算有效（約 3 小時台指期資料）
@@ -406,8 +420,7 @@ def _aggregate_bars(bars, timeframe: str, limit: int) -> list[dict]:
 
 
 async def handle_get_positions(ws, data: dict):
-    """前端: 查詢倉位"""
-    positions = trade.positions
+    """前端: 查詢倉位（格式與 positions_update 廣播一致）"""
     await ws.send_json({
         "type": "positions",
         "data": [
@@ -418,30 +431,36 @@ async def handle_get_positions(ws, data: dict):
                 "avg_price": p.avg_price,
                 "current_price": p.current_price,
                 "unrealized_pnl": p.unrealized_pnl,
+                "point_value": p.point_value,
             }
-            for p in positions
+            for p in trade.positions
         ],
     })
 
 
+def _order_to_dict(o) -> dict:
+    return {
+        "id": o.id,
+        "broker_order_id": o.broker_order_id,
+        "symbol": o.symbol,
+        "direction": o.direction.value,
+        "order_type": o.order_type.value,
+        "price": o.price,
+        "qty": o.qty,
+        "filled_qty": o.filled_qty,
+        "avg_fill_price": o.avg_fill_price,
+        "status": o.status.value,
+        "is_active": o.is_active,
+        "source": o.source,
+        "created_at": o.created_at.isoformat(),
+    }
+
+
 async def handle_get_orders(ws, data: dict):
-    """前端: 查詢委託"""
-    orders = trade.active_orders
+    """前端: 查詢有效委託（含本地監控中的觸價單）"""
     await ws.send_json({
         "type": "orders",
-        "data": [
-            {
-                "id": o.id,
-                "symbol": o.symbol,
-                "direction": o.direction.value,
-                "order_type": o.order_type.value,
-                "price": o.price,
-                "qty": o.qty,
-                "filled_qty": o.filled_qty,
-                "status": o.status.value,
-            }
-            for o in orders
-        ],
+        "data": [_order_to_dict(o) for o in trade.active_orders],
     })
 
 
@@ -933,7 +952,7 @@ def on_bar_complete(bar):
 
     import pandas as pd
 
-    bars = db.get_bars(bar.symbol, limit=1800)
+    bars = db.get_bars(bar.symbol, limit=CHART_BAR_WINDOW)
     if len(bars) < 5:
         return
 
@@ -977,7 +996,7 @@ async def _script_timer_loop():
             if not due_metas:
                 continue
 
-            bars = db.get_bars(symbol, limit=1800)
+            bars = db.get_bars(symbol, limit=CHART_BAR_WINDOW)
             if len(bars) < 5:
                 continue
 

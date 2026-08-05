@@ -173,14 +173,21 @@ class Position:
 
     @property
     def unrealized_pnl(self) -> float:
+        if self.current_price <= 0:
+            return 0.0  # 還沒收到報價，避免用 0 當現價算出整筆倉位的假虧損
         multiplier = 1 if self.side == PositionSide.LONG else -1
-        point_value = self._get_point_value()
-        return multiplier * (self.current_price - self.avg_price) * self.qty * point_value
+        return multiplier * (self.current_price - self.avg_price) * self.qty * self.point_value
+
+    @property
+    def point_value(self) -> float:
+        """每點價值。前端要自己用即時報價算浮動損益，所以隨倉位一起送出去。"""
+        return self._get_point_value()
 
     def _get_point_value(self) -> float:
         """每點價值 (台指期=200, 小台指=50, 電子期=4000, 金融期=1000)"""
         POINT_VALUES = {
             "TX": 200, "MTX": 50, "TE": 4000, "TF": 1000,
+            "TMF": 10,  # 微型台指
             "TXO": 50,  # 台指選擇權
         }
         return POINT_VALUES.get(self.symbol, 200)

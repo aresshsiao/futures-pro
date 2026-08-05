@@ -5,6 +5,7 @@ core/trade_module.py — 交易模塊
 from __future__ import annotations
 import logging
 import uuid
+from datetime import datetime
 from typing import Optional
 
 from core.event_bus import EventBus
@@ -36,8 +37,11 @@ class TradeModule:
         self._positions: dict[str, Position] = {}  # symbol → Position
         self._fills: list[Fill] = []
 
-        # 監聽觸價單觸發事件
+        # 觸價單本地監控：tick 進來時檢查是否觸發，觸發後由 _execute_stop_order 送市價單
         self.bus.on("tick", self._check_stop_orders)
+        self.bus.on("stop_triggered", self._execute_stop_order)
+        # 倉位現價跟著 tick 走，浮動損益才不會停在建倉當下的數字
+        self.bus.on("tick", self._update_position_price)
 
     # ── Adapter 管理 ──────────────────────────────────
 
@@ -56,12 +60,12 @@ class TradeModule:
             adapter.set_on_order_update(self._on_order_update)
             adapter.set_on_fill(self._on_fill)
             logger.info(f"[TradeModule] 已連線: {adapter.name}")
-            # 同步倉位
-            positions = await adapter.get_positions()
-            for pos in positions:
-                self._positions[pos.symbol] = pos
+            # 同步倉位（整份取代，不是合併——券商端才是庫存的唯一真相，
+            # 保留上一次連線的殘留會變成畫面上平不掉的幽靈倉位）
+            self._positions = {p.symbol: p for p in await adapter.get_positions()}
             # 同步今日成交明細
             self._fills = await adapter.get_fills_today()
+            self._broadcast_positions()
             await self.bus.emit("trade_connected", adapter.name)
         return ok
 
@@ -175,12 +179,58 @@ class TradeModule:
                 triggered = True
 
             if triggered:
-                order.status = OrderStatus.FILLED  # 先標記，實際交由 async 處理
+                # 立刻脫離 STOP_WAITING，否則送單完成前的每一筆 tick 都會再觸發一次
+                order.status = OrderStatus.PENDING
+                order.updated_at = datetime.now()
                 logger.info(
                     f"[TradeModule] 觸價單觸發: {order.order_type.value} "
-                    f"{order.symbol} @{order.price}"
+                    f"{order.symbol} @{order.price} (市價 {tick.price})"
                 )
                 self.bus.emit_sync("stop_triggered", order)
+
+    async def _execute_stop_order(self, order: Order) -> None:
+        """觸價單觸發後，以市價送至券商。
+
+        觸價單從頭到尾只存在於本地（券商端沒有這張單），所以觸發時要真的補送一張
+        市價單出去；沒有這一步的話觸價單只會在畫面上消失，永遠不會成交。
+        """
+        if self._orders.get(order.id) is not order:
+            return  # 不是本模塊的單（EventBus 是全域的，別人的觸價單不該由這裡送出）
+        if order.status != OrderStatus.PENDING:
+            return  # 已被取消或重複觸發
+
+        if not self.is_connected:
+            logger.error("[TradeModule] 未連線，觸價單無法送出: %s", order.id)
+            order.status = OrderStatus.REJECTED
+            await self.bus.emit("order_update", order)
+            return
+
+        direction = Direction.BUY if order.order_type == OrderType.STOP_BUY else Direction.SELL
+        try:
+            broker_id = await self._adapter.place_order(
+                order.symbol, direction, OrderType.MARKET, order.remaining_qty, 0.0,
+            )
+        except Exception:
+            logger.exception("[TradeModule] 觸價單送出失敗: %s", order.id)
+            broker_id = ""
+
+        if broker_id:
+            order.broker_order_id = broker_id
+            order.status = OrderStatus.SUBMITTED
+            logger.info("[TradeModule] 觸價單已送出市價單: %s → %s", order.id, broker_id)
+        else:
+            order.status = OrderStatus.REJECTED
+            logger.error("[TradeModule] 觸價單送出失敗: %s", order.id)
+
+        order.updated_at = datetime.now()
+        await self.bus.emit("order_update", order)
+
+    def _update_position_price(self, tick) -> None:
+        """用即時報價更新倉位現價（不廣播——每個 tick 都推倉位會塞爆 WebSocket，
+        前端拿 point_value 自己用最新報價算浮動損益）。"""
+        pos = self._positions.get(tick.symbol)
+        if pos is not None:
+            pos.current_price = tick.price
 
     # ── 券商回報處理 ──────────────────────────────────
 
@@ -209,6 +259,9 @@ class TradeModule:
             side = PositionSide.LONG if fill.direction == Direction.BUY else PositionSide.SHORT
             self._positions[fill.symbol] = Position(
                 symbol=fill.symbol, side=side, qty=fill.qty, avg_price=fill.price,
+                # 先用成交價當現價，下一筆 tick 進來才會更新；
+                # 留 0 的話 unrealized_pnl 會算出整筆倉位的假虧損
+                current_price=fill.price,
             )
         else:
             is_same_side = (
@@ -229,10 +282,16 @@ class TradeModule:
                     pos.avg_price = fill.price
                 elif pos.qty == 0:
                     del self._positions[fill.symbol]
-                    self.bus.emit_sync("position_update", None)
-                    return
 
-        self.bus.emit_sync("position_update", self._positions.get(fill.symbol))
+        self._broadcast_positions()
+
+    def _broadcast_positions(self) -> None:
+        """推送完整倉位清單。
+
+        不能只推「有變動的那一筆」——倉位平掉時那筆會是 None，前端無從得知
+        該刪哪一檔；整份送出去前端直接覆蓋，狀態永遠一致。
+        """
+        self.bus.emit_sync("positions_update", self.positions)
 
     # ── 查詢 ──────────────────────────────────────────
 
@@ -296,7 +355,7 @@ class TradeModule:
         positions = await self._adapter.get_positions()
         self._positions = {p.symbol: p for p in positions}
         self._fills = await self._adapter.get_fills_today()
-        self.bus.emit_sync("position_update", None)
+        self._broadcast_positions()
 
     async def get_open_orders(self) -> list[Order]:
         """查詢券商端未成交委託（與本地 active_orders 不同：含本程式以外下的單）"""
