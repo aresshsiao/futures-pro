@@ -38,6 +38,7 @@ class TradeModule:
         self._positions: dict[str, Position] = {}  # symbol → Position
         self._fills: list[Fill] = []
         self._sync_handle = None                  # 待執行的倉位對帳（見 _schedule_position_sync）
+        self._refreshing = False                  # 是否已有一輪對帳在跑（避免連按同步造成並發查詢）
 
         # 觸價單本地監控：tick 進來時檢查是否觸發，觸發後由 _execute_stop_order 送市價單
         self.bus.on("tick", self._check_stop_orders)
@@ -295,8 +296,9 @@ class TradeModule:
             fill.direction.value, fill.symbol, fill.qty, fill.price, fill.order_id,
         )
         self._fills.append(fill)
-        self._apply_fill_to_order(fill)
+        # 先讓畫面看到這筆成交，再做帳務：帳務萬一出錯，不該連帶讓成交從畫面上消失
         self.bus.emit_sync("order_filled", fill)
+        self._apply_fill_to_order(fill)
         self._update_position(fill)
         # 本地推算完還是要跟券商核對一次：漏接一筆回報，倉位就會一路錯下去
         self._schedule_position_sync()
@@ -466,14 +468,34 @@ class TradeModule:
         """重新跟券商同步倉位與今日成交（連線中途重整、或想確認模擬單有無成交時用）"""
         if not self.is_connected:
             return
+        if self._refreshing:
+            # 使用者按「同步」按鈕沒反應時往往會連按好幾下，每一下都是一整輪券商查詢。
+            # 已經有一輪在跑就讓它跑完 —— 結果一樣會廣播給所有人。
+            logger.debug("[TradeModule] 已有對帳進行中，略過這次請求")
+            return
+        self._refreshing = True
+        try:
+            await self._refresh_from_broker()
+        finally:
+            self._refreshing = False
+
+    async def _refresh_from_broker(self) -> None:
         positions = await self._adapter.get_positions()
         self._positions = {p.symbol: p for p in positions}
-        self._fills = await self._adapter.get_fills_today()
+
+        fills = await self._adapter.get_fills_today()
+        # 查詢失敗一樣是回空清單。整份蓋過去的話，畫面上的成交明細會突然全部消失，
+        # 所以只有真的拿到資料（或本地本來就是空的）才覆蓋。
+        if fills or not self._fills:
+            self._fills = fills
+
         logger.info(
-            "[TradeModule] 跟券商對帳完成: 倉位 %s",
+            "[TradeModule] 跟券商對帳完成: 倉位 %s，今日成交 %d 筆",
             ", ".join(f"{p.symbol} {p.side.value} x{p.qty}" for p in positions) or "無",
+            len(self._fills),
         )
         self._broadcast_positions()
+        await self.bus.emit("fills_update", self.fills_today)
         await self._reconcile_orders()
 
     async def _reconcile_orders(self) -> None:

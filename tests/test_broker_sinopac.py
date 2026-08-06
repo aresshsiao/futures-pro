@@ -652,7 +652,7 @@ class TestTradeAdapterCallbacks:
 
     def test_order_callback_dispatch(self):
         _, handler, orders, fills = self._adapter_with_callbacks()
-        handler("FuturesOrder", {
+        handler("FORDER", {
             "operation": {"op_code": "00", "op_msg": ""},
             "order": {"id": "A001", "action": "Buy", "quantity": 2,
                       "price": 18000.0, "price_type": "LMT"},
@@ -668,13 +668,25 @@ class TestTradeAdapterCallbacks:
         assert o.order_type is OrderType.LIMIT
         assert o.status is OrderStatus.SUBMITTED
 
-    def test_deal_callback_dispatch(self):
-        """成交回報跟委託回報走同一個 callback，用 stat 區分。"""
-        _, handler, orders, fills = self._adapter_with_callbacks()
-        handler("FuturesDeal", {
+    # OrderState 實際送進 callback 的值（全大寫），不是 "FuturesDeal" 這種好看的名字。
+    # 這裡照抄 shioaji 的原值，測試才擋得住「成交被當成委託」這種災難。
+    DEAL_STATES = ["FDEAL", "SDEAL"]
+
+    def _deal_msg(self):
+        return {
             "trade_id": "A001", "ordno": "AB12345678", "action": "Sell",
             "code": "MXFH6", "price": 18050.0, "quantity": 1, "ts": 1704153600,
-        })
+        }
+
+    @pytest.mark.parametrize("state", DEAL_STATES)
+    def test_deal_callback_dispatch(self, state):
+        """成交回報跟委託回報走同一個 callback，用 stat 區分。
+
+        分錯邊的話成交會被當成委託回報解析，欄位全空、整筆成交消失——
+        畫面上看不到成交、倉位也不會動。
+        """
+        _, handler, orders, fills = self._adapter_with_callbacks()
+        handler(state, self._deal_msg())
 
         assert len(fills) == 1 and not orders
         f = fills[0]
@@ -683,10 +695,32 @@ class TestTradeAdapterCallbacks:
         assert f.qty == 1
         assert f.broker_fill_id == "AB12345678"
 
+    def test_deal_dispatch_uses_real_enum_value(self):
+        """直接拿 shioaji 的 OrderState 物件餵進來，確定不是只有字串版本會過。"""
+        import shioaji as sj
+
+        _, handler, orders, fills = self._adapter_with_callbacks()
+        handler(sj.OrderState.FuturesDeal, self._deal_msg())
+        assert len(fills) == 1 and not orders
+
+    def test_unknown_state_falls_back_to_message_shape(self):
+        """換版本若連 stat 都認不得，還有訊息結構可以判斷：
+        委託回報是巢狀的 order/status，成交回報是平坦的 trade_id/ordno。"""
+        _, handler, orders, fills = self._adapter_with_callbacks()
+        handler("???", self._deal_msg())
+        assert len(fills) == 1 and not orders
+
+    def test_order_report_without_id_is_dropped(self):
+        """沒有委託序號的委託回報對不到任何一張單（多半是成交回報跑錯邊），
+        丟給上層只會是雜訊。"""
+        _, handler, orders, _ = self._adapter_with_callbacks()
+        handler("FORDER", {"order": {}, "status": {}, "contract": {}})
+        assert orders == []
+
     def test_rejected_order_marked(self):
         """op_code 非 00 = 委託被券商退回。"""
         _, handler, orders, _ = self._adapter_with_callbacks()
-        handler("FuturesOrder", {
+        handler("FORDER", {
             "operation": {"op_code": "99", "op_msg": "價格超出漲跌停"},
             "order": {"id": "A002", "action": "Buy", "quantity": 1, "price": 1.0},
             "status": {"status": "Submitted", "deal_quantity": 0, "cancel_quantity": 0},
@@ -705,7 +739,7 @@ class TestTradeAdapterCallbacks:
             ("Failed", OrderStatus.REJECTED),
         ]
         for raw, expected in cases:
-            handler("FuturesOrder", {
+            handler("FORDER", {
                 "order": {"id": "X", "action": "Buy", "quantity": 1, "price": 1.0},
                 "status": {"status": raw, "deal_quantity": 0, "cancel_quantity": 0},
                 "contract": {"code": "TXFH6"},
@@ -714,9 +748,9 @@ class TestTradeAdapterCallbacks:
 
     def test_malformed_message_does_not_raise(self):
         _, handler, orders, fills = self._adapter_with_callbacks()
-        handler("FuturesOrder", None)
-        handler("FuturesDeal", {})
-        assert len(orders) == 1  # 空 msg 仍產生一筆（欄位為預設值），重點是不拋例外
+        handler("FORDER", None)
+        handler("FDEAL", {})
+        assert orders == [] and fills == []   # 認不出內容就丟掉，重點是不拋例外
 
 
 # ─── Integration: shioaji 套件可用性 ─────────────────────────

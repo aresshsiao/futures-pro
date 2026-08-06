@@ -1488,23 +1488,14 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
     });
   }, [addHandler, toRow]);
 
-  // 即時成交回報：新成交先插到最上方（此時還沒有損益），
-  // 延遲重新拉取一次完整清單，讓平倉單補上券商那邊剛結算好的損益。
-  //
-  // 重拉一定要 debounce：一張市價單常常分成上百筆成交回報進來，
-  // 每筆各排一個 get_fills 的話，後端會被逼著連打上百發券商 API（每發都查已實現損益），
-  // event loop 全卡在那裡，其他回報就只能一筆一筆慢慢跳。
-  const refetchTimerRef = useRef(null);
-  useEffect(() => () => clearTimeout(refetchTimerRef.current), []);
+  // 即時成交回報：新成交立刻插到最上方（此時還沒有損益 —— 損益要等券商結算完）。
+  // 補上損益的完整清單由後端在跟券商對帳後主動推 "fills" 過來（上面那個 handler 接），
+  // 這裡不需要自己重拉：一張市價單可能分成上百筆成交回報，每筆各拉一次
+  // 就是逼後端連打上百發券商 API。
   useEffect(() => {
     if (!addHandler) return;
-    return addHandler("fill", (msg) => {
-      setTrades(prev => [toRow(msg), ...prev]);
-      if (!send) return;
-      clearTimeout(refetchTimerRef.current);
-      refetchTimerRef.current = setTimeout(() => send("get_fills"), 1500);
-    });
-  }, [addHandler, toRow, send]);
+    return addHandler("fill", (msg) => setTrades(prev => [toRow(msg), ...prev]));
+  }, [addHandler, toRow]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>

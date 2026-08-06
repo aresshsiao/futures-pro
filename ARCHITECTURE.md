@@ -202,9 +202,11 @@ Core / Gateway 兩層透過同一個 in-process `EventBus` (Pub/Sub) 溝通：
 | `quote_update` | QuoteModule | Gateway (OrderPanel) | 五檔更新 |
 | `indicator_output` | ScriptEngine | Gateway | 指標繪圖資料 |
 | `order_placed` | TradeModule | Gateway | 委託送出 |
-| `order_filled` | TradeModule | Gateway | 委託成交 |
+| `order_update` | TradeModule | Gateway | 委託狀態變更（成交進度、對帳修正） |
+| `order_filled` | TradeModule | Gateway | 單筆成交（此時還沒有已實現損益） |
 | `order_cancelled` | TradeModule | Gateway | 委託取消 |
-| `position_update` | TradeModule | Gateway | 倉位變動 |
+| `positions_update` | TradeModule | Gateway | 倉位變動（整份清單） |
+| `fills_update` | TradeModule | Gateway | 對帳後的完整成交明細（含已實現損益） |
 | `script_signal` | ScriptEngine | TradeModule | 策略訊號 |
 | `quote_connected` / `quote_disconnected` | QuoteModule | Gateway | 連線狀態變更 |
 | `trade_connected` / `trade_disconnected` | TradeModule | Gateway | 連線狀態變更 |
@@ -241,12 +243,19 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
 - 倉位不能只信本地推算：成交回報漏接時畫面會停在舊數字，使用者反覆按平倉等於反覆送真實市價單。
   因此下單／成交後都會排一次 `refresh_from_broker()`（同一時間只留一個待辦），
   券商端的庫存整份覆蓋本地；UI 的倉位面板也有「⟳ 同步」可手動觸發。
+- **成交明細分兩段送**：單筆 `fill` 立刻推（讓畫面馬上看到成交，但沒有已實現損益——那要等券商結算），
+  對帳完成後再推一次完整的 `fills`（含損益）。前端不自己重拉：一張市價單可能分成上百筆成交回報，
+  每筆各拉一次就是逼後端連打上百發券商 API。
 - **委託狀態不能只認委託回報**：市價單成交後券商送的是**成交回報**，不保證再補一次委託回報。
   成交回報的 `order_id` 就是委託序號，`_apply_fill_to_order()` 用它累加成交口數並結成
   `partial` / `filled`，否則市價單會永遠卡在畫面的「委託中」。對帳時再用券商的委託狀態覆蓋一次。
 
 ## 7. 已知邊界與注意事項
 
+- **`OrderState` 的值是全大寫**：`FDEAL` / `FORDER` / `SDEAL` / `SORDER`，不是 `FuturesDeal`。
+  委託與成交共用同一個 callback，靠這個值分派 —— 用 `endswith("Deal")` 比對永遠不會中，
+  成交回報會整批被當成委託回報解析（欄位全空），結果就是畫面看不到成交、倉位不動。
+  `_is_deal_report()` 除了忽略大小寫，還會用訊息結構兜底（委託是巢狀 order/status，成交是平坦 trade_id/ordno）。
 - **Shioaji `subscribe_trade`**：登入時預設會訂閱委託回報頻道；若帳號無 FOP 完整權限會回 406，
   可在 `brokers.yaml` 設 `subscribe_trade: false` 避開（代價：收不到即時委託回報）。
 - **單 process 架構**：目前 Core Service 與 Gateway 在同一 Python process、共用 event loop。

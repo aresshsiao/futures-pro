@@ -1186,7 +1186,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             # 倉位不動時完全分不出是券商沒回報、還是回報進來後被解析錯。
             logger.debug("[SinoPac Trade] 收到回報 stat=%s msg=%s", state, msg)
             try:
-                if state.endswith("Deal"):
+                if self._is_deal_report(state, msg or {}):
                     self._handle_deal(msg or {})
                 else:
                     self._handle_order(msg or {})
@@ -1194,6 +1194,24 @@ class SinoPacTradeAdapter(TradeAdapter):
                 logger.exception("[SinoPac Trade] 處理回報失敗 stat=%s msg=%s", state, msg)
 
         self._api.set_order_callback(on_event)
+
+    @staticmethod
+    def _is_deal_report(state: str, msg: dict) -> bool:
+        """這筆回報是成交（Deal）還是委託（Order）？
+
+        分錯的代價很大：成交回報是平坦結構（trade_id / ordno / price / quantity），
+        被當成委託回報解析的話每個欄位都取不到值，成交就這樣整筆消失 ——
+        畫面上看不到成交、倉位不會動，只能等對帳把狀態補回來。
+
+        OrderState 的值是**全大寫**（FDEAL / FORDER / SDEAL / SORDER），
+        所以比對一定要忽略大小寫；再用訊息結構兜底，免得換版本又踩一次。
+        """
+        if state.upper().endswith("DEAL"):
+            return True
+        if state.upper().endswith("ORDER"):
+            return False
+        # stat 認不得時看結構：委託回報有巢狀的 order/status，成交回報沒有
+        return "order" not in msg and ("trade_id" in msg or "ordno" in msg)
 
     @staticmethod
     def _resolve_status(raw, qty: int, deal_qty: int, cancel_qty: int) -> OrderStatus:
@@ -1220,6 +1238,13 @@ class SinoPacTradeAdapter(TradeAdapter):
         operation = msg.get("operation", {}) or {}
 
         broker_id = str(order_dict.get("id", "") or status_dict.get("id", "") or "")
+        if not broker_id:
+            # 沒有委託序號的委託回報上層根本對不到任何一張單，硬送過去只會是雜訊。
+            # 真正該擔心的是「這其實是成交回報卻被分派到這裡」——把原始訊息留下來，
+            # 下次一眼就能看出是哪種結構跑錯邊。
+            logger.warning("[SinoPac Trade] 委託回報沒有委託序號，已忽略。原始訊息: %s", msg)
+            return
+
         code = str(contract_dict.get("code", "") or "")
         symbol = self._code_to_symbol(code) or code
 
@@ -1270,12 +1295,19 @@ class SinoPacTradeAdapter(TradeAdapter):
         code = str(msg.get("code", "") or "")
         ts = msg.get("ts")
 
+        qty = int(msg.get("quantity", 0) or 0)
+        if not code or qty <= 0:
+            # 沒有商品或口數的「成交」不是成交。放行的話 _update_position 會拿
+            # 空字串當商品代碼，在倉位表裡長出一個平不掉的幽靈部位。
+            logger.warning("[SinoPac Trade] 成交回報缺少商品或口數，已忽略。原始訊息: %s", msg)
+            return
+
         f = Fill(
             order_id=trade_id,
             symbol=self._code_to_symbol(code) or code,
             direction=Direction.BUY if _enum_str(msg.get("action")) == "Buy" else Direction.SELL,
             price=float(msg.get("price", 0.0) or 0.0),
-            qty=int(msg.get("quantity", 0) or 0),
+            qty=qty,
             fee=0.0,  # 成交回報不含手續費，需另外查 list_profit_loss
             timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
             broker_fill_id=ordno,

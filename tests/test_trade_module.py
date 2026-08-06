@@ -41,6 +41,7 @@ class FakeAdapter:
         self.cancelled = []
         self.position_queries = 0        # get_positions 被呼叫幾次（對帳次數）
         self.broker_orders = []          # 券商端今日委託（對帳時回給 TradeModule）
+        self.broker_fills = []           # 券商端今日成交明細
 
     async def connect(self, **credentials):
         return self._connected
@@ -83,7 +84,7 @@ class FakeAdapter:
         return list(self.broker_orders)
 
     async def get_fills_today(self):
-        return []
+        return list(self.broker_fills)
 
     async def get_profit_loss_today(self):
         return []
@@ -508,6 +509,35 @@ class TestPositionSync:
             return order
 
         assert asyncio.run(scenario()).status is OrderStatus.SUBMITTED
+
+    def test_reconcile_broadcasts_full_fill_list(self):
+        """單筆成交回報沒有已實現損益（要等券商結算），對帳後得主動把完整明細推出去，
+        前端才不用自己一直重拉——一張市價單分成上百筆成交就是上百次重拉。"""
+        async def scenario():
+            received = []
+            EventBus().on("fills_update", lambda fs: received.append(list(fs)))
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            a.broker_fills = [fill(qty=1), fill(qty=2)]
+            await connect(t, a)
+            await t.refresh_from_broker()
+            return received
+
+        received = asyncio.run(scenario())
+        assert len(received) == 1
+        assert len(received[0]) == 2
+
+    def test_failed_fill_query_does_not_wipe_history(self):
+        """查詢失敗一樣回空清單，不能把畫面上已經有的成交明細整份清掉。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            a.broker_fills = [fill(qty=1)]
+            await connect(t, a)          # 連線時同步到 1 筆
+            a.broker_fills = []          # 之後查詢失敗
+            await t.refresh_from_broker()
+            return t.fills_today
+
+        assert len(asyncio.run(scenario())) == 1
 
     def test_rejected_order_does_not_sync(self):
         """沒送出去的單不必對帳，省一次券商查詢。"""

@@ -29,7 +29,9 @@ from scripts.engine import load_meta_from_file                         # noqa: E
 from data.database import Database                                     # noqa: E402
 from data.bar_builder import BarBuilder                                # noqa: E402
 from data.sources.taifex import TaifexImporter                         # noqa: E402
-from ui.server import app, register_action, register_startup_hook, script_engine  # noqa: E402
+from ui.server import (                                                # noqa: E402
+    app, manager, register_action, register_startup_hook, script_engine,
+)
 
 # ── 全域模塊實例 ──────────────────────────────────────
 
@@ -500,14 +502,26 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
     return rows
 
 
-async def handle_get_fills(ws, data: dict):
-    """前端: 查詢今日成交明細（含已實現損益）"""
+async def _fills_payload() -> dict:
+    """今日成交明細（新→舊，已比對出平倉損益）。查詢與主動推播共用同一份格式。"""
     fills = sorted(trade.fills_today, key=lambda f: f.timestamp, reverse=True)
     pnl_records = await trade.get_profit_loss_today()
-    await ws.send_json({
-        "type": "fills",
-        "data": _merge_fills_with_pnl(fills, pnl_records),
-    })
+    return {"type": "fills", "data": _merge_fills_with_pnl(fills, pnl_records)}
+
+
+async def handle_get_fills(ws, data: dict):
+    """前端: 查詢今日成交明細（含已實現損益）"""
+    await ws.send_json(await _fills_payload())
+
+
+async def forward_fills(_fills):
+    """跟券商對帳完後主動推一次完整成交明細。
+
+    單筆成交回報（fill）只有價量、沒有已實現損益 —— 損益要等券商結算完才查得到。
+    沒有這個主動推播，前端只能自己定時重拉，而一張市價單可能分成上百筆成交回報，
+    每筆各拉一次就是上百發券商 API。改由對帳完成後推一次，前端什麼都不用做。
+    """
+    await manager.broadcast(await _fills_payload())
 
 
 # ── 帳務 / 券商端查詢 ─────────────────────────────────
@@ -1342,6 +1356,8 @@ def setup():
     # 事件接線
     bus.on("bar", on_bar_complete)
     bus.on("script_signal", on_strategy_signal)
+    # 對帳完成 → 主動推完整成交明細（含券商剛結算好的已實現損益）
+    bus.on("fills_update", forward_fills)
 
     # Core Service 啟動 hook — event loop ready 後自動連線券商 + 訂閱預設商品
     register_startup_hook(startup_core)
