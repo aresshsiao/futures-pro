@@ -3,6 +3,7 @@ core/trade_module.py — 交易模塊
 獨立於問價模塊，負責委託管理、成交回報、倉位追蹤。
 """
 from __future__ import annotations
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -36,6 +37,7 @@ class TradeModule:
         self._orders: dict[str, Order] = {}       # id → Order
         self._positions: dict[str, Position] = {}  # symbol → Position
         self._fills: list[Fill] = []
+        self._sync_handle = None                  # 待執行的倉位對帳（見 _schedule_position_sync）
 
         # 觸價單本地監控：tick 進來時檢查是否觸發，觸發後由 _execute_stop_order 送市價單
         self.bus.on("tick", self._check_stop_orders)
@@ -153,9 +155,10 @@ class TradeModule:
 
         logger.info(
             f"[TradeModule] 委託送出: {direction.value} {symbol} "
-            f"{order_type.value} @{price} x{qty} → {broker_id}"
+            f"{order_type.value} @{price} x{qty} octype={octype} → {broker_id}"
         )
         await self.bus.emit("order_placed", order)
+        self._schedule_position_sync()
         return order
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -251,6 +254,7 @@ class TradeModule:
             order.broker_order_id = broker_id
             order.status = OrderStatus.SUBMITTED
             logger.info("[TradeModule] 觸價單已送出市價單: %s → %s", order.id, broker_id)
+            self._schedule_position_sync()
         else:
             order.status = OrderStatus.REJECTED
             order.reject_reason = (
@@ -286,9 +290,44 @@ class TradeModule:
 
     def _on_fill(self, fill: Fill) -> None:
         """券商回報: 成交"""
+        logger.info(
+            "[TradeModule] 成交: %s %s x%s @%s (委託 %s)",
+            fill.direction.value, fill.symbol, fill.qty, fill.price, fill.order_id,
+        )
         self._fills.append(fill)
+        self._apply_fill_to_order(fill)
         self.bus.emit_sync("order_filled", fill)
         self._update_position(fill)
+        # 本地推算完還是要跟券商核對一次：漏接一筆回報，倉位就會一路錯下去
+        self._schedule_position_sync()
+
+    def _apply_fill_to_order(self, fill: Fill) -> None:
+        """把成交回報反映到對應的委託上。
+
+        委託狀態若只靠「委託回報」更新，市價單就會卡住：成交後券商送的是成交回報，
+        不保證會再補一次委託回報，那張單於是永遠停在畫面上的「委託中」——
+        實際上早就全部成交了。成交回報的 order_id 就是委託序號，直接拿它把口數補回去。
+        """
+        if not fill.order_id:
+            return
+        order = next(
+            (o for o in self._orders.values() if o.broker_order_id == fill.order_id), None
+        )
+        if order is None:
+            return   # 本程式以外下的單（或重啟前的單），只進成交明細
+
+        amount = order.avg_fill_price * order.filled_qty + fill.price * fill.qty
+        order.filled_qty += fill.qty
+        order.avg_fill_price = amount / order.filled_qty if order.filled_qty else fill.price
+        order.status = (
+            OrderStatus.FILLED if order.filled_qty >= order.qty else OrderStatus.PARTIAL
+        )
+        order.updated_at = datetime.now()
+        logger.info(
+            "[TradeModule] 委託 %s 成交進度: %s/%s → %s",
+            order.broker_order_id, order.filled_qty, order.qty, order.status.value,
+        )
+        self.bus.emit_sync("order_update", order)
 
     def _update_position(self, fill: Fill) -> None:
         """根據成交更新倉位"""
@@ -324,6 +363,41 @@ class TradeModule:
                     del self._positions[fill.symbol]
 
         self._broadcast_positions()
+
+    # ── 跟券商對帳 ────────────────────────────────────
+
+    # 對帳前的等待秒數：市價單送出到券商把成交結算進庫存之間有時間差，
+    # 太快去問會問到還沒更新的舊庫存
+    POSITION_SYNC_DELAY = 3.0
+
+    def _schedule_position_sync(self, delay: float | None = None) -> None:
+        """排一次跟券商的倉位對帳（下單後、成交後各排一次）。
+
+        本地倉位是靠成交回報一筆一筆推算出來的。回報要是沒進來（模擬環境很常見）
+        或漏掉一筆，畫面就會一直停在舊數字 —— 使用者看到部位還在，只能反覆按平倉，
+        而每按一次都是真的市價單送到券商，很容易從空單直接反手成多單。
+        券商端才是庫存的唯一真相，所以下單／成交後主動去對一次。
+
+        同一時間只留一個待辦：連續下單不會排出一堆重複查詢，把 API 配額燒光。
+        """
+        if not self.is_connected:
+            return
+        if self._sync_handle is not None and not self._sync_handle.done():
+            return
+
+        loop = self.bus.main_loop
+        if loop is None or not loop.is_running():
+            return  # 沒有可用的 loop（測試或尚未啟動），跳過即可
+        # 成交回報跑在券商的 callback 執行緒，run_coroutine_threadsafe 兩邊都能用
+        wait = self.POSITION_SYNC_DELAY if delay is None else delay
+        self._sync_handle = asyncio.run_coroutine_threadsafe(self._sync_positions_later(wait), loop)
+
+    async def _sync_positions_later(self, delay: float) -> None:
+        await asyncio.sleep(delay)   # 等券商端把成交結算進庫存
+        try:
+            await self.refresh_from_broker()
+        except Exception:
+            logger.exception("[TradeModule] 倉位對帳失敗")
 
     def _broadcast_positions(self) -> None:
         """推送完整倉位清單。
@@ -395,7 +469,49 @@ class TradeModule:
         positions = await self._adapter.get_positions()
         self._positions = {p.symbol: p for p in positions}
         self._fills = await self._adapter.get_fills_today()
+        logger.info(
+            "[TradeModule] 跟券商對帳完成: 倉位 %s",
+            ", ".join(f"{p.symbol} {p.side.value} x{p.qty}" for p in positions) or "無",
+        )
         self._broadcast_positions()
+        await self._reconcile_orders()
+
+    async def _reconcile_orders(self) -> None:
+        """用券商端的委託狀態修正本地委託簿。
+
+        成交回報漏接時，本地那張單會一直卡在「委託中」——畫面上看起來還有一張活單，
+        使用者可能去刪它或再送一張。券商說它成交了就是成交了。
+
+        只處理券商認得的委託序號：查詢失敗會回空清單，那時不能把本地的單當成消失。
+        """
+        if not self.is_connected:
+            return
+        remote = {
+            o.broker_order_id: o
+            for o in await self._adapter.get_orders_today()
+            if o.broker_order_id
+        }
+        if not remote:
+            return
+
+        for order in list(self._orders.values()):
+            if not order.is_active or not order.broker_order_id:
+                continue
+            latest = remote.get(order.broker_order_id)
+            if latest is None:
+                continue
+            if latest.status == order.status and latest.filled_qty == order.filled_qty:
+                continue
+            logger.info(
+                "[TradeModule] 委託對帳: %s %s → %s (成交 %s/%s)",
+                order.broker_order_id, order.status.value, latest.status.value,
+                latest.filled_qty, order.qty,
+            )
+            order.status = latest.status
+            order.filled_qty = latest.filled_qty
+            order.avg_fill_price = latest.avg_fill_price or order.avg_fill_price
+            order.updated_at = datetime.now()
+            await self.bus.emit("order_update", order)
 
     async def get_open_orders(self) -> list[Order]:
         """查詢券商端未成交委託（與本地 active_orders 不同：含本程式以外下的單）"""

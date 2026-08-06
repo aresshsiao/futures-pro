@@ -10,6 +10,7 @@ DB_PATH = DATA_DIR / "futures.db"
 RAW_TAIFEX_DIR = DATA_DIR / "raw" / "taifex"
 SCRIPTS_USER_DIR = BASE_DIR / "scripts" / "user"
 SCRIPTS_BUILTIN_DIR = BASE_DIR / "scripts" / "builtin"
+LOG_DIR = BASE_DIR / "logs"
 
 # ── 伺服器 ───────────────────────────────────────────
 SERVER_HOST = "0.0.0.0"
@@ -22,10 +23,20 @@ AUTH_PASSWORD_HASH = "$2b$12$KbKksoOf0aPH1v8m0IPmZ.aXtOc3w3w8NSkCzKjVccAzHpCCPTr
 AUTH_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 天
 
 # ── 日誌 Logging ─────────────────────────────────────
-# 系統預設的輸出等級 (INFO, DEBUG, WARNING, ERROR)
+# 實際的 handler 設定在 utils/logging_setup.py，這裡只放可調的旋鈕。
+# console 的輸出等級 (INFO, DEBUG, WARNING, ERROR)
 LOG_LEVEL = "INFO"
 # 個別券商底層 API 的日誌等級（因報價跳動頻繁，若不想看到洗版可改為 INFO 或 WARNING）
 BROKER_LOG_LEVEL = "INFO"
+# 寫進 logs/ 的等級。可以比 console 詳細——螢幕看不下的細節，出事時翻檔案還在
+LOG_FILE_LEVEL = "DEBUG"
+LOG_TO_CONSOLE = True
+LOG_TO_FILE = True
+# 每天保留幾個檔（每個交易日一檔）
+LOG_RETENTION_DAYS = 30
+# 每日換檔時間。預設 06:00 而非午夜：夜盤跑到隔天 05:00，
+# 午夜換檔會把同一個交易日的 log 切成兩個檔案
+LOG_ROTATE_AT_HOUR = 6
 
 # ── Core Service 自動連線 ────────────────────────────
 # server 啟動、event loop ready 後，Core Service 會自動連線券商並訂閱預設商品，

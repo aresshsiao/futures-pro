@@ -47,6 +47,7 @@ dist/**
 *.nls.*.json
 *.i18n.json
 Logs/**
+logs/
 data/daily/**
 data/db/**
 data/runtime/**

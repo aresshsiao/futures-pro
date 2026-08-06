@@ -10,29 +10,26 @@ import sys
 
 import uvicorn
 
-from config import settings
-from core.event_bus import EventBus
-from core.quote_module import QuoteModule
-from core.trade_module import TradeModule
-from core.models import Direction, OrderStatus, OrderType, Timeframe
-from scripts.engine import load_meta_from_file
-from data.database import Database
-from data.bar_builder import BarBuilder
-from data.sources.taifex import TaifexImporter
-from ui.server import app, register_action, register_startup_hook, script_engine
-
 # ── Logging ───────────────────────────────────────────
+# console + logs/ 檔案輸出、等級、輪替、例外攔截全在 utils/logging_setup.py，
+# 這裡只負責打開它。刻意排在其他模組 import 之前 —— 晚一步的話，
+# 模組載入期間寫的 log（例如 script 載入失敗）就沒有 handler 可收，直接消失。
 
-logging.basicConfig(
-    level=getattr(logging, getattr(settings, "LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-# sinopac adapter 的 tick debug log（確認 callback 有被觸發）
-logging.getLogger("brokers.adapters.sinopac").setLevel(
-    getattr(logging, getattr(settings, "BROKER_LOG_LEVEL", "DEBUG").upper(), logging.DEBUG)
-)
+from utils.logging_setup import setup_logging
+
+LOG_DIR = setup_logging()
 logger = logging.getLogger("main")
+
+from config import settings                                            # noqa: E402
+from core.event_bus import EventBus                                    # noqa: E402
+from core.quote_module import QuoteModule                              # noqa: E402
+from core.trade_module import TradeModule                              # noqa: E402
+from core.models import Direction, OrderStatus, OrderType, Timeframe   # noqa: E402
+from scripts.engine import load_meta_from_file                         # noqa: E402
+from data.database import Database                                     # noqa: E402
+from data.bar_builder import BarBuilder                                # noqa: E402
+from data.sources.taifex import TaifexImporter                         # noqa: E402
+from ui.server import app, register_action, register_startup_hook, script_engine  # noqa: E402
 
 # ── 全域模塊實例 ──────────────────────────────────────
 
@@ -731,6 +728,36 @@ async def startup_script_timer():
     asyncio.create_task(_script_timer_loop())
 
 
+# event loop 排程延遲超過這個秒數就記一筆警告
+LOOP_LAG_WARN_SEC = 0.3
+
+
+async def _loop_lag_monitor():
+    """量 event loop 的排程延遲。
+
+    委託／成交回報是券商推播進來的（跑在 shioaji 的 callback 執行緒），
+    但要送到瀏覽器得先排進 event loop —— loop 被同步工作佔住多久，畫面就晚多久。
+    這裡每秒醒一次，「醒過頭」的秒數就是當下 loop 卡住的時間，
+    是回報變慢時第一個該看的數字：
+      這個數字大 → 卡在我們自己（收棒工作、腳本、廣播）
+      這個數字小但回報還是慢 → 看 adapter 記的「推播延遲」，問題在券商端或網路
+    """
+    import time as _time
+
+    while True:
+        started = _time.perf_counter()
+        await asyncio.sleep(1)
+        lag = _time.perf_counter() - started - 1.0
+        if lag >= LOOP_LAG_WARN_SEC:
+            logger.warning(
+                "[Core] event loop 延遲 %.2fs — 這段期間所有回報與廣播都會被延後", lag
+            )
+
+
+async def startup_loop_monitor():
+    asyncio.create_task(_loop_lag_monitor())
+
+
 async def handle_broker_config(ws, data: dict):
     """前端: 連線或斷線指定券商
     data.action    = "connect" | "disconnect"
@@ -938,8 +965,18 @@ async def handle_db_summary(ws, data: dict):
 #  Script Engine 事件接線
 # ═══════════════════════════════════════════════════════════
 
+# 收棒工作佔住 event loop 超過這個秒數就記一筆警告 —— 這段時間內
+# 券商的委託／成交回報只能排隊，畫面上看起來就是「回報很慢」
+BAR_WORK_SLOW_SEC = 0.2
+
+
 def on_bar_complete(bar):
-    """M1 棒收完時寫 DB 並重跑 Script（live 棒直接跳過，避免每 tick 阻塞 event loop）"""
+    """M1 棒收完時寫 DB 並重跑 Script（live 棒直接跳過，避免每 tick 阻塞 event loop）
+
+    注意：這裡是同步跑在 event loop 上的 —— SQLite 讀寫、pandas、所有啟用的 script
+    都在這一小段時間裡獨佔 loop。太慢的話回報會被卡住，所以順便量它。
+    """
+    import time as _time
     from core.models import Timeframe
 
     if bar.timeframe != Timeframe.M1:
@@ -949,6 +986,7 @@ def on_bar_complete(bar):
     if not bar.is_closed:
         return
 
+    started = _time.perf_counter()
     db.insert_bars([bar])
 
     import pandas as pd
@@ -963,10 +1001,20 @@ def on_bar_complete(bar):
         for b in bars
     ])
 
+    db_ready = _time.perf_counter()
     indicator_results = script_engine.run_all_on_bar(df)
+    done = _time.perf_counter()
 
     for script_id, output in indicator_results.items():
         bus.emit_sync("indicator_output", output)
+
+    if done - started >= BAR_WORK_SLOW_SEC:
+        logger.warning(
+            "[Core] %s 收棒工作佔住 event loop %.2fs（DB+資料整理 %.2fs、%d 個 script %.2fs）"
+            "——這段期間委託／成交回報會被延遲",
+            bar.symbol, done - started, db_ready - started,
+            len(indicator_results), done - db_ready,
+        )
 
 
 async def _script_timer_loop():
@@ -1299,6 +1347,8 @@ def setup():
     register_startup_hook(startup_core)
     # script 定時器（interval_sec）— 與是否自動連線券商無關，一律啟動
     register_startup_hook(startup_script_timer)
+    # event loop 延遲監控 — 回報變慢時用來分辨「卡在自己」還是「卡在券商端」
+    register_startup_hook(startup_loop_monitor)
 
     # 載入內建 Script（指標 / 策略）
     for meta in BUILTIN_SCRIPTS:
@@ -1345,6 +1395,7 @@ def setup():
     logger.info("  交易模塊: %s", trade.broker_name)
     logger.info("  資料庫:   %s", db._path)
     logger.info("  Scripts:  %d 個已載入", len(script_engine._scripts))
+    logger.info("  日誌:     %s", LOG_DIR)
     logger.info("=" * 60)
 
 
@@ -1355,6 +1406,10 @@ def main():
         host="0.0.0.0",
         port=8888,
         log_level="info",
+        # log_config=None：不讓 uvicorn 套用它自己那份 logging 設定。
+        # 它預設會把 uvicorn.* 的 logger 接到自己的 handler 並關掉 propagate，
+        # 結果就是 HTTP 存取紀錄格式不一樣、而且完全不會進 logs/ 的檔案。
+        log_config=None,
     )
 
 

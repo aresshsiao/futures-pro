@@ -82,6 +82,15 @@ class EventBus:
         """儲存主執行緒的 event loop，供跨執行緒呼叫 emit_sync 使用。"""
         self._main_loop = loop
 
+    @property
+    def main_loop(self) -> asyncio.AbstractEventLoop | None:
+        """主執行緒的 event loop（尚未設定則為 None）。
+
+        給需要從券商 callback 執行緒排程 coroutine 的模塊用 —— 那些執行緒沒有
+        running loop，asyncio.get_running_loop() 在那裡只會拋例外。
+        """
+        return getattr(self, "_main_loop", None)
+
     def emit_sync(self, event: str, *args: Any, **kwargs: Any) -> None:
         """
         同步版本 — 用於非 async 環境（如 Shioaji 的 callback 執行緒、Script 沙箱）。

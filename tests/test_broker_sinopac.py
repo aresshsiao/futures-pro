@@ -530,6 +530,46 @@ class TestTradeAdapterQueries:
         assert fills[0].price == 18000.0
         assert fills[0].broker_fill_id == "7"
 
+    def test_get_orders_today_includes_finished(self):
+        """對帳要看得到已成交／已刪的單，才能把本地卡住的委託修正回來。"""
+        adapter, api, sj_mod, _ = _connected_trade()
+        api.list_trades.return_value = [
+            _fake_remote_trade("A001", status="Submitted"),
+            _fake_remote_trade("A002", status="Filled", deal_qty=2),
+            _fake_remote_trade("A003", status="Cancelled", cancel_qty=2),
+        ]
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            orders = run(adapter.get_orders_today())
+
+        assert [o.broker_order_id for o in orders] == ["A001", "A002", "A003"]
+
+    def test_back_to_back_queries_hit_cache(self):
+        """對帳會前後腳問成交明細與委託狀態，兩次各打 update_status + list_trades
+        等於白花一倍的券商 API。"""
+        adapter, api, sj_mod, _ = _connected_trade()
+        api.list_trades.return_value = [_fake_remote_trade("A001", status="Submitted")]
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(adapter.get_fills_today())
+            run(adapter.get_orders_today())
+
+        assert api.list_trades.call_count == 1
+        assert api.update_status.call_count == 1
+
+    def test_placing_order_invalidates_cache(self):
+        """剛下的單一定要查得到，不能被幾秒前的快取蓋掉。"""
+        adapter, api, sj_mod, _ = _connected_trade()
+        trade_obj = MagicMock()
+        trade_obj.order.id = "NEW-001"
+        api.place_order.return_value = trade_obj
+        api.list_trades.return_value = [_fake_remote_trade("A001", status="Submitted")]
+
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(adapter.get_orders_today())
+            run(adapter.place_order("TX", Direction.BUY, OrderType.MARKET, 1))
+            run(adapter.get_orders_today())
+
+        assert api.list_trades.call_count == 2
+
     def test_get_margin(self):
         adapter, api, sj_mod, _ = _connected_trade()
         api.margin.return_value = FakeObj(

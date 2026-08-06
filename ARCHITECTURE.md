@@ -123,9 +123,15 @@ futures-pro/
 │   └── static/              # 前端
 │       └── trading-platform.jsx
 │
-└── utils/
-    ├── __init__.py
-    └── helpers.py           # 工具函式
+├── utils/
+│   ├── __init__.py
+│   └── logging_setup.py     # 全系統日誌設定（唯一碰 logging 設定的地方）
+│
+└── logs/                    # 執行期產生 (gitignore)
+    ├── futures.log          # 全部訊息
+    ├── error.log            # WARNING 以上
+    ├── trade.log            # 下單/成交/倉位
+    └── shioaji.log          # 永豐 API 自己寫的檔
 ```
 
 ## 4. 核心設計原則
@@ -173,6 +179,18 @@ futures-pro/
 - 券商 API 的同步阻塞呼叫（如 `kbars()`）一律以 `run_in_executor` 移出 event loop，避免凍結廣播。
 - `BarBuilder` 負責將 Tick 即時聚合為各週期 K 棒。
 
+### 4.7 日誌 — 單一設定點
+- 只有 `utils/logging_setup.py` 會動 logging 設定（`main.py` 啟動時呼叫一次，
+  刻意排在其他 import 之前）；其他模組一律 `logging.getLogger(__name__)`。
+- 三個檔案各有分工：`futures.log` 全部、`error.log` 只有 WARNING 以上（出事先看這個）、
+  `trade.log` 只有下單/成交/倉位（交易紀錄不該被報價洗掉）。
+- **每日 06:00 換檔**而非午夜：夜盤跑到隔天 05:00，午夜換檔會把同一個交易日切成兩個檔案。
+  保留天數與等級見 `config/settings.py` 的 `LOG_*`。
+- 檔案等級（預設 DEBUG）可比 console（預設 INFO）詳細 —— 螢幕上看不下的細節，事後翻檔案還在。
+- `sys.excepthook` / `threading.excepthook` 都接進 log：券商 callback 跑在子執行緒，
+  沒接的話那裡爆掉只會看到畫面停止更新、log 一片安靜。
+- uvicorn 以 `log_config=None` 啟動，讓它的 HTTP 存取紀錄走同一套 handler 進同一批檔案。
+
 ## 5. 事件驅動架構
 
 Core / Gateway 兩層透過同一個 in-process `EventBus` (Pub/Sub) 溝通：
@@ -216,7 +234,16 @@ UI: get_history(symbol, timeframe, count)
 ```
 UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
   → 委託回報 callback → EventBus → Gateway broadcast → 所有分頁更新
+                     ↘ 下單/成交後排一次跟券商對帳（refresh_from_broker）
 ```
+- 拿不到委託序號 = 券商沒收下這張單 → `REJECTED`，**不進委託簿**（否則畫面會有一張刪不掉的幽靈單），
+  拒絕原因由 adapter 的 `last_error` 帶到前端顯示。
+- 倉位不能只信本地推算：成交回報漏接時畫面會停在舊數字，使用者反覆按平倉等於反覆送真實市價單。
+  因此下單／成交後都會排一次 `refresh_from_broker()`（同一時間只留一個待辦），
+  券商端的庫存整份覆蓋本地；UI 的倉位面板也有「⟳ 同步」可手動觸發。
+- **委託狀態不能只認委託回報**：市價單成交後券商送的是**成交回報**，不保證再補一次委託回報。
+  成交回報的 `order_id` 就是委託序號，`_apply_fill_to_order()` 用它累加成交口數並結成
+  `partial` / `filled`，否則市價單會永遠卡在畫面的「委託中」。對帳時再用券商的委託狀態覆蓋一次。
 
 ## 7. 已知邊界與注意事項
 

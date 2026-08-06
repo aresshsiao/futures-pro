@@ -10,6 +10,7 @@ import asyncio
 import logging
 import math
 import threading
+import time
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
@@ -1115,6 +1116,8 @@ class SinoPacTradeAdapter(TradeAdapter):
         # cancel_order()/update_order() 只吃 Trade 物件本身（不是委託序號字串），
         # 所以下單當下就得留著；重啟後要刪先前掛的單，則靠 _sync_trades() 從券商補回。
         self._trades: dict[str, object] = {}
+        self._trades_cache: list | None = None   # _sync_trades 的短期結果快取
+        self._trades_cache_at = 0.0
 
     async def connect(self, **credentials) -> bool:
         try:
@@ -1179,6 +1182,9 @@ class SinoPacTradeAdapter(TradeAdapter):
         """
         def on_event(stat, msg):
             state = _enum_str(stat)
+            # 回報有沒有進來，是「畫面倉位對不對」的根本前提；沒有這行 log，
+            # 倉位不動時完全分不出是券商沒回報、還是回報進來後被解析錯。
+            logger.debug("[SinoPac Trade] 收到回報 stat=%s msg=%s", state, msg)
             try:
                 if state.endswith("Deal"):
                     self._handle_deal(msg or {})
@@ -1245,11 +1251,16 @@ class SinoPacTradeAdapter(TradeAdapter):
             status=status,
         )
         o.filled_qty = deal_qty
+        logger.info(
+            "[SinoPac Trade] 委託回報 %s %s %s x%s 狀態=%s 已成交=%s",
+            broker_id or "(無序號)", symbol, o.direction.value, qty, status.value, deal_qty,
+        )
         self._on_order_cb(o)
 
     def _handle_deal(self, msg: dict) -> None:
         """成交回報"""
         if not self._on_fill_cb:
+            logger.warning("[SinoPac Trade] 收到成交回報但沒有掛 callback，倉位不會更新")
             return
 
         # trade_id 官方文件標註「同 FuturesOrder 的 id」，即委託序號本身；
@@ -1268,6 +1279,13 @@ class SinoPacTradeAdapter(TradeAdapter):
             fee=0.0,  # 成交回報不含手續費，需另外查 list_profit_loss
             timestamp=datetime.fromtimestamp(ts) if ts else datetime.now(),
             broker_fill_id=ordno,
+        )
+        # 券商成交時間 → 我們收到的時間差。回報是推播進來的，這個數字大就是
+        # 券商端／網路延遲；數字小但畫面才慢，問題就在我們自己的 event loop。
+        lag = (datetime.now() - f.timestamp).total_seconds() if ts else 0.0
+        logger.info(
+            "[SinoPac Trade] 成交回報 %s %s %s x%s @%s（推播延遲 %.2fs）",
+            trade_id or "(無序號)", f.symbol, f.direction.value, f.qty, f.price, lag,
         )
         self._on_fill_cb(f)
 
@@ -1359,6 +1377,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             return ""
 
         self._trades[broker_id] = trade_obj
+        self._invalidate_trades_cache()
         logger.info(
             "[SinoPac Trade] 委託送出%s %s %s %s x%s @%s → %s",
             "（模擬）" if _is_simulation() else "",
@@ -1366,10 +1385,23 @@ class SinoPacTradeAdapter(TradeAdapter):
         )
         return broker_id
 
+    # 對帳時會前後腳問成交明細與委託狀態，兩邊都要 _sync_trades；
+    # 這麼短的間隔內券商端不會有新資料，重用上一次的結果就好（API 次數直接砍半）
+    _TRADES_CACHE_TTL = 2.0
+
     async def _sync_trades(self) -> list:
-        """跟券商同步今日委託，順便重建 broker_order_id → Trade 對照表。"""
+        """跟券商同步今日委託，順便重建 broker_order_id → Trade 對照表。
+
+        每次呼叫都是 update_status + list_trades 兩發券商 API，所以剛拿過的結果
+        會在 _TRADES_CACHE_TTL 秒內重用。
+        """
         if self._api is None:
             return []
+
+        now = time.monotonic()
+        if self._trades_cache is not None and now - self._trades_cache_at < self._TRADES_CACHE_TTL:
+            return self._trades_cache
+
         try:
             def _fetch():
                 self._api.update_status(self._account())
@@ -1387,7 +1419,12 @@ class SinoPacTradeAdapter(TradeAdapter):
             oid = str(getattr(getattr(t, "order", None), "id", "") or "")
             if oid:
                 self._trades[oid] = t
+        self._trades_cache, self._trades_cache_at = trades, now
         return trades
+
+    def _invalidate_trades_cache(self) -> None:
+        """本地剛改動過委託（下單／刪單／改單），快取立刻過期，下次查一定跟券商拿新的。"""
+        self._trades_cache = None
 
     async def _find_trade(self, broker_order_id: str):
         """取得 Shioaji Trade 物件；本地沒有就跟券商同步一次再找。"""
@@ -1408,6 +1445,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             return False
         try:
             await self._run(self._api.cancel_order, trade)
+            self._invalidate_trades_cache()
             logger.info("[SinoPac Trade] 刪單送出: %s", broker_order_id)
             return True
         except Exception:
@@ -1435,6 +1473,7 @@ class SinoPacTradeAdapter(TradeAdapter):
 
         try:
             await self._run(lambda: self._api.update_order(trade, **kwargs))
+            self._invalidate_trades_cache()
             logger.info("[SinoPac Trade] 改單送出: %s %s", broker_order_id, kwargs)
             return True
         except Exception:
@@ -1509,8 +1548,8 @@ class SinoPacTradeAdapter(TradeAdapter):
             o.avg_fill_price = amount / filled
         return o
 
-    async def get_open_orders(self) -> list[Order]:
-        """查詢尚未成交（還可刪改）的委託。"""
+    async def get_orders_today(self) -> list[Order]:
+        """查詢今日所有委託，含已成交／已刪單（上層拿來跟本地委託簿對帳）。"""
         orders: list[Order] = []
         for trade in await self._sync_trades():
             try:
@@ -1518,9 +1557,13 @@ class SinoPacTradeAdapter(TradeAdapter):
             except Exception:
                 logger.exception("[SinoPac Trade] 解析委託失敗: %s", trade)
                 continue
-            if o is not None and o.is_active:
+            if o is not None:
                 orders.append(o)
         return orders
+
+    async def get_open_orders(self) -> list[Order]:
+        """查詢尚未成交（還可刪改）的委託。"""
+        return [o for o in await self.get_orders_today() if o.is_active]
 
     async def get_fills_today(self) -> list[Fill]:
         """查詢今日成交明細（含連線前已成交的部分）"""

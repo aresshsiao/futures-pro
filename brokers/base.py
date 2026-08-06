@@ -238,6 +238,15 @@ class TradeAdapter(ABC):
         """查詢未成交委託"""
         ...
 
+    async def get_orders_today(self) -> list[Order]:
+        """查詢今日所有委託，含已成交／已刪單。
+
+        給上層跟本地委託簿對帳用：市價單成交後券商不一定會再送一次委託回報，
+        本地那張單會一直停在「委託中」，得靠這裡的狀態把它修正回來。
+        預設不支援（回傳空列表），依券商而定。
+        """
+        return []
+
     @abstractmethod
     async def get_fills_today(self) -> list[Fill]:
         """查詢今日成交明細"""

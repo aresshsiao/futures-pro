@@ -1,9 +1,11 @@
 """
 tests/test_trade_module.py — 交易模塊（倉位 / 委託）測試
 
-重點在兩件事：
+重點在幾件事：
   1. 觸價單是「本地單」——券商端沒有這張單，觸發時必須真的補送一張市價單出去。
-  2. 倉位變動一律推送整份清單，前端才知道哪一檔被平掉了。
+  2. 券商沒收下的單不能標成「已送出」，否則畫面會有一張刪不掉的幽靈單。
+  3. 倉位不能只信本地推算，下單／成交後要跟券商對帳。
+  4. 倉位變動一律推送整份清單，前端才知道哪一檔被平掉了。
 
 EventBus 是 singleton，每個測試前後都要清乾淨，否則上一個測試註冊的
 TradeModule 會繼續收事件（同一顆 bus 會有多個模塊的 handler）。
@@ -18,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.event_bus import EventBus
 from core.models import (
-    Direction, Fill, OrderStatus, OrderType, Position, PositionSide, Tick,
+    Direction, Fill, Order, OrderStatus, OrderType, Position, PositionSide, Tick,
 )
 from core.trade_module import TradeModule
 from datetime import datetime
@@ -37,6 +39,8 @@ class FakeAdapter:
         self.last_error = last_error     # 券商拒絕的原因
         self.placed = []
         self.cancelled = []
+        self.position_queries = 0        # get_positions 被呼叫幾次（對帳次數）
+        self.broker_orders = []          # 券商端今日委託（對帳時回給 TradeModule）
 
     async def connect(self, **credentials):
         return self._connected
@@ -69,10 +73,14 @@ class FakeAdapter:
         return True
 
     async def get_positions(self):
+        self.position_queries += 1
         return list(self._positions)
 
     async def get_open_orders(self):
-        return []
+        return [o for o in self.broker_orders if o.is_active]
+
+    async def get_orders_today(self):
+        return list(self.broker_orders)
 
     async def get_fills_today(self):
         return []
@@ -216,6 +224,21 @@ class TestStopOrders:
         assert order.status is OrderStatus.CANCELLED
         assert adapter.placed == []
 
+    def test_stop_order_rejection_keeps_reason(self):
+        async def scenario():
+            t = TradeModule()
+            a = FakeAdapter(broker_id="", last_error="保證金不足")
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.BUY, OrderType.STOP_BUY, 1, price=18100)
+            t._check_stop_orders(tick("TX", 18100))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return order
+
+        order = asyncio.run(scenario())
+        assert order.status is OrderStatus.REJECTED
+        assert order.reject_reason == "保證金不足"
+
 
 # ─── 一般委託 ───────────────────────────────────────────────
 
@@ -308,21 +331,6 @@ class TestOrders:
         assert order.status is OrderStatus.CANCELLED
         assert adapter.cancelled == []            # 沒有打到券商
 
-    def test_stop_order_rejection_keeps_reason(self):
-        async def scenario():
-            t = TradeModule()
-            a = FakeAdapter(broker_id="", last_error="保證金不足")
-            await connect(t, a)
-            order = await t.place_order("TX", Direction.BUY, OrderType.STOP_BUY, 1, price=18100)
-            t._check_stop_orders(tick("TX", 18100))
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            return order
-
-        order = asyncio.run(scenario())
-        assert order.status is OrderStatus.REJECTED
-        assert order.reject_reason == "保證金不足"
-
     def test_active_orders_excludes_finished(self):
         async def scenario():
             t, a = TradeModule(), FakeAdapter()
@@ -336,10 +344,191 @@ class TestOrders:
         assert active == [keep_id]
 
 
+# ─── 成交 → 委託狀態 ────────────────────────────────────────
+
+class TestFillUpdatesOrder:
+    """市價單成交後，券商送的是「成交回報」，不保證再補一次「委託回報」。
+    委託狀態若只認委託回報，那張單就會永遠卡在畫面上的「委託中」。"""
+
+    def test_full_fill_completes_order(self):
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.SELL, OrderType.MARKET, 2)
+            t._on_fill(fill(direction=Direction.SELL, qty=2, price=44230.0))
+            await asyncio.sleep(0)
+            return order, t
+
+        order, trade = asyncio.run(scenario())
+        assert order.status is OrderStatus.FILLED
+        assert order.filled_qty == 2
+        assert order.avg_fill_price == 44230.0
+        assert trade.active_orders == []      # 成交完就不該再出現在「委託」清單
+
+    def test_partial_fills_average_price(self):
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.SELL, OrderType.MARKET, 3)
+            t._on_fill(fill(direction=Direction.SELL, qty=1, price=44230.0))
+            t._on_fill(fill(direction=Direction.SELL, qty=2, price=44240.0))
+            await asyncio.sleep(0)
+            return order
+
+        order = asyncio.run(scenario())
+        assert order.status is OrderStatus.FILLED
+        assert order.filled_qty == 3
+        assert order.avg_fill_price == pytest.approx((44230.0 + 44240.0 * 2) / 3)
+
+    def test_partial_fill_marks_partial(self):
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.SELL, OrderType.MARKET, 5)
+            t._on_fill(fill(direction=Direction.SELL, qty=2))
+            await asyncio.sleep(0)
+            return order, t
+
+        order, trade = asyncio.run(scenario())
+        assert order.status is OrderStatus.PARTIAL
+        assert [o.id for o in trade.active_orders] == [order.id]   # 還沒成交完，仍是活單
+
+    def test_fill_for_unknown_order_is_ignored(self):
+        """別人（或重啟前）下的單只進成交明細，不該影響本地委託簿。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.SELL, OrderType.MARKET, 2)
+            t._on_fill(fill(direction=Direction.SELL, qty=2, order_id="別人的委託"))
+            await asyncio.sleep(0)
+            return order, t
+
+        order, trade = asyncio.run(scenario())
+        assert order.filled_qty == 0
+        assert order.status is OrderStatus.SUBMITTED
+        assert len(trade.fills_today) == 1
+
+
+# ─── 跟券商對帳 ─────────────────────────────────────────────
+
+class TestPositionSync:
+    """本地倉位是靠成交回報推算的；回報漏接時畫面會一直停在舊數字，
+    使用者只能反覆按平倉，而每按一次都是真的市價單。所以下單／成交後
+    要主動跟券商核對一次真實庫存。"""
+
+    async def _sync_done(self):
+        """等排定的對帳跑完（測試把延遲設成 0）。"""
+        for _ in range(6):
+            await asyncio.sleep(0)
+
+    def test_order_triggers_broker_sync(self):
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            before = a.position_queries          # 連線時已同步過一次
+            await t.place_order("TX", Direction.BUY, OrderType.MARKET, 1)
+            await self._sync_done()
+            return a.position_queries - before
+
+        assert asyncio.run(scenario()) == 1
+
+    def test_fill_triggers_broker_sync(self):
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            before = a.position_queries
+            t._on_fill(fill(symbol="TX", qty=1))
+            await self._sync_done()
+            return a.position_queries - before
+
+        assert asyncio.run(scenario()) == 1
+
+    def test_burst_of_orders_syncs_once(self):
+        """連續下單不該排出一堆重複查詢，把券商 API 配額燒光。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            before = a.position_queries
+            for _ in range(5):
+                await t.place_order("TX", Direction.BUY, OrderType.MARKET, 1)
+            await self._sync_done()
+            return a.position_queries - before
+
+        assert asyncio.run(scenario()) == 1
+
+    def test_sync_replaces_stale_local_position(self):
+        """券商說已經平掉了，本地推算的殘留部位就該消失。"""
+        async def scenario():
+            t = TradeModule()
+            t.POSITION_SYNC_DELAY = 0
+            adapter = FakeAdapter(positions=[
+                Position(symbol="TX", side=PositionSide.SHORT, qty=69, avg_price=44442.99),
+            ])
+            await connect(t, adapter)
+            adapter._positions = []              # 券商端已平倉
+            await t.place_order("TX", Direction.BUY, OrderType.MARKET, 69, octype="cover")
+            await self._sync_done()
+            return t.positions
+
+        assert asyncio.run(scenario()) == []
+
+    def test_stuck_order_is_corrected_by_broker(self):
+        """成交回報漏接時，本地委託會卡在「委託中」；券商說成交了就該跟著改。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.SELL, OrderType.MARKET, 72)
+            a.broker_orders = [Order(
+                id="B001", broker_order_id="B001", symbol="TX",
+                direction=Direction.SELL, order_type=OrderType.MARKET,
+                price=0.0, qty=72, filled_qty=72, status=OrderStatus.FILLED,
+            )]
+            await t.refresh_from_broker()
+            await asyncio.sleep(0)
+            return order, t
+
+        order, trade = asyncio.run(scenario())
+        assert order.status is OrderStatus.FILLED
+        assert order.filled_qty == 72
+        assert trade.active_orders == []
+
+    def test_empty_broker_list_leaves_orders_alone(self):
+        """查詢失敗會回空清單，這時不能把本地還活著的單當成消失。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.SELL, OrderType.LIMIT, 1, price=44300)
+            a.broker_orders = []
+            await t.refresh_from_broker()
+            return order
+
+        assert asyncio.run(scenario()).status is OrderStatus.SUBMITTED
+
+    def test_rejected_order_does_not_sync(self):
+        """沒送出去的單不必對帳，省一次券商查詢。"""
+        async def scenario():
+            t = TradeModule()
+            t.POSITION_SYNC_DELAY = 0
+            a = FakeAdapter(broker_id="", last_error="券商拒絕")
+            await connect(t, a)
+            before = a.position_queries
+            await t.place_order("TX", Direction.BUY, OrderType.MARKET, 1)
+            await self._sync_done()
+            return a.position_queries - before
+
+        assert asyncio.run(scenario()) == 0
+
+
 # ─── 倉位 ───────────────────────────────────────────────────
 
-def fill(symbol="TX", direction=Direction.BUY, price=18000.0, qty=1):
-    return Fill(order_id="x", symbol=symbol, direction=direction,
+def fill(symbol="TX", direction=Direction.BUY, price=18000.0, qty=1, order_id="B001"):
+    """order_id 預設對上 FakeAdapter 回的委託序號，成交才會反映到那張委託上。"""
+    return Fill(order_id=order_id, symbol=symbol, direction=direction,
                 price=price, qty=qty, fee=0.0, timestamp=datetime.now())
 
 

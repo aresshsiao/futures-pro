@@ -1297,7 +1297,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
 }
 
 // ─── Position & Orders Panel ─────────────────────────────────────────
-function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, closePosition }) {
+function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, closePosition, refreshAccount, closingSymbols }) {
   const [tab, setTab] = useState("positions");
 
   const rows = positions.map(p => {
@@ -1345,8 +1345,16 @@ function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, clo
       <div style={{ flex: 1, overflowY: "auto", fontSize: 11 }}>
         {tab === "positions" && (
           <>
-            <div style={{ padding: "6px 6px 4px", display: "flex", justifyContent: "space-between", fontSize: 10, position: "sticky", top: 0, background: COLORS.bgPanel, zIndex: 10 }}>
-              <span style={{ color: COLORS.textDim }}>持倉部位</span>
+            <div style={{ padding: "6px 6px 4px", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10, position: "sticky", top: 0, background: COLORS.bgPanel, zIndex: 10 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5, color: COLORS.textDim }}>
+                持倉部位
+                {/* 倉位平常靠成交回報更新，回報漏接時得有辦法直接跟券商問一次真實庫存 */}
+                <button onClick={refreshAccount} title="跟券商重新同步倉位與成交" style={{
+                  padding: "0 5px", fontSize: 10, lineHeight: "16px", cursor: "pointer",
+                  background: "transparent", border: `1px solid ${COLORS.border}`,
+                  color: COLORS.textDim, borderRadius: 3,
+                }}>⟳ 同步</button>
+              </span>
               <span style={{ color: totalPnl >= 0 ? COLORS.up : COLORS.down, fontWeight: 700, fontFamily: "monospace" }}>
                 總損益 {totalPnl >= 0 ? "+" : ""}{totalPnl.toLocaleString()}
               </span>
@@ -1378,11 +1386,19 @@ function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, clo
                           <span style={{ fontSize: 9, marginLeft: 2, opacity: 0.7 }}>({p.pnlPct.toFixed(2)}%)</span>
                         </td>
                         <td style={{ padding: "4px", textAlign: "center" }}>
-                          <button onClick={() => closePosition(p)} title="以市價平掉此部位" style={{
-                            padding: "1px 6px", border: `1px solid rgba(245,158,11,0.35)`,
-                            background: "rgba(245,158,11,0.1)", color: COLORS.warn,
-                            fontSize: 9, borderRadius: 3, cursor: "pointer", whiteSpace: "nowrap"
-                          }}>平倉</button>
+                          {/* 平倉單送出後先鎖住：連按兩次等於送兩張反向市價單，
+                              空單會直接被平掉再反手成多單 */}
+                          <button
+                            onClick={() => closePosition(p)}
+                            disabled={closingSymbols.has(p.symbol)}
+                            title={closingSymbols.has(p.symbol) ? "平倉單已送出，等待成交回報" : "以市價平掉此部位"}
+                            style={{
+                              padding: "1px 6px", border: `1px solid rgba(245,158,11,0.35)`,
+                              background: "rgba(245,158,11,0.1)", color: COLORS.warn,
+                              fontSize: 9, borderRadius: 3, whiteSpace: "nowrap",
+                              cursor: closingSymbols.has(p.symbol) ? "not-allowed" : "pointer",
+                              opacity: closingSymbols.has(p.symbol) ? 0.45 : 1,
+                            }}>{closingSymbols.has(p.symbol) ? "平倉中" : "平倉"}</button>
                         </td>
                       </tr>
                     ))}
@@ -1473,12 +1489,20 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
   }, [addHandler, toRow]);
 
   // 即時成交回報：新成交先插到最上方（此時還沒有損益），
-  // 延遲重新拉取一次完整清單，讓平倉單補上券商那邊剛結算好的損益
+  // 延遲重新拉取一次完整清單，讓平倉單補上券商那邊剛結算好的損益。
+  //
+  // 重拉一定要 debounce：一張市價單常常分成上百筆成交回報進來，
+  // 每筆各排一個 get_fills 的話，後端會被逼著連打上百發券商 API（每發都查已實現損益），
+  // event loop 全卡在那裡，其他回報就只能一筆一筆慢慢跳。
+  const refetchTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(refetchTimerRef.current), []);
   useEffect(() => {
     if (!addHandler) return;
     return addHandler("fill", (msg) => {
       setTrades(prev => [toRow(msg), ...prev]);
-      if (send) setTimeout(() => send("get_fills"), 1500);
+      if (!send) return;
+      clearTimeout(refetchTimerRef.current);
+      refetchTimerRef.current = setTimeout(() => send("get_fills"), 1500);
     });
   }, [addHandler, toRow, send]);
 
@@ -2644,8 +2668,9 @@ export default function TradingPlatform() {
     });
   }), [addHandler]);
 
-  // 成交會改變庫存，跟後端要一次最新倉位（後端也會主動推，這裡是保險）
-  useEffect(() => addHandler("fill", () => send("get_positions")), [addHandler, send]);
+  // 成交後不必再跟後端要倉位：每筆成交後端都會主動推整份 positions，
+  // 之後還會跟券商對帳再推一次。這裡每筆成交各發一個請求，
+  // 一張分成上百筆成交的市價單就是上百趟白跑的往返。
 
   const placeOrder = useCallback((kind, price, qty) => {
     if (!qty || qty < 1) return;
@@ -2710,9 +2735,17 @@ export default function TradingPlatform() {
     [positions, latestPrices],
   );
 
+  // 跟券商重新同步倉位與今日成交（回報漏接時，這是唯一能拿到真實庫存的路徑）
+  const refreshAccount = useCallback(() => send("refresh_account"), [send]);
+  useEffect(() => addHandler("account_refreshed", (msg) => {
+    const ok = msg.success !== false;
+    showFeedback(ok, ok ? "已與券商同步倉位" : "同步失敗：交易券商未連線");
+  }), [addHandler, showFeedback]);
+
   // 平倉：以市價反向送出同口數（多單賣出、空單買進）
+  const [closingSymbols, setClosingSymbols] = useState(() => new Set());
   const closePosition = useCallback((p) => {
-    if (!p.qty) return;
+    if (!p.qty || closingSymbols.has(p.symbol)) return;
     send("place_order", {
       symbol: p.symbol,
       direction: p.side === "long" ? "sell" : "buy",
@@ -2721,7 +2754,26 @@ export default function TradingPlatform() {
       price: 0,
       octype: "cover",
     });
-  }, [send]);
+    // 平倉單一送出就鎖住這檔：市價單成交前倉位數字還是舊的，
+    // 這時再按一次就是又一張反向市價單（空單會被平掉後反手成多單）。
+    // 後端會在下單後主動跟券商對帳，倉位更新到就自動解鎖。
+    setClosingSymbols(prev => new Set(prev).add(p.symbol));
+    setTimeout(() => setClosingSymbols(prev => {
+      const next = new Set(prev);
+      next.delete(p.symbol);
+      return next;
+    }), 6000);
+  }, [send, closingSymbols]);
+
+  // 倉位一有變動（後端對帳完會整份推過來）就解除平倉鎖，不必等逾時
+  useEffect(() => {
+    setClosingSymbols(prev => {
+      if (prev.size === 0) return prev;
+      const held = new Set(positions.map(p => p.symbol));
+      const next = new Set([...prev].filter(s => held.has(s)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [positions]);
   const [timeframe, setTimeframe] = useState(() => localStorage.getItem("chart_timeframe") ?? "15");
   const [visibleCount, setVisibleCount] = useState(() => { const v = parseInt(localStorage.getItem("chart_visibleCount") ?? "60"); return isNaN(v) ? 60 : v; });
   const [offset, setOffset] = useState(() => { const v = parseInt(localStorage.getItem("chart_offset") ?? "0"); return isNaN(v) ? 0 : v; });
@@ -3249,6 +3301,8 @@ export default function TradingPlatform() {
                 latestPrices={latestPrices}
                 cancelOrder={cancelOrder}
                 closePosition={closePosition}
+                refreshAccount={refreshAccount}
+                closingSymbols={closingSymbols}
               />
             </div>
             {/* 成交明細 - 30% */}
