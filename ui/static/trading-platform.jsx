@@ -82,8 +82,12 @@ const COLORS = {
   accent: "#3b82f6",
   accentDim: "#1e40af",
   up: "#22c55e",
+  upStrong: "#16a34a",        // 漸層／實心按鈕的深色端
+  upRgb: "34,197,94",         // 給 upAlpha() 組半透明底色用
   upBg: "rgba(34,197,94,0.12)",
   down: "#ef4444",
+  downStrong: "#dc2626",
+  downRgb: "239,68,68",
   downBg: "rgba(239,68,68,0.12)",
   warn: "#f59e0b",
   warnBg: "rgba(245,158,11,0.12)",
@@ -97,19 +101,26 @@ const COLORS = {
 
 // 漲跌顏色慣例（由 config/settings.py 的 CANDLE_COLOR_SCHEME 設定，經 /api/config 傳入）
 // "green-up"：漲＝綠、跌＝紅（國際慣例）；"red-up"：漲＝紅、跌＝綠（台股慣例）
+const GREEN = { main: "#22c55e", strong: "#16a34a", rgb: "34,197,94" };
+const RED = { main: "#ef4444", strong: "#dc2626", rgb: "239,68,68" };
+
 function applyCandleColorScheme(scheme) {
-  if (scheme === "red-up") {
-    COLORS.up = "#ef4444";
-    COLORS.upBg = "rgba(239,68,68,0.12)";
-    COLORS.down = "#22c55e";
-    COLORS.downBg = "rgba(34,197,94,0.12)";
-  } else {
-    COLORS.up = "#22c55e";
-    COLORS.upBg = "rgba(34,197,94,0.12)";
-    COLORS.down = "#ef4444";
-    COLORS.downBg = "rgba(239,68,68,0.12)";
-  }
+  const [up, down] = scheme === "red-up" ? [RED, GREEN] : [GREEN, RED];
+  COLORS.up = up.main;
+  COLORS.upStrong = up.strong;
+  COLORS.upRgb = up.rgb;
+  COLORS.upBg = `rgba(${up.rgb},0.12)`;
+  COLORS.down = down.main;
+  COLORS.downStrong = down.strong;
+  COLORS.downRgb = down.rgb;
+  COLORS.downBg = `rgba(${down.rgb},0.12)`;
 }
+
+// 漲跌色的半透明版本（底色、邊框、深度條用）。
+// 這些地方一旦寫死 rgba(34,197,94,…)，換成台股慣例（紅漲）時就會出現
+// 「字是紅的、底色還是綠的」——同一顆買進按鈕兩種色系。
+const upAlpha = (a) => `rgba(${COLORS.upRgb},${a})`;
+const downAlpha = (a) => `rgba(${COLORS.downRgb},${a})`;
 
 // ─── Auth helpers ─────────────────────────────────────────────────────
 const TOKEN_KEY = "futures_pro_token";
@@ -1099,8 +1110,10 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         title={feedback ? feedback.text : ""}
         style={{
           padding: "2px 8px", fontSize: feedback && !feedback.ok ? 10 : 8, textAlign: "center",
-          color: feedback ? (feedback.ok ? COLORS.up : COLORS.danger) : COLORS.textMuted,
-          background: feedback && !feedback.ok ? "rgba(239,68,68,0.12)" : "transparent",
+          // 「下單成功／失敗」是狀態，不是漲跌 —— 用 up 的話台股慣例下
+          // 成功訊息會變成紅字，跟失敗訊息同色
+          color: feedback ? (feedback.ok ? COLORS.success : COLORS.danger) : COLORS.textMuted,
+          background: feedback && !feedback.ok ? COLORS.dangerBg : "transparent",
           borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0, letterSpacing: 0.5,
           lineHeight: 1.35,
           whiteSpace: feedback && !feedback.ok ? "normal" : "nowrap",
@@ -1147,7 +1160,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
               height: ROW_H, alignItems: "center",
               borderBottom: `1px solid ${COLORS.border}10`,
               background: row.isCurrent ? "rgba(250,204,21,0.12)"
-                : isAskZone ? "rgba(239,68,68,0.04)" : isBidZone ? "rgba(34,197,94,0.04)" : "transparent",
+                : isAskZone ? downAlpha(0.04) : isBidZone ? upAlpha(0.04) : "transparent",
             }}>
               {/* 觸買 */}
               <div style={cellBase}
@@ -1165,7 +1178,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
                 onClick={e => handleCell("buy", row.price, e)}
                 onContextMenu={e => handleCell("buy", row.price, e)}
                 title="左鍵:買進 / 右鍵:刪除">
-                {hasBuyOrder && <span style={tagStyle(COLORS.up, "rgba(34,197,94,0.15)")}>{hasBuyOrder}</span>}
+                {hasBuyOrder && <span style={tagStyle(COLORS.up, upAlpha(0.15))}>{hasBuyOrder}</span>}
               </div>
 
               {/* 委買 */}
@@ -1196,7 +1209,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
                 onClick={e => handleCell("sell", row.price, e)}
                 onContextMenu={e => handleCell("sell", row.price, e)}
                 title="左鍵:賣出 / 右鍵:刪除">
-                {hasSellOrder && <span style={tagStyle(COLORS.down, "rgba(239,68,68,0.15)")}>{hasSellOrder}</span>}
+                {hasSellOrder && <span style={tagStyle(COLORS.down, downAlpha(0.15))}>{hasSellOrder}</span>}
               </div>
 
               {/* 觸賣 */}
@@ -1256,22 +1269,22 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       }}>
         <button onClick={() => cancelOrdersByKind("buy")} style={{
           flex: 1, padding: "5px 0", fontSize: 10, fontWeight: 600,
-          background: "rgba(34,197,94,0.08)", border: `1px solid rgba(34,197,94,0.25)`,
+          background: upAlpha(0.08), border: `1px solid ${upAlpha(0.25)}`,
           color: COLORS.up, borderRadius: 3, cursor: "pointer"
         }}>買單全刪</button>
         <button onClick={() => placeOrder("market_buy", 0, qty)} style={{
           padding: "5px 10px", fontSize: 10, fontWeight: 700,
-          background: "linear-gradient(135deg, #16a34a, #22c55e)", border: "none",
+          background: `linear-gradient(135deg, ${COLORS.upStrong}, ${COLORS.up})`, border: "none",
           color: "#fff", borderRadius: 3, cursor: "pointer"
         }}>市買</button>
         <button onClick={() => placeOrder("market_sell", 0, qty)} style={{
           padding: "5px 10px", fontSize: 10, fontWeight: 700,
-          background: "linear-gradient(135deg, #dc2626, #ef4444)", border: "none",
+          background: `linear-gradient(135deg, ${COLORS.downStrong}, ${COLORS.down})`, border: "none",
           color: "#fff", borderRadius: 3, cursor: "pointer"
         }}>市賣</button>
         <button onClick={() => cancelOrdersByKind("sell")} style={{
           flex: 1, padding: "5px 0", fontSize: 10, fontWeight: 600,
-          background: "rgba(239,68,68,0.08)", border: `1px solid rgba(239,68,68,0.25)`,
+          background: downAlpha(0.08), border: `1px solid ${downAlpha(0.25)}`,
           color: COLORS.down, borderRadius: 3, cursor: "pointer"
         }}>賣單全刪</button>
       </div>
@@ -3254,7 +3267,7 @@ export default function TradingPlatform() {
                     <div key={p.symbol} style={{
                       display: "flex", alignItems: "center", gap: 6, padding: "2px 8px",
                       background: COLORS.bgCard, borderRadius: 4, whiteSpace: "nowrap",
-                      border: `1px solid ${pnl >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`
+                      border: `1px solid ${pnl >= 0 ? upAlpha(0.2) : downAlpha(0.2)}`
                     }}>
                       <span style={{ color: COLORS.text, fontWeight: 600 }}>{p.symbol}</span>
                       <span style={{ color: p.side === "long" ? COLORS.up : COLORS.down, fontWeight: 600 }}>

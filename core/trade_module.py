@@ -481,6 +481,15 @@ class TradeModule:
 
     async def _refresh_from_broker(self) -> None:
         positions = await self._adapter.get_positions()
+
+        if not self.is_connected:
+            # 查詢過程中才發現連線已失效（token 過期、session 斷掉）。
+            # 這時拿到的空清單意思是「查不到」而不是「沒有部位」，蓋上去會讓畫面上的
+            # 部位憑空消失 —— 使用者會以為已經平掉，其實倉位還在券商那裡。
+            logger.error("[TradeModule] 對帳時發現券商連線失效，保留現有倉位；請重新連線券商")
+            await self.bus.emit("trade_disconnected", self.broker_name)
+            return
+
         self._positions = {p.symbol: p for p in positions}
 
         fills = await self._adapter.get_fills_today()

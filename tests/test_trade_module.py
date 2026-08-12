@@ -539,6 +539,31 @@ class TestPositionSync:
 
         assert len(asyncio.run(scenario())) == 1
 
+    def test_lost_connection_keeps_positions(self):
+        """token 過期時券商查詢會回空清單。當成「沒有部位」蓋上去的話，
+        畫面上的倉位會憑空消失，使用者以為平掉了、其實還在券商那裡。"""
+        async def scenario():
+            events = []
+            EventBus().on("trade_disconnected", lambda name: events.append(name))
+
+            t, a = TradeModule(), FakeAdapter(positions=[
+                Position(symbol="TX", side=PositionSide.LONG, qty=2, avg_price=18000.0),
+            ])
+            await connect(t, a)
+
+            async def dead_query():
+                a._connected = False      # 查到一半才發現 token 過期
+                return []
+            a.get_positions = dead_query
+
+            await t.refresh_from_broker()
+            await asyncio.sleep(0)
+            return t.positions, events
+
+        positions, events = asyncio.run(scenario())
+        assert [(p.symbol, p.qty) for p in positions] == [("TX", 2)]   # 倉位留著
+        assert events == ["測試券商"]                                   # 並且通知前端斷線
+
     def test_rejected_order_does_not_sync(self):
         """沒送出去的單不必對帳，省一次券商查詢。"""
         async def scenario():

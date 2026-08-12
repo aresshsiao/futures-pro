@@ -530,6 +530,41 @@ class TestTradeAdapterQueries:
         assert fills[0].price == 18000.0
         assert fills[0].broker_fill_id == "7"
 
+    def test_expired_token_marks_disconnected(self):
+        """token 過期後每一發 API 都會失敗，但本地旗標還是「已連線」——
+        畫面燈號是綠的、下單按鈕能按，單卻永遠送不出去。"""
+        adapter, api, sj_mod, _ = _connected_trade()
+        api.list_positions.side_effect = RuntimeError(
+            "StatusCode: 401, Detail: Token is expired"
+        )
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            assert run(adapter.get_positions()) == []
+        assert adapter.is_connected() is False
+
+    @pytest.mark.parametrize("message", [
+        "Timeout Topic: api/v1/paper/position, Corr: c401, Timeout: 30000ms",  # 相關序號帶 401
+        "list_positions failed at price 44401",
+    ])
+    def test_transient_error_keeps_connection(self, message):
+        """單次查詢逾時不代表登入失效，不該把使用者踢成斷線 ——
+        序號或價格裡剛好有 401 也不行。"""
+        adapter, api, sj_mod, _ = _connected_trade()
+        api.list_positions.side_effect = RuntimeError(message)
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            assert run(adapter.get_positions()) == []
+        assert adapter.is_connected() is True
+
+    def test_dead_session_marks_disconnected(self):
+        """session 斷掉後重連但沒重新登入，API 會回 SessionNotEstablished。"""
+        adapter, api, sj_mod, _ = _connected_trade()
+        api.list_positions.side_effect = RuntimeError(
+            'Session error SolClient send request, code: NotReady, '
+            'Error ErrorInfo { sub_code: SubCode(SessionNotEstablished) }'
+        )
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            assert run(adapter.get_positions()) == []
+        assert adapter.is_connected() is False
+
     def test_get_orders_today_includes_finished(self):
         """對帳要看得到已成交／已刪的單，才能把本地卡住的委託修正回來。"""
         adapter, api, sj_mod, _ = _connected_trade()

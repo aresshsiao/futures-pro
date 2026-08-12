@@ -744,6 +744,9 @@ async def startup_script_timer():
 
 # event loop 排程延遲超過這個秒數就記一筆警告
 LOOP_LAG_WARN_SEC = 0.3
+# 超過這個秒數就不可能是「loop 忙不過來」，而是整個行程被作業系統凍結
+# （筆電闔蓋休眠、VM 暫停）。當成 loop 延遲報會變成好幾千秒的假警報。
+PROCESS_SUSPEND_SEC = 30.0
 
 
 async def _loop_lag_monitor():
@@ -762,7 +765,18 @@ async def _loop_lag_monitor():
         started = _time.perf_counter()
         await asyncio.sleep(1)
         lag = _time.perf_counter() - started - 1.0
-        if lag >= LOOP_LAG_WARN_SEC:
+
+        if lag >= PROCESS_SUSPEND_SEC:
+            # 電腦睡醒後：券商的 TCP session 多半已經斷過再重連，
+            # 這段期間的委託／成交回報是收不到的，本地狀態不能再信，直接跟券商重對一次。
+            logger.warning(
+                "[Core] 行程被凍結約 %.0f 秒（系統休眠？）——期間的券商回報已經錯過，重新對帳", lag,
+            )
+            try:
+                await trade.refresh_from_broker()
+            except Exception:
+                logger.exception("[Core] 休眠恢復後的對帳失敗")
+        elif lag >= LOOP_LAG_WARN_SEC:
             logger.warning(
                 "[Core] event loop 延遲 %.2fs — 這段期間所有回報與廣播都會被延後", lag
             )

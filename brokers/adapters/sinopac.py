@@ -1158,7 +1158,37 @@ class SinoPacTradeAdapter(TradeAdapter):
     async def _run(self, fn, *args, **kwargs):
         """Shioaji 的查詢/下單都是同步阻塞呼叫，丟到執行緒避免凍結 event loop。"""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+        try:
+            return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+        except Exception as e:
+            self._note_connection_error(e)
+            raise
+
+    # 這些錯誤代表「登入狀態已經沒了」，不是單次查詢失敗。
+    # 特徵字串要夠specific —— 用 "401" 這種短字串比對，隨便一個相關序號或價格
+    # 裡出現 401 就會把使用者誤判成斷線。
+    _AUTH_ERROR_HINTS = (
+        "token is expired", "tokenerror", "sessionnotestablished",
+        "session error", "unauthorized",
+    )
+
+    def _note_connection_error(self, exc: Exception) -> None:
+        """認證失效／session 斷掉時，把自己標記成未連線。
+
+        隔夜或電腦休眠後 token 會過期，但本地的 _connected 旗標還是 True ——
+        畫面上券商燈號還是綠的、下單按鈕照樣能按，實際上每一發 API 都會失敗。
+        寧可誠實顯示斷線讓使用者重新連線，也不要讓人以為單送得出去。
+        """
+        if not self._connected:
+            return
+        text = f"{type(exc).__name__} {exc}".lower()
+        if not any(hint in text for hint in self._AUTH_ERROR_HINTS):
+            return   # 一般的查詢失敗（逾時、單次錯誤）不動連線狀態
+        self._connected = False
+        logger.error(
+            "[SinoPac Trade] 券商連線已失效（%s: %s），請重新連線券商",
+            type(exc).__name__, str(exc)[:120],
+        )
 
     _CODE_PREFIX_MAP = {"TXF": "TX", "MXF": "MTX", "TMF": "TMF"}
 
