@@ -1,5 +1,5 @@
 """
-tests/test_broker_sinopac.py — 永豐金 Adapter 測試
+tests/brokers/test_broker_sinopac.py — 永豐金 Adapter 測試
 
 測試環境沒有真實的 Shioaji 憑證，所有需要連線的測試都用 unittest.mock
 模擬 shioaji 模組。兩個關鍵前提：
@@ -20,12 +20,9 @@ tests/test_broker_sinopac.py — 永豐金 Adapter 測試
 """
 import asyncio
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import brokers.adapters.sinopac as sinopac
 from brokers.adapters.sinopac import SinoPacQuoteAdapter, SinoPacTradeAdapter

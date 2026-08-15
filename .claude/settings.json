@@ -1,9 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python tests/check_db.py)",
-      "Bash(python -m pytest tests/test_database.py tests/test_taifex.py tests/test_broker_sinopac.py -v --tb=short)",
-      "Bash(python -m pytest tests/test_taifex.py::TestParseCsvTextTick -v --tb=short)",
+      "Bash(python tests/manual/check_db.py)",
+      "Bash(python -m pytest tests/data/test_database.py tests/data/test_taifex.py tests/brokers/test_broker_sinopac.py -v --tb=short)",
+      "Bash(python -m pytest tests/data/test_taifex.py::TestParseCsvTextTick -v --tb=short)",
       "Bash(python -c ':*)",
       "Bash(ls data/*.zip)"
     ]

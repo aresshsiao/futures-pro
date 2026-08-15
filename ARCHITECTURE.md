@@ -127,6 +127,15 @@ futures-pro/
 │   ├── __init__.py
 │   └── logging_setup.py     # 全系統日誌設定（唯一碰 logging 設定的地方）
 │
+├── tests/                   # 依「被測的那一層」分類，對應上面的結構
+│   ├── conftest.py          # 專案根目錄加進 sys.path（測試檔自己不必處理）
+│   ├── core/                # 交易模塊、成交明細推算
+│   ├── brokers/             # 券商 adapter
+│   ├── data/                # SQLite、期交所匯入
+│   ├── gateway/             # main.py 的 handler、送給前端的 payload
+│   ├── utils/               # 日誌設定
+│   └── manual/              # 手動執行的診斷腳本（會連真實 API），pytest 不收集
+│
 └── logs/                    # 執行期產生 (gitignore)
     ├── futures.log          # 全部訊息
     ├── error.log            # WARNING 以上
@@ -203,10 +212,10 @@ Core / Gateway 兩層透過同一個 in-process `EventBus` (Pub/Sub) 溝通：
 | `indicator_output` | ScriptEngine | Gateway | 指標繪圖資料 |
 | `order_placed` | TradeModule | Gateway | 委託送出 |
 | `order_update` | TradeModule | Gateway | 委託狀態變更（成交進度、對帳修正） |
-| `order_filled` | TradeModule | Gateway | 單筆成交（此時還沒有已實現損益） |
+| `order_filled` | TradeModule | Gateway | 單筆成交（新倉/平倉與損益為本地推算） |
 | `order_cancelled` | TradeModule | Gateway | 委託取消 |
 | `positions_update` | TradeModule | Gateway | 倉位變動（整份清單） |
-| `fills_update` | TradeModule | Gateway | 對帳後的完整成交明細（含已實現損益） |
+| `fills_update` | TradeModule | Gateway | 對帳後的完整成交明細（損益已用券商結算值覆蓋） |
 | `script_signal` | ScriptEngine | TradeModule | 策略訊號 |
 | `quote_connected` / `quote_disconnected` | QuoteModule | Gateway | 連線狀態變更 |
 | `trade_connected` / `trade_disconnected` | TradeModule | Gateway | 連線狀態變更 |
@@ -243,9 +252,15 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
 - 倉位不能只信本地推算：成交回報漏接時畫面會停在舊數字，使用者反覆按平倉等於反覆送真實市價單。
   因此下單／成交後都會排一次 `refresh_from_broker()`（同一時間只留一個待辦），
   券商端的庫存整份覆蓋本地；UI 的倉位面板也有「⟳ 同步」可手動觸發。
-- **成交明細分兩段送**：單筆 `fill` 立刻推（讓畫面馬上看到成交，但沒有已實現損益——那要等券商結算），
-  對帳完成後再推一次完整的 `fills`（含損益）。前端不自己重拉：一張市價單可能分成上百筆成交回報，
-  每筆各拉一次就是逼後端連打上百發券商 API。
+- **成交明細分兩段送**：單筆 `fill` 立刻推（讓畫面馬上看到成交），對帳完成後再推一次完整的 `fills`。
+  前端不自己重拉：一張市價單可能分成上百筆成交回報，每筆各拉一次就是逼後端連打上百發券商 API。
+- **新倉/平倉與已實現損益是自己推算的**（`core/fill_ledger.py`）：券商的成交回報只有買/賣，
+  看不出這一筆是進場還出場；`list_profit_loss` 要等結算才查得到，而且按「已平倉部位」彙總、
+  對不回單筆成交。`FillLedger` 依成交順序重播部位，替每筆標上 `oc_type` / `closed_qty` / `pnl`，
+  成交當下畫面就有數字（標 `pnl_estimated`，未扣手續費）；對帳時 `_merge_fills_with_pnl()`
+  再用券商結算好的數字覆蓋。留倉單的進場成本不在今日成交裡，那幾口標平倉但損益留空等券商補。
+  重播前要先由「券商倉位 − 今日成交淨額」反推開盤前部位，否則平留倉單會被判成新倉，
+  之後整天的新倉/平倉全部反過來。
 - **委託狀態不能只認委託回報**：市價單成交後券商送的是**成交回報**，不保證再補一次委託回報。
   成交回報的 `order_id` 就是委託序號，`_apply_fill_to_order()` 用它累加成交口數並結成
   `partial` / `filled`，否則市價單會永遠卡在畫面的「委託中」。對帳時再用券商的委託狀態覆蓋一次。

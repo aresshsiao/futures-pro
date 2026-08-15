@@ -1,17 +1,17 @@
 """
-tests/check_db.py — 資料庫診斷腳本
+tests/manual/check_db.py — 資料庫診斷腳本
 
 直接執行即可查看 futures.db 的完整狀況：
-    python tests/check_db.py
-    python tests/check_db.py --symbol TX --timeframe 1d --limit 20
+    python tests/manual/check_db.py
+    python tests/manual/check_db.py --symbol TX --timeframe 1d --limit 20
 """
 import argparse
 import sqlite3
 import sys
 from pathlib import Path
 
-# 讓專案根目錄可 import
-ROOT = Path(__file__).parent.parent
+# 讓專案根目錄可 import（tests/manual/ 往上三層）
+ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config.settings import DB_PATH

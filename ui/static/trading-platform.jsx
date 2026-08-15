@@ -61,6 +61,11 @@ const ORDER_STATUS_LABEL = {
   filled: "已成交", cancelled: "已刪單", rejected: "已拒絕", stop_wait: "等待觸發",
 };
 
+// 成交明細的新倉/平倉別（後端 FillLedger 依成交順序推算，券商回報本身沒有這個欄位）
+const OC_LABEL = {
+  new: "新倉", cover: "平倉", cover_new: "平反",
+};
+
 const BROKER_LIST = [
   { id: "sinopac", name: "永豐金", status: "connected", type: "both" },
   { id: "fubon", name: "富邦期貨", status: "disconnected", type: "both" },
@@ -1379,7 +1384,7 @@ function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, clo
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ color: COLORS.textMuted, fontSize: 9, borderBottom: `1px solid ${COLORS.border}`, position: "sticky", top: 34, background: COLORS.bgPanel, zIndex: 9 }}>
-                      {["商品", "方向", "口", "均價", "現價", "損益", ""].map((h, i) => (
+                      {["商品", "買賣", "口", "均價", "現價", "損益", ""].map((h, i) => (
                         <th key={i} style={{ padding: "3px 4px", textAlign: "right", fontWeight: 500 }}>{h}</th>
                       ))}
                     </tr>
@@ -1482,10 +1487,15 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
       time,
       symbol: f.symbol,
       direction: f.direction === "buy" ? "買" : "賣",
+      // 新倉/平倉由後端依成交順序推算（券商回報只有買賣，看不出進場還出場）
+      oc: OC_LABEL[f.oc_type] || "",
+      closedQty: f.closed_qty || 0,
       price: f.price,
       qty: f.qty,
-      // pnl 只有平倉成交才會有值（後端比對已實現損益後補上），開倉成交是 null
+      // pnl 只有平倉成交才會有值；平留倉單時本地算不出成本，要等券商結算才有數字
       pnl: f.pnl ?? null,
+      // 本地推算的損益還沒經券商結算（不含手續費/交易稅），標示出來免得被當成最終數字
+      estimated: !!f.pnl_estimated,
     };
   }, []);
 
@@ -1510,6 +1520,13 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
     return addHandler("fill", (msg) => setTrades(prev => [toRow(msg), ...prev]));
   }, [addHandler, toRow]);
 
+  // 今日已實現損益合計。還在等券商結算的那幾筆（pnl 為 null）不算進來，
+  // 數字會偏保守，但不會拿 0 當成「這筆沒賺沒賠」灌進總和裡。
+  const totalPnl = useMemo(() => {
+    const closed = trades.filter(t => t.pnl != null);
+    return closed.length ? closed.reduce((s, t) => s + t.pnl, 0) : null;
+  }, [trades]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{
@@ -1519,6 +1536,11 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
         <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.text }}>成交明細</span>
         <span style={{ fontSize: 9, color: COLORS.textDim }}>
           今日 {trades.length} 筆
+          {totalPnl != null && (
+            <span style={{ marginLeft: 6, fontFamily: "monospace", fontWeight: 700, color: totalPnl >= 0 ? COLORS.up : COLORS.down }}>
+              {totalPnl >= 0 ? "+" : ""}{totalPnl.toLocaleString()}
+            </span>
+          )}
         </span>
       </div>
 
@@ -1542,14 +1564,30 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
               <tr key={t.id} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
                 <td style={{ padding: "4px 6px", textAlign: "left", color: COLORS.textDim, fontFamily: "monospace", fontSize: 9 }}>{t.time}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontWeight: 600 }}>{t.symbol}</td>
-                <td style={{ padding: "4px 6px", textAlign: "right", fontWeight: 600, color: t.direction === "買" ? COLORS.up : COLORS.down }}>{t.direction}</td>
+                <td style={{ padding: "4px 6px", textAlign: "right", fontWeight: 600, color: t.direction === "買" ? COLORS.up : COLORS.down }}>
+                  {t.direction}
+                  {t.oc && (
+                    <span
+                      title={t.closedQty ? `平掉 ${t.closedQty} 口` : "建立新部位"}
+                      style={{
+                        marginLeft: 3, padding: "0 3px", borderRadius: 2, fontSize: 8, fontWeight: 600,
+                        color: COLORS.textMuted, border: `1px solid ${COLORS.border}`,
+                      }}
+                    >{t.oc}</span>
+                  )}
+                </td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{t.price}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{t.qty}</td>
-                <td style={{
-                  padding: "4px 6px", textAlign: "right", fontFamily: "monospace",
-                  color: t.pnl == null ? COLORS.textDim : t.pnl >= 0 ? COLORS.up : COLORS.down
-                }}>
-                  {t.pnl == null ? "-" : `${t.pnl >= 0 ? "+" : ""}${t.pnl.toLocaleString()}`}
+                <td
+                  title={t.estimated ? "本地推算（未扣手續費與交易稅），券商結算後會更新" : undefined}
+                  style={{
+                    padding: "4px 6px", textAlign: "right", fontFamily: "monospace",
+                    color: t.pnl == null ? COLORS.textDim : t.pnl >= 0 ? COLORS.up : COLORS.down
+                  }}
+                >
+                  {t.pnl == null
+                    ? (t.oc === "新倉" ? "-" : "…")
+                    : `${t.pnl >= 0 ? "+" : ""}${t.pnl.toLocaleString()}${t.estimated ? "*" : ""}`}
                 </td>
               </tr>
             ))}

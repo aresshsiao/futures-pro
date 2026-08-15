@@ -1,22 +1,19 @@
 """
-tests/test_trade_module.py — 交易模塊（倉位 / 委託）測試
+tests/core/test_trade_module.py — 交易模塊（倉位 / 委託）測試
 
 重點在幾件事：
   1. 觸價單是「本地單」——券商端沒有這張單，觸發時必須真的補送一張市價單出去。
   2. 券商沒收下的單不能標成「已送出」，否則畫面會有一張刪不掉的幽靈單。
   3. 倉位不能只信本地推算，下單／成交後要跟券商對帳。
   4. 倉位變動一律推送整份清單，前端才知道哪一檔被平掉了。
+  5. 成交明細的新倉/平倉與損益是推算出來的，推給畫面之前就要算好。
 
 EventBus 是 singleton，每個測試前後都要清乾淨，否則上一個測試註冊的
 TradeModule 會繼續收事件（同一顆 bus 會有多個模塊的 handler）。
 """
 import asyncio
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.event_bus import EventBus
 from core.models import (
@@ -408,6 +405,65 @@ class TestFillUpdatesOrder:
         assert order.filled_qty == 0
         assert order.status is OrderStatus.SUBMITTED
         assert len(trade.fills_today) == 1
+
+
+# ─── 成交明細的新倉/平倉與損益 ──────────────────────────────
+
+class TestFillAnnotation:
+    """券商的成交回報只有買/賣，看不出進場還出場，也沒有損益。
+    這兩欄由 FillLedger 推算（單獨的邏輯測試在 test_fill_ledger.py），
+    這裡確認 TradeModule 有把它接上去 —— 尤其是「推給畫面之前」就要算好。"""
+
+    def test_fill_annotated_before_broadcast(self):
+        """先推播再推算的話，畫面上那一列會空著到下一次對帳才有數字。"""
+        async def scenario():
+            received = []
+            EventBus().on("order_filled", lambda f: received.append((f.oc_type, f.pnl)))
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            t._on_fill(fill(direction=Direction.BUY, price=18000.0, qty=1))
+            t._on_fill(fill(direction=Direction.SELL, price=18050.0, qty=1))
+            for _ in range(4):
+                await asyncio.sleep(0)
+            return received
+
+        assert asyncio.run(scenario()) == [("new", None), ("cover", 50 * 200)]
+
+    def test_reconcile_reannotates_broker_fills(self):
+        """對帳拿回來的是券商原始資料，沒有推算欄位，得整份重算。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            a.broker_fills = [
+                fill(direction=Direction.BUY, price=18000.0, qty=1),
+                fill(direction=Direction.SELL, price=18030.0, qty=1),
+            ]
+            await connect(t, a)
+            await t.refresh_from_broker()
+            return t.fills_today
+
+        fills = asyncio.run(scenario())
+        assert [f.oc_type for f in fills] == ["new", "cover"]
+        assert fills[1].pnl == 30 * 200
+
+    def test_overnight_position_first_fill_is_a_cover(self):
+        """留倉單的口數要由「券商倉位 - 今日成交淨額」反推，
+        不然平倉會被當成新倉，之後整天的新倉/平倉判定全部反過來。"""
+        async def scenario():
+            t, a = TradeModule(), FakeAdapter(positions=[
+                Position(symbol="TX", side=PositionSide.LONG, qty=2, avg_price=18000.0),
+            ])
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            t._on_fill(fill(direction=Direction.SELL, price=18100.0, qty=1))
+            await asyncio.sleep(0)
+            return t.fills_today[0]
+
+        f = asyncio.run(scenario())
+        assert f.oc_type == "cover"
+        assert f.closed_qty == 1
+        assert f.pnl is None      # 昨天的進場價不在今日成交裡，等券商結算
 
 
 # ─── 跟券商對帳 ─────────────────────────────────────────────

@@ -1,8 +1,12 @@
 """
-tests/test_sinopac_kbars.py — 測試永豐 API 能否抓到一整天的 K 棒
+tests/manual/check_sinopac_kbars.py — 檢查永豐 API 能否抓到一整天的 K 棒
 
-執行方式:
-    # python tests/test_sinopac_kbars.py
+這支不是單元測試：import 當下就會拿 config/brokers.yaml 的憑證去登入真實 API。
+檔名刻意不用 test_ 開頭（pytest.ini 也把 manual/ 排除在收集之外），
+否則 `pytest tests/` 會在這裡卡住登入。
+
+執行方式（在專案根目錄）:
+    python tests/manual/check_sinopac_kbars.py
 """
 import sys
 import yaml

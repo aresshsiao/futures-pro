@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from core.event_bus import EventBus
+from core.fill_ledger import OC_TEXT as _OC_TEXT, FillLedger
 from core.models import (
     Direction, Fill, Order, OrderStatus, OrderType, Position,
 )
@@ -37,6 +38,8 @@ class TradeModule:
         self._orders: dict[str, Order] = {}       # id → Order
         self._positions: dict[str, Position] = {}  # symbol → Position
         self._fills: list[Fill] = []
+        # 成交明細的新倉/平倉與已實現損益（券商不給，靠成交順序推算）
+        self._ledger = FillLedger()
         self._sync_handle = None                  # 待執行的倉位對帳（見 _schedule_position_sync）
         self._refreshing = False                  # 是否已有一輪對帳在跑（避免連按同步造成並發查詢）
 
@@ -66,8 +69,8 @@ class TradeModule:
             # 同步倉位（整份取代，不是合併——券商端才是庫存的唯一真相，
             # 保留上一次連線的殘留會變成畫面上平不掉的幽靈倉位）
             self._positions = {p.symbol: p for p in await adapter.get_positions()}
-            # 同步今日成交明細
-            self._fills = await adapter.get_fills_today()
+            # 同步今日成交明細（含新倉/平倉與已實現損益的推算）
+            self._fills = self._replay_fills(await adapter.get_fills_today())
             self._broadcast_positions()
             await self.bus.emit("trade_connected", adapter.name)
         return ok
@@ -291,9 +294,13 @@ class TradeModule:
 
     def _on_fill(self, fill: Fill) -> None:
         """券商回報: 成交"""
+        # 標上新倉/平倉與已實現損益後才推出去：畫面上這一列是即時插進去的，
+        # 這裡不補，那一列就會一路空著到下一次對帳才有數字。
+        self._ledger.apply(fill)
         logger.info(
-            "[TradeModule] 成交: %s %s x%s @%s (委託 %s)",
-            fill.direction.value, fill.symbol, fill.qty, fill.price, fill.order_id,
+            "[TradeModule] 成交: %s %s x%s @%s (%s，委託 %s)",
+            fill.direction.value, fill.symbol, fill.qty, fill.price,
+            _OC_TEXT.get(fill.oc_type, fill.oc_type or "未判定"), fill.order_id,
         )
         self._fills.append(fill)
         # 先讓畫面看到這筆成交，再做帳務：帳務萬一出錯，不該連帶讓成交從畫面上消失
@@ -365,6 +372,20 @@ class TradeModule:
                     del self._positions[fill.symbol]
 
         self._broadcast_positions()
+
+    def _replay_fills(self, fills: list[Fill]) -> list[Fill]:
+        """重播券商拿回來的整份成交，標上新倉/平倉與已實現損益。
+
+        券商給的成交只有價量方向，推算欄位得自己重算；重算前要先反推開盤前部位，
+        不然留倉單的第一筆平倉會被當成新倉，後面整天的判定跟著全部反過來。
+        """
+        opening = FillLedger.opening_from(self._positions.values(), fills)
+        if opening:
+            logger.info(
+                "[TradeModule] 開盤前留倉: %s",
+                ", ".join(f"{s} {'多' if q > 0 else '空'}{abs(q)}" for s, q in opening.items()),
+            )
+        return self._ledger.replay(fills, opening)
 
     # ── 跟券商對帳 ────────────────────────────────────
 
@@ -495,8 +516,10 @@ class TradeModule:
         fills = await self._adapter.get_fills_today()
         # 查詢失敗一樣是回空清單。整份蓋過去的話，畫面上的成交明細會突然全部消失，
         # 所以只有真的拿到資料（或本地本來就是空的）才覆蓋。
+        # 沒拿到資料時 ledger 也保持原狀：它靠成交回報累積的成本比重算回來的準
+        # （重算只能從券商倉位反推口數，反推不出留倉成本）。
         if fills or not self._fills:
-            self._fills = fills
+            self._fills = self._replay_fills(fills)
 
         logger.info(
             "[TradeModule] 跟券商對帳完成: 倉位 %s，今日成交 %d 筆",

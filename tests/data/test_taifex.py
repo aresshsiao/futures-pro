@@ -1,5 +1,5 @@
 """
-tests/test_taifex.py — TAIFEX 資料解析測試
+tests/data/test_taifex.py — TAIFEX 資料解析測試
 
 涵蓋:
   - _parse_number: 各種邊界輸入
@@ -10,14 +10,11 @@ tests/test_taifex.py — TAIFEX 資料解析測試
   - import_directory: 掃描本地 raw 目錄（integration）
 """
 import io
-import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.models import Bar, Timeframe
 from data.sources.taifex import TaifexImporter
@@ -302,10 +299,15 @@ class TestImportDirectory:
 
 # ─── Integration: 本地 raw 目錄 ──────────────────────────────
 
+@pytest.mark.slow
 class TestImportLocalRaw:
     """
     若 data/raw/taifex 目錄有 ZIP/CSV 檔案，驗證能正常解析。
     沒有檔案時自動跳過。
+
+    標成 slow 是因為它掃的是本地實際下載的資料 —— 每天累積，目前已是上 GB 的
+    逐筆成交 ZIP，跑一次要好幾分鐘。預設不跑（見 pytest.ini），要跑就：
+        python -m pytest -m slow
     """
 
     RAW_DIR = "data/raw/taifex"

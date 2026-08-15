@@ -1,5 +1,5 @@
 """
-tests/test_database.py — SQLite 資料庫測試
+tests/data/test_database.py — SQLite 資料庫測試
 
 涵蓋:
   - 連線與建表
@@ -11,14 +11,9 @@ tests/test_database.py — SQLite 資料庫測試
   - 實際 futures.db 存在性與資料摘要 (integration)
 """
 import sqlite3
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import pytest
-
-# 直接執行時 (python tests/test_database.py) 也能找到專案模組
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.models import Bar, Timeframe
 from data.database import Database, DB_PATH

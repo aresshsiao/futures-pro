@@ -152,6 +152,12 @@ def setup_event_bridge():
             "qty": fill.qty,
             "fee": fill.fee,
             "timestamp": fill.timestamp.isoformat(),
+            # 新倉/平倉與已實現損益是本地推算的（券商回報沒有），
+            # 對帳完的 "fills" 推播會再用券商結算好的數字覆蓋一次
+            "oc_type": fill.oc_type,
+            "closed_qty": fill.closed_qty,
+            "pnl": fill.pnl,
+            "pnl_estimated": fill.pnl is not None,
         })
 
     async def forward_positions(positions: list[Position]):

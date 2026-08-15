@@ -161,6 +161,11 @@ class Fill:
     fee: float
     timestamp: datetime
     broker_fill_id: str = ""
+    # 以下三欄不是券商給的，是 FillLedger 依成交順序推算出來的（見 core/fill_ledger.py）。
+    # 券商的成交回報只有「買/賣」，看不出這一筆是進場還是出場，更沒有損益。
+    oc_type: str = ""       # "" 未判定 / "new" 新倉 / "cover" 平倉 / "cover_new" 平倉反手
+    closed_qty: int = 0     # 這筆成交裡平掉的口數（新倉為 0）
+    pnl: Optional[float] = None   # 平倉的已實現損益（未扣手續費）；None = 新倉或成本不明
 
 
 @dataclass
@@ -185,13 +190,20 @@ class Position:
         return self._get_point_value()
 
     def _get_point_value(self) -> float:
-        """每點價值 (台指期=200, 小台指=50, 電子期=4000, 金融期=1000)"""
-        POINT_VALUES = {
-            "TX": 200, "MTX": 50, "TE": 4000, "TF": 1000,
-            "TMF": 10,  # 微型台指
-            "TXO": 50,  # 台指選擇權
-        }
-        return POINT_VALUES.get(self.symbol, 200)
+        return point_value(self.symbol)
+
+
+# 每點價值 (台指期=200, 小台指=50, 電子期=4000, 金融期=1000)
+POINT_VALUES = {
+    "TX": 200, "MTX": 50, "TE": 4000, "TF": 1000,
+    "TMF": 10,  # 微型台指
+    "TXO": 50,  # 台指選擇權
+}
+
+
+def point_value(symbol: str) -> float:
+    """每點價值。倉位的浮動損益與成交明細的已實現損益共用同一份對照表。"""
+    return POINT_VALUES.get(symbol, 200)
 
 
 # ═══════════════════════════════════════════════════════════

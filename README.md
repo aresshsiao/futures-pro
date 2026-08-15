@@ -53,10 +53,22 @@ futures-pro/
 ├── scripts/             # Script 引擎、內建指標與策略
 ├── backtest/            # 回測引擎與績效報告
 ├── ui/                  # FastAPI + WebSocket 伺服器、React UI
-└── utils/               # 日誌、工具函式
+├── utils/               # 日誌、工具函式
+└── tests/               # 依被測的層分子目錄：core / brokers / data / gateway / utils
 ```
 
 詳細架構設計請參閱 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 測試
+
+```bash
+python -m pytest                    # 全部（幾秒內跑完）
+python -m pytest tests/core         # 只跑某一層
+python -m pytest -m slow            # 掃描 data/raw 實際資料的匯入測試（分鐘級）
+```
+
+`tests/manual/` 裡是要手動執行的診斷腳本（會連真實券商 API / 讀實際 DB），
+pytest 不會收集，需要時直接跑：`python tests/manual/check_db.py`。
 
 ## 技術棧
 

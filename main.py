@@ -465,11 +465,17 @@ async def handle_get_orders(ws, data: dict):
 
 
 def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
-    """把每筆成交跟已實現損益（list_profit_loss）比對，補上平倉單的損益。
+    """輸出成交明細，能對到券商已實現損益的就用券商的數字覆蓋本地推算。
+
+    新倉/平倉與損益本來就先由 FillLedger 依成交順序推算好了（見 core/fill_ledger.py），
+    畫面上馬上看得到。這裡再跟券商的 list_profit_loss 比對一次：那是結算後的權威數字，
+    還附帶手續費與交易稅，留倉單的進場成本也只有它知道。
 
     list_profit_loss 是「已平倉部位」的彙總（同商品/同出場價可能對應多筆分批成交），
     沒有可直接對應到單筆成交的 key，因此用「商品代碼 + 出場價格」搜尋還有剩餘口數
-    可分攤的損益紀錄，依成交口數佔比分攤 pnl/fee/tax；開倉單則沒有對應紀錄。
+    可分攤的損益紀錄，依口數佔比分攤 pnl/fee/tax。
+
+    fills 需照時間排序（舊→新）：分攤是先到先得，順序反了會把損益配到錯的那一筆。
     """
     remaining = [dict(r, remaining_qty=r["quantity"]) for r in pnl_records]
     rows = []
@@ -482,31 +488,52 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
             "qty": f.qty,
             "fee": f.fee,
             "timestamp": f.timestamp.isoformat(),
-            "pnl": None,
+            "oc_type": f.oc_type,
+            "closed_qty": f.closed_qty,
+            "pnl": f.pnl,
+            "pnl_estimated": f.pnl is not None,   # True = 本地推算，尚未經券商結算
             "realized_fee": None,
             "realized_tax": None,
         }
+        # 判定得出是新倉的就不必比對：同一個價位可能既有進場也有出場成交，
+        # 拿新倉去比會把出場的損益掛到進場那一列上。
+        if row["oc_type"] == "new":
+            rows.append(row)
+            continue
+
+        unmatched = f.closed_qty or f.qty   # 還沒判定（oc_type 為空）時退回用整筆口數比對
+        matched = False
         for r in remaining:
+            if unmatched <= 0:
+                break
             if r["remaining_qty"] <= 0 or r["symbol"] != f.symbol:
                 continue
             if abs(r["cover_price"] - f.price) > 1e-6:
                 continue
-            take = min(r["remaining_qty"], f.qty)
+            take = min(r["remaining_qty"], unmatched)
             ratio = take / r["quantity"] if r["quantity"] else 0
-            row["pnl"] = round((row["pnl"] or 0) + r["pnl"] * ratio, 2)
+            if not matched:
+                row["pnl"] = 0.0   # 第一筆對到就丟掉本地推算，改用券商結算的數字
+                matched = True
+            row["pnl"] = round(row["pnl"] + r["pnl"] * ratio, 2)
             row["realized_fee"] = round((row["realized_fee"] or 0) + r["fee"] * ratio, 2)
             row["realized_tax"] = round((row["realized_tax"] or 0) + r["tax"] * ratio, 2)
             r["remaining_qty"] -= take
-            break
+            unmatched -= take
+        if matched:
+            row["pnl_estimated"] = False
         rows.append(row)
     return rows
 
 
 async def _fills_payload() -> dict:
     """今日成交明細（新→舊，已比對出平倉損益）。查詢與主動推播共用同一份格式。"""
-    fills = sorted(trade.fills_today, key=lambda f: f.timestamp, reverse=True)
+    fills = sorted(trade.fills_today, key=lambda f: f.timestamp)
     pnl_records = await trade.get_profit_loss_today()
-    return {"type": "fills", "data": _merge_fills_with_pnl(fills, pnl_records)}
+    # 比對要照時間先後（先平的先分到損益），送到前端才反過來排成新→舊
+    rows = _merge_fills_with_pnl(fills, pnl_records)
+    rows.reverse()
+    return {"type": "fills", "data": rows}
 
 
 async def handle_get_fills(ws, data: dict):

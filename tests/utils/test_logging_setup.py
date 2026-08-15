@@ -1,5 +1,5 @@
 """
-tests/test_logging_setup.py — 日誌設定測試
+tests/utils/test_logging_setup.py — 日誌設定測試
 
 重點在「事後翻得到」這件事：
   1. 訊息真的落到 logs/ 的檔案，而不是只飄在 console。
@@ -15,8 +15,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import logging_setup
 
