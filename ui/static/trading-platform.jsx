@@ -982,10 +982,14 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 }
 
 // ─── Order Panel (Lightning Order — Price Ladder) ───────────────────
-function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, orders, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback }) {
+function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, orders, positions, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback, send, addHandler, connected }) {
   const [qty, setQty] = useState(1);
   const [centerOnPrice, setCenterOnPrice] = useState(true); // 成交置中 toggle
+  // 分頁：lightning = 價格階梯點價下單；right = 右邊下單（條件單機）
+  const [orderMode, setOrderMode] = useState(() => localStorage.getItem("orderPanelMode") || "lightning");
   const scrollRef = useRef(null);
+
+  useEffect(() => { localStorage.setItem("orderPanelMode", orderMode); }, [orderMode]);
 
   const tickSize = 1;
 
@@ -1061,19 +1065,42 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
 
   const ROW_H = 22;
   const GRID_COLS = "28px 1.1fr 38px 54px 38px 1.1fr 28px";
+  const isRightMode = orderMode === "right";
+
+  const modeTab = (id, label) => (
+    <button key={id} onClick={() => setOrderMode(id)} style={{
+      padding: "6px 10px", fontSize: 11, fontWeight: orderMode === id ? 700 : 400,
+      color: orderMode === id ? COLORS.accent : COLORS.textDim,
+      borderBottom: orderMode === id ? `2px solid ${COLORS.accent}` : "2px solid transparent",
+      background: "transparent", border: "none", borderBottomStyle: "solid", cursor: "pointer",
+      letterSpacing: 0.5, whiteSpace: "nowrap"
+    }}>{label}</button>
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      {/* Header */}
+      {/* Header：分頁切換版面 */}
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "6px 10px", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
+        padding: "0 10px 0 0", borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.text, letterSpacing: 1 }}>⚡ 閃電下單</span>
+        <div style={{ display: "flex" }}>
+          {modeTab("lightning", "⚡ 閃電下單")}
+          {modeTab("right", "▶ 右邊下單")}
+        </div>
         <span style={{ fontSize: 9, color: COLORS.textDim }}>
           <span style={{ color: COLORS.accent }}>{brokerConfig.tradeBroker}</span>
         </span>
       </div>
+
+      {isRightMode ? (
+        <RightSideOrderPanel
+          currentPrice={currentPrice}
+          activeSymbol={activeSymbol} setActiveSymbol={setActiveSymbol}
+          positions={positions} placeOrder={placeOrder} feedback={feedback}
+          send={send} addHandler={addHandler} connected={connected}
+        />
+      ) : (<>
 
       {/* Symbol + Qty bar */}
       <div style={{
@@ -1310,6 +1337,326 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         }}>觸賣全刪</button>
       </div>
 
+      </>)}
+    </div>
+  );
+}
+
+// ─── 右邊下單（條件單機）────────────────────────────────────────────
+// 壓力空／支撐多設觸發價，價格碰到就用「觸發價 ∓ 追點」的追價單進場，
+// 進場後再用利點／損點出場。條件目前只存在瀏覽器本機，還沒接後端觸發引擎。
+const COND_STATUS = {
+  waiting: { label: "等待觸發", icon: "○", color: COLORS.textDim },
+  triggered: { label: "已觸發", icon: "⚡", color: COLORS.warn },
+  sent: { label: "已送單", icon: "➤", color: COLORS.accent },
+  filled: { label: "已成交", icon: "●", color: COLORS.success },
+  guarded: { label: "已守成本", icon: "🔒", color: COLORS.warn },
+  exited: { label: "已出場", icon: "■", color: COLORS.textMuted },
+};
+
+const BLANK_COND_FORM = {
+  resistance: "", support: "", chase: "10", qty: "1",
+  tp: "30", sl: "-10", costGuard: false, trail: false,
+};
+
+function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, positions, placeOrder, feedback, send, addHandler, connected }) {
+  const [tradingOn, setTradingOn] = useState(false);
+  const [form, setForm] = useState(BLANK_COND_FORM);
+  const [editingId, setEditingId] = useState(null);
+  const [dayTrade, setDayTrade] = useState(false);
+  const [closeOnEnd, setCloseOnEnd] = useState(false);
+  const [equity, setEquity] = useState(null);
+  // 條件寫進 localStorage，重整頁面不會整批消失（也提醒使用者這是本機資料）
+  const [conditions, setConditions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("rightSideConditions") || "[]"); }
+    catch { return []; }
+  });
+
+  useEffect(() => {
+    localStorage.setItem("rightSideConditions", JSON.stringify(conditions));
+  }, [conditions]);
+
+  // 帳戶權益：後端 get_account 會回券商的保證金專戶
+  useEffect(() => addHandler("account_info", (msg) => {
+    const m = msg.margin || {};
+    const eq = m.equity_amount ?? m.equity ?? m.today_balance;
+    setEquity(typeof eq === "number" ? eq : null);
+  }), [addHandler]);
+  // 連線就緒才問得到：頁面重整後直接停在這個分頁時，WS 還在連線中，
+  // 這時候送出去的 get_account 會被丟掉
+  useEffect(() => { if (connected) send("get_account", {}); }, [connected, send]);
+
+  const pos = positions.find(p => p.symbol === activeSymbol);
+  const netQty = pos ? (pos.side === "long" ? pos.qty : -pos.qty) : 0;
+  const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+
+  const submitCondition = () => {
+    const resistance = num(form.resistance), support = num(form.support);
+    if (!resistance && !support) return;
+    // 壓力空 → 碰到壓力放空；支撐多 → 碰到支撐作多。兩格都填時各建一筆。
+    const specs = [];
+    if (resistance) specs.push({ side: "sell", trigger: resistance });
+    if (support) specs.push({ side: "buy", trigger: support });
+
+    const chase = Math.abs(num(form.chase));
+    const built = specs.map(s => ({
+      // 追價：賣單掛低於觸發價、買單掛高於觸發價，才吃得到
+      limitPrice: s.side === "sell" ? s.trigger - chase : s.trigger + chase,
+      chase, qty: Math.max(1, num(form.qty)), tp: num(form.tp), sl: num(form.sl),
+      costGuard: form.costGuard, trail: form.trail, symbol: activeSymbol,
+      status: "waiting", ...s,
+    }));
+
+    setConditions(prev => {
+      if (editingId != null) {
+        // 編輯中：用第一筆覆蓋原條件，其餘（兩格都填時）當新增
+        const [first, ...rest] = built;
+        return prev.map(c => (c.id === editingId ? { ...first, id: editingId } : c))
+          .concat(rest.map((c, i) => ({ ...c, id: Date.now() + i })));
+      }
+      return prev.concat(built.map((c, i) => ({ ...c, id: Date.now() + i })));
+    });
+    setEditingId(null);
+    setForm(BLANK_COND_FORM);
+  };
+
+  const editCondition = (c) => {
+    setEditingId(c.id);
+    setForm({
+      resistance: c.side === "sell" ? String(c.trigger) : "",
+      support: c.side === "buy" ? String(c.trigger) : "",
+      chase: String(c.chase), qty: String(c.qty), tp: String(c.tp), sl: String(c.sl),
+      costGuard: c.costGuard, trail: c.trail,
+    });
+  };
+  const removeCondition = (id) => {
+    setConditions(prev => prev.filter(c => c.id !== id));
+    if (editingId === id) { setEditingId(null); setForm(BLANK_COND_FORM); }
+  };
+
+  // ── 共用小樣式 ────────────────────────────────
+  const card = {
+    background: COLORS.bgCard, border: `1px solid ${COLORS.border}`,
+    borderRadius: 4, padding: "4px 6px", minWidth: 0,
+  };
+  const inputStyle = {
+    width: "100%", boxSizing: "border-box", height: 21, padding: "0 4px",
+    background: COLORS.bg, border: `1px solid ${COLORS.border}`, borderRadius: 3,
+    color: COLORS.text, fontSize: 11, fontFamily: "monospace", textAlign: "center", outline: "none",
+  };
+  const sectionBar = (title) => (
+    <div style={{
+      padding: "3px 0", textAlign: "center", fontSize: 10, fontWeight: 700, letterSpacing: 2,
+      color: COLORS.accent, background: "rgba(59,130,246,0.14)",
+      borderTop: `1px solid ${COLORS.border}`, borderBottom: `1px solid ${COLORS.border}`,
+    }}>{title}</div>
+  );
+  // 注意：這裡刻意用「回傳 JSX 的函式」而不是內部元件，
+  // 內部元件每次 render 都是新型別，輸入框會失去焦點
+  const numField = (label, key, labelColor) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+      <span style={{ fontSize: 9, color: labelColor || COLORS.textDim, textAlign: "center" }}>{label}</span>
+      <input value={form[key]} inputMode="numeric" style={inputStyle}
+        onChange={e => setForm(f => ({ ...f, [key]: e.target.value.replace(/[^-\d.]/g, "") }))} />
+    </div>
+  );
+  const switchBtn = (label, on, toggle) => (
+    <button onClick={toggle} style={{
+      flex: 1, padding: "3px 0", fontSize: 9, fontWeight: 600, borderRadius: 3, cursor: "pointer",
+      background: on ? "rgba(59,130,246,0.15)" : "transparent",
+      border: `1px solid ${on ? COLORS.accent : COLORS.border}`,
+      color: on ? COLORS.accent : COLORS.textDim,
+    }}>{label} {on ? "On" : "Off"}</button>
+  );
+  const checkBox = (label, on, toggle) => (
+    <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, color: COLORS.textDim, cursor: "pointer" }}>
+      <input type="checkbox" checked={on} onChange={toggle} style={{ width: 11, height: 11, accentColor: COLORS.accent, margin: 0 }} />
+      {label}
+    </label>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+      {/* 交易總開關 + 下單商品 */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 4, padding: "5px 8px",
+        borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
+      }}>
+        <button onClick={() => setTradingOn(v => !v)} style={{
+          padding: "3px 9px", fontSize: 10, fontWeight: 700, borderRadius: 3, cursor: "pointer",
+          background: tradingOn ? COLORS.successBg : COLORS.bgCard,
+          border: `1px solid ${tradingOn ? COLORS.success : COLORS.border}`,
+          color: tradingOn ? COLORS.success : COLORS.textDim,
+        }}>{tradingOn ? "● 啟動交易" : "❚❚ 暫停交易"}</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
+          {["TX", "MTX", "TMF"].map(s => (
+            <button key={s} onClick={() => setActiveSymbol(s)} style={{
+              padding: "3px 7px", fontSize: 10, fontWeight: activeSymbol === s ? 700 : 400,
+              background: activeSymbol === s ? "rgba(59,130,246,0.15)" : "transparent",
+              border: `1px solid ${activeSymbol === s ? COLORS.accent : COLORS.border}`,
+              color: activeSymbol === s ? COLORS.accent : COLORS.textDim, borderRadius: 3, cursor: "pointer"
+            }}>{s}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* 報價 + 帳戶狀態 */}
+      <div style={{ display: "flex", gap: 5, padding: "5px 6px", flexShrink: 0 }}>
+        <div style={{ ...card, flex: "0 0 104px", textAlign: "center" }}>
+          <div style={{ fontSize: 9, color: COLORS.textDim }}>{activeSymbol} 報價</div>
+          <div style={{ fontSize: 19, fontWeight: 700, fontFamily: "monospace", color: COLORS.text, lineHeight: 1.2 }}>
+            {currentPrice ?? "--"}
+          </div>
+        </div>
+        <div style={{ ...card, flex: 1 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 9, color: COLORS.textDim }}>帳戶狀態</span>
+            <button onClick={() => send("get_account", {})} title="重新查詢保證金專戶" style={{
+              padding: "0 4px", fontSize: 9, lineHeight: "14px", cursor: "pointer",
+              background: "transparent", border: `1px solid ${COLORS.border}`,
+              color: COLORS.textDim, borderRadius: 3,
+            }}>⟳</button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.3fr", gap: 2, marginTop: 2 }}>
+            {[
+              ["未平倉", netQty === 0 ? "0" : `${netQty > 0 ? "+" : ""}${netQty}`,
+                netQty === 0 ? COLORS.text : netQty > 0 ? COLORS.up : COLORS.down],
+              ["均價", pos ? pos.avg_price : "0", COLORS.text],
+              ["權益", equity == null ? "—" : Math.round(equity).toLocaleString(), COLORS.text],
+            ].map(([label, val, color]) => (
+              <div key={label} style={{ textAlign: "center", minWidth: 0 }}>
+                <div style={{ fontSize: 8, color: COLORS.textMuted }}>{label}</div>
+                <div style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700, color, overflow: "hidden", textOverflow: "ellipsis" }}>{val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+        {sectionBar("條 件 設 定")}
+        <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 5 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            {numField("壓力空", "resistance", COLORS.down)}
+            {numField("支撐多", "support", COLORS.up)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 4 }}>
+            {numField("追點", "chase")}
+            {numField("口數", "qty")}
+            {numField("利點", "tp")}
+            {numField("損點", "sl")}
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {switchBtn("成本防線", form.costGuard, () => setForm(f => ({ ...f, costGuard: !f.costGuard })))}
+            {switchBtn("觸後跟隨", form.trail, () => setForm(f => ({ ...f, trail: !f.trail })))}
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button onClick={submitCondition} style={{
+              flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 700, borderRadius: 3, cursor: "pointer",
+              background: `linear-gradient(135deg, ${COLORS.accent}, ${COLORS.accentDim})`,
+              border: "none", color: "#fff",
+            }}>{editingId != null ? "✓ 更新條件" : "⊕ 新增條件"}</button>
+            {editingId != null && (
+              <button onClick={() => { setEditingId(null); setForm(BLANK_COND_FORM); }} style={{
+                padding: "5px 10px", fontSize: 10, borderRadius: 3, cursor: "pointer",
+                background: "transparent", border: `1px solid ${COLORS.border}`, color: COLORS.textDim,
+              }}>取消</button>
+            )}
+          </div>
+        </div>
+
+        {/* 當沖 / 收盤清倉 / 市價進出 */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "5px 8px",
+          borderTop: `1px solid ${COLORS.border}`, borderBottom: `1px solid ${COLORS.border}`
+        }}>
+          {checkBox("當沖", dayTrade, () => setDayTrade(v => !v))}
+          {checkBox("收盤清倉", closeOnEnd, () => setCloseOnEnd(v => !v))}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+            <button onClick={() => placeOrder("market_buy", 0, Math.max(1, num(form.qty)))} style={{
+              padding: "3px 10px", fontSize: 10, fontWeight: 700, borderRadius: 3, cursor: "pointer",
+              background: `linear-gradient(135deg, ${COLORS.upStrong}, ${COLORS.up})`, border: "none", color: "#fff",
+            }}>市買</button>
+            <button onClick={() => placeOrder("market_sell", 0, Math.max(1, num(form.qty)))} style={{
+              padding: "3px 10px", fontSize: 10, fontWeight: 700, borderRadius: 3, cursor: "pointer",
+              background: `linear-gradient(135deg, ${COLORS.downStrong}, ${COLORS.down})`, border: "none", color: "#fff",
+            }}>市賣</button>
+          </div>
+        </div>
+
+        {/* 狀態圖例 */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 8px", padding: "4px 8px", fontSize: 8, color: COLORS.textMuted }}>
+          {Object.entries(COND_STATUS).map(([k, s]) => (
+            <span key={k} style={{ whiteSpace: "nowrap" }}>
+              <span style={{ color: s.color, marginRight: 2 }}>{s.icon}</span>{s.label}
+            </span>
+          ))}
+        </div>
+
+        {sectionBar("條 件 列 表")}
+        {conditions.length === 0 && (
+          <div style={{ padding: "12px 8px", textAlign: "center", fontSize: 10, color: COLORS.textMuted }}>
+            尚未設定條件
+          </div>
+        )}
+        {conditions.map((c, i) => {
+          const st = COND_STATUS[c.status] || COND_STATUS.waiting;
+          const sideColor = c.side === "buy" ? COLORS.up : COLORS.down;
+          return (
+            <div key={c.id} style={{
+              margin: "4px 6px", padding: "4px 6px", background: COLORS.bgCard,
+              border: `1px solid ${COLORS.border}`, borderLeft: `3px solid ${sideColor}`,
+              borderRadius: 3, opacity: c.id === editingId ? 0.6 : 1,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontFamily: "monospace" }}>
+                <span style={{ color: COLORS.textMuted, fontSize: 9 }}>{i + 1}</span>
+                <span style={{ color: sideColor, fontWeight: 700 }}>{c.side === "buy" ? "買" : "賣"}</span>
+                <span style={{ color: COLORS.warn, fontWeight: 700 }}>{c.trigger}</span>
+                <span style={{ color: COLORS.textMuted }}>→</span>
+                <span style={{ color: COLORS.text }}>{c.limitPrice}</span>
+                <span style={{ color: COLORS.textDim, fontSize: 10 }}>×{c.qty}</span>
+                <span style={{ marginLeft: "auto", fontSize: 9, color: st.color, whiteSpace: "nowrap" }}>
+                  {st.icon} {st.label}
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 9, color: COLORS.textDim }}>
+                <span>追{c.chase}</span>
+                <span style={{ color: COLORS.up }}>利{c.tp}</span>
+                <span style={{ color: COLORS.down }}>損{c.sl}</span>
+                <span style={{ color: c.costGuard ? COLORS.warn : COLORS.textMuted }}>防線{c.costGuard ? "On" : "Off"}</span>
+                <span style={{ color: c.trail ? COLORS.warn : COLORS.textMuted }}>跟隨{c.trail ? "On" : "Off"}</span>
+                <span style={{ marginLeft: "auto", display: "flex", gap: 3 }}>
+                  <button onClick={() => editCondition(c)} style={{
+                    padding: "0 5px", fontSize: 9, lineHeight: "15px", cursor: "pointer", borderRadius: 2,
+                    background: COLORS.warnBg, border: `1px solid ${COLORS.warn}`, color: COLORS.warn,
+                  }}>編輯</button>
+                  <button onClick={() => removeCondition(c.id)} style={{
+                    padding: "0 5px", fontSize: 9, lineHeight: "15px", cursor: "pointer", borderRadius: 2,
+                    background: COLORS.dangerBg, border: `1px solid ${COLORS.danger}`, color: COLORS.danger,
+                  }}>刪除</button>
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 市買／市賣是真的送出去的單，結果照樣要顯示 */}
+      {feedback && (
+        <div title={feedback.text} style={{
+          padding: "2px 8px", fontSize: 9, textAlign: "center", lineHeight: 1.35, flexShrink: 0,
+          color: feedback.ok ? COLORS.success : COLORS.danger,
+          background: feedback.ok ? "transparent" : COLORS.dangerBg,
+          borderTop: `1px solid ${COLORS.border}`,
+        }}>{feedback.text}</div>
+      )}
+
+      {/* 條件還沒接後端監控，畫面上必須講清楚，免得以為單真的掛出去了 */}
+      <div style={{
+        padding: "3px 8px", fontSize: 8, textAlign: "center", lineHeight: 1.4,
+        color: COLORS.warn, background: COLORS.warnBg,
+        borderTop: `1px solid ${COLORS.border}`, flexShrink: 0,
+      }}>條件僅存於本機、尚未接後端觸發引擎，不會自動送單</div>
     </div>
   );
 }
@@ -3329,10 +3676,14 @@ export default function TradingPlatform() {
                 orderbook={orderbooks[orderSymbol]}
                 activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
                 orders={orders}
+                positions={positions}
                 placeOrder={placeOrder}
                 cancelOrdersAt={cancelOrdersAt}
                 cancelOrdersByKind={cancelOrdersByKind}
                 feedback={orderFeedback}
+                send={send}
+                addHandler={addHandler}
+                connected={connected}
               />
             </div>
             {/* 倉位/委託 - 20% */}
