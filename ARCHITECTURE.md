@@ -10,8 +10,8 @@
 ┌──────────────────────────────────────────────────────────────┐
 │  Web UI  (React JSX，多分頁 / 可隨時重整)                       │
 │  ┌──────────────────────┬──────────────────────────────┐     │
-│  │   技術分析            │  閃電下單 / 倉位 / 成交         │     │
-│  │   K線 + 成交量 + 指標  │  Price Ladder + Orders        │     │
+│  │   技術分析            │  閃電下單 / 右邊下單 / 倉位     │     │
+│  │   K線 + 成交量 + 指標  │  Ladder + 條件單 + Orders     │     │
 │  └──────────────────────┴──────────────────────────────┘     │
 └───────────────────────────┬──────────────────────────────────┘
                             │  WebSocket / REST
@@ -83,7 +83,9 @@ futures-pro/
 │   ├── event_bus.py         # 事件匯流排 (Pub/Sub) — 層間唯一溝通管道
 │   ├── models.py            # 共用資料模型 (Tick, Bar, Order, Position, ...)
 │   ├── quote_module.py      # 問價模塊 — 持有連線 + 訂閱去重
-│   └── trade_module.py      # 交易模塊 — 獨立於問價模塊
+│   ├── trade_module.py      # 交易模塊 — 獨立於問價模塊
+│   ├── fill_ledger.py       # 成交明細推算 (新倉/平倉別、已實現損益)
+│   └── condition_module.py  # 條件單引擎 (右邊下單) — 見 §7，尚未實作
 │
 ├── brokers/
 │   ├── __init__.py
@@ -217,6 +219,7 @@ Core / Gateway 兩層透過同一個 in-process `EventBus` (Pub/Sub) 溝通：
 | `positions_update` | TradeModule | Gateway | 倉位變動（整份清單） |
 | `fills_update` | TradeModule | Gateway | 對帳後的完整成交明細（損益已用券商結算值覆蓋） |
 | `script_signal` | ScriptEngine | TradeModule | 策略訊號 |
+| `condition_update` | ConditionModule | Gateway | 條件單新增/狀態變更/刪除（整筆條件）— §7，尚未實作 |
 | `quote_connected` / `quote_disconnected` | QuoteModule | Gateway | 連線狀態變更 |
 | `trade_connected` / `trade_disconnected` | TradeModule | Gateway | 連線狀態變更 |
 
@@ -265,7 +268,167 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
   成交回報的 `order_id` 就是委託序號，`_apply_fill_to_order()` 用它累加成交口數並結成
   `partial` / `filled`，否則市價單會永遠卡在畫面的「委託中」。對帳時再用券商的委託狀態覆蓋一次。
 
-## 7. 已知邊界與注意事項
+## 7. 條件單引擎（右邊下單）
+
+> **實作狀態**：UI 已完成（`RightSideOrderPanel`），**後端引擎尚未實作**。
+> 本節是動工前的設計定稿；目前條件只存在瀏覽器 localStorage，不會觸發、不會送單。
+
+「右邊下單」是條件單機：在**壓力價掛空、支撐價掛多**，價格碰到就自動追價進場，
+進場後由系統管理停利／停損／保本／移動停損。它跟閃電下單的差別是「先設好、後自動執行」，
+使用者設完條件就不必盯著畫面按滑鼠。
+
+### 7.1 為什麼引擎必須放後端
+
+前端 JS 也能監控報價並送單，但不能這樣做：
+
+- **瀏覽器不是常駐程式**：分頁關掉、電腦休眠、手滑重整，監控就停了 —— 使用者卻以為單還在等觸發。
+  條件單的壽命必須跟 Core Service 一樣長，而不是跟某個分頁一樣長。
+- **多分頁會重複送單**：開兩個分頁 = 兩份監控 = 同一個條件觸發時送出兩張單。
+- **前端拿到的是廣播後的 tick**，比 Core 慢一段，追價的意義被延遲吃掉。
+
+因此 `ConditionModule` 是 Core Service 的模塊，與 `TradeModule` 並列，
+條件的**單一真相在後端**；前端只負責顯示與 CRUD 指令 —— 這是 §4.1「Core 擁有狀態」原則的延伸。
+
+### 7.2 條件的資料模型
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `id` | str | uuid[:8] |
+| `symbol` | str | TX / MTX / TMF |
+| `side` | `buy` / `sell` | UI 的「支撐多」= buy、「壓力空」= sell |
+| `trigger_price` | float | 觸發價 |
+| `chase` | int | 追點 — 進場單穿價的點數 |
+| `qty` | int | 口數 |
+| `take_profit` | int | 利點（0 = 不設停利） |
+| `stop_loss` | int | 損點，UI 以負數輸入（0 = 不設停損） |
+| `cost_guard` | bool | 成本防線 |
+| `trail` | bool | 觸後跟隨 |
+| `status` | enum | 見 §7.3 |
+| `entry_order_id` / `entry_price` / `entry_filled_qty` | | 進場結果 |
+| `exit_order_id` | | 出場委託 |
+| `peak_price` | float | 觸後跟隨用：進場後最有利價 |
+| `created_at` / `updated_at` | datetime | |
+
+### 7.3 狀態機
+
+```
+主線
+  waiting ─觸及觸發價─► triggered ─送出追價單─► sent ─成交回報─► filled ─停利/停損─► exited
+  等待觸發              已觸發                  已送單           已成交            已出場
+                                                                  │
+                                            浮盈 ≥ |損點| 時插入   ▼
+                                                              guarded 已守成本
+                                                          （停損移到進場價，續走出場）
+
+支線
+  使用者刪除（任何階段） → cancelled
+  進場單被券商拒絕        → failed      （不自動重試，UI 顯示拒絕原因）
+  重啟後對不上倉位        → orphaned    （停住等人工確認，見 §7.8）
+```
+
+主線這六個狀態正好對應 UI 狀態圖例的六個燈號。
+
+**離開 `waiting` 必須是觸發判斷的第一件事**。現有觸價單踩過這個坑（見 `_check_stop_orders`）：
+送單是 async 的，在它完成前每一筆 tick 都會再判一次，狀態沒有立刻改掉就會送出好幾張單。
+
+### 7.4 觸發與追價（進場）
+
+觸發方向 —— 注意這跟現有觸價單**相反**，右邊下單是在壓力/支撐**逆勢**接單：
+
+| 條件 | 觸發判斷 | 意義 |
+|------|---------|------|
+| 壓力空 (`sell`) | `tick.price >= trigger_price` | 漲到壓力價 → 放空 |
+| 支撐多 (`buy`) | `tick.price <= trigger_price` | 跌到支撐價 → 作多 |
+
+觸發後**不送市價單**，而是送一張穿價限價單：
+
+```
+賣：limit_price = trigger_price − chase   （掛得比市價低 → 立即成交）
+買：limit_price = trigger_price + chase   （掛得比市價高 → 立即成交）
+```
+
+**為什麼不用市價單**：台指期市價單的滑價無上限，急殺急拉時成交價可能離觸發價很遠；
+穿價限價單一樣會立刻成交，但把最差成交價鎖在 `chase` 點以內 —— 追點的本質是「可接受的滑價上限」，
+不是「掛單偏移量」。這也是截圖裡 17059 觸發、掛 17049 賣單的原因。
+
+代價：極端行情下穿不過去就掛在那裡不成交。這時條件停在 `sent`，
+由使用者決定要不要手動處理（**不自動改價重送** —— 追價迴圈在跳空時會一路追到底）。
+
+### 7.5 出場管理
+
+進場成交後以 `entry_price`（實際成交均價，不是觸發價）為基準，四種出場規則同時運作：
+
+- **停利／停損**：`entry_price ± take_profit` / `∓ |stop_loss|`。兩者是 OCO，
+  一邊觸及就送出場單並把條件推進 `exited`，另一邊立即失效。
+- **成本防線**（`cost_guard`）：浮動獲利 ≥ `|stop_loss|` 時，把停損價移到 `entry_price`（保本），
+  狀態轉 `guarded`。門檻用損點而非利點，是為了讓「賺到夠賠的量」就先立於不敗。
+- **觸後跟隨**（`trail`）：進場後記錄 `peak_price`（多單取最高、空單取最低），
+  停損維持在 `peak_price ∓ |stop_loss|`，**只往有利方向移動、不回退**。
+- **收盤清倉**：見 §7.6。
+
+出場單同樣用穿價限價單（`chase` 沿用同一個值），理由同 §7.4。
+停利/停損**不掛在券商端**，由本模塊監控 tick 後才送單 —— 與現有觸價單的設計一致：
+券商不一定支援 OCO 或條件單，本地管理才能跨券商行為一致。
+代價要寫清楚：**Core 沒在跑就沒有保護**，這與「掛在券商端的真實停損單」不同。
+
+### 7.6 全域開關、當沖與收盤清倉
+
+- **啟動交易／暫停交易**：暫停時**不觸發新的進場**（條件留在 `waiting`），
+  但**已進場部位的停利停損照常運作**。暫停不能連出場保護一起關掉，否則按下暫停等於裸倉。
+- **當沖**：影響下單的新倉/平倉別 —— 進場 `octype="new"`、出場 `octype="cover"`，
+  並把「收盤清倉」預設打開。
+- **收盤清倉**：到指定時間（日盤 13:44、夜盤 04:59，可設定）平掉本引擎產生的部位，
+  並停用所有未觸發條件。只清本引擎自己的部位，不碰使用者手動下的單。
+
+### 7.7 資料流與事件
+
+```
+UI: add_condition / update_condition / delete_condition / set_condition_trading
+  → Gateway 路由 → ConditionModule（寫 DB）
+  → emit("condition_update") → Gateway broadcast → 所有分頁同步
+
+tick (EventBus)
+  → ConditionModule._check_conditions()      # 與 TradeModule 各自獨立判斷
+  → 觸發 → TradeModule.place_order(限價, 穿價)  # 共用同一個下單入口
+  → order_filled (EventBus) → 記錄進場均價 → 開始管理出場
+  → 每次狀態變更都 emit("condition_update")
+```
+
+新增的 WebSocket action：`get_conditions`、`add_condition`、`update_condition`、
+`delete_condition`、`set_condition_trading`。前端改為**不再用 localStorage 存條件**，
+一律以後端推來的清單為準（多分頁才會一致）。
+
+### 7.8 持久化與重啟對帳
+
+條件寫進 SQLite（新表 `conditions`），server 重啟後載回記憶體。
+**重啟後最危險的是「進行中」的條件**：本地以為還有部位，實際上可能已被券商端平掉（或反之），
+自動送出場單就是憑空多一筆交易。
+
+處理方式：啟動時先 `refresh_from_broker()` 取真實倉位，再與 `filled` / `guarded` 的條件比對 ——
+對得上就繼續管理；對不上一律標成 `orphaned` 停在那裡等人工確認，**絕不自動送單**。
+
+### 7.9 與現有觸價單的關係
+
+現有 `OrderType.STOP_BUY / STOP_SELL`（`trade_module._check_stop_orders`）是單層觸價：
+觸發後補送一張市價單，沒有追價、沒有括號單、沒有移動停損，方向也是順勢突破。
+條件單引擎**不重用它**（狀態機與出場管理差太多），但兩者共用 `TradeModule.place_order` 送單，
+且各自獨立訂閱 tick。閃電下單的觸買/觸賣維持原行為不變。
+
+### 7.10 實作分期
+
+每一期都能獨立上線（UI 已經在那裡了）：
+
+| 期別 | 範圍 | 完成後可用的狀態 |
+|------|------|-----------------|
+| **P1** | 條件 CRUD + SQLite 持久化 + 觸發 + 追價進場 | waiting → triggered → sent → filled |
+| **P2** | 停利／停損（OCO 出場） | + exited |
+| **P3** | 成本防線 + 觸後跟隨 | + guarded |
+| **P4** | 收盤清倉 + 當沖旗標 + 重啟對帳 | + orphaned |
+
+P1 的驗收標準：模擬帳戶設一個貼近市價的條件，觸發後在 `trade.log` 看到追價單送出、
+成交後條件停在 `filled`，且**同一個條件只送出一張單**。
+
+## 8. 已知邊界與注意事項
 
 - **`OrderState` 的值是全大寫**：`FDEAL` / `FORDER` / `SDEAL` / `SORDER`，不是 `FuturesDeal`。
   委託與成交共用同一個 callback，靠這個值分派 —— 用 `endswith("Deal")` 比對永遠不會中，
