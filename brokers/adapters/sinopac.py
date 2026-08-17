@@ -138,8 +138,13 @@ def _enum_str(v) -> str:
 
 
 def _json_safe(v):
-    """轉成 JSON 可序列化的型別（enum → 字串、date → ISO 字串）。"""
-    if v is None or isinstance(v, (bool, int, float, str)):
+    """轉成 JSON 可序列化的型別（enum → 字串、date → ISO 字串）。
+
+    基本型別刻意用 `type(v) in (...)` 而非 isinstance：Shioaji 的 FetchStatus
+    是 Rust 綁定型別，isinstance(x, str) 會騙人說 True（mro 只有 object），
+    但 json 的 C encoder 檢查真實型別，放行的話會在 send_json 時才炸開。
+    """
+    if v is None or type(v) in (bool, int, float, str):
         return v
     if isinstance(v, (list, tuple)):
         return [_json_safe(x) for x in v]
@@ -147,6 +152,10 @@ def _json_safe(v):
         return {str(k): _json_safe(x) for k, x in v.items()}
     if isinstance(v, (datetime, date)):
         return v.isoformat()
+    # 先取 .value：數值型 enum 才不會因為上面的精確型別判斷被轉成字串
+    inner = getattr(v, "value", None)
+    if type(inner) in (bool, int, float, str):
+        return inner
     return _enum_str(v)
 
 

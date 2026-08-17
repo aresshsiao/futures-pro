@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,40 @@ from scripts.engine import ScriptEngine
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Futures Pro", version="0.1.0")
+
+
+def json_safe(v: Any) -> Any:
+    """把券商 SDK 回來的資料轉成 json.dumps 吃得下的型別。
+
+    券商 SDK 常夾帶自訂型別（shioaji 的 FetchStatus 是 Rust 綁定的類別，
+    連 Enum 都不是），直接 send_json 會在序列化時拋 TypeError；
+    那個例外會一路炸穿 WebSocket handler 把連線斷掉，前端只看到不停重連，
+    完全不知道是哪個欄位有問題。查詢類的回應一律先過這裡。
+
+    這裡用 `type(v) in (...)` 而不是 isinstance 判斷基本型別是有原因的：
+    FetchStatus 對 isinstance(x, str) 會回報 True（mro 其實只有 object），
+    但 json 的 C encoder 走的是真實型別檢查，用 isinstance 判斷就會把它
+    原封不動放行，照樣炸在 json.dumps。
+    """
+    if v is None or type(v) in (bool, int, float, str):
+        return v
+    if isinstance(v, dict):
+        return {str(k): json_safe(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple, set)):
+        return [json_safe(x) for x in v]
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, Decimal):
+        return float(v)
+    # enum 類（含假裝成 str 的 SDK 型別）：優先取 .value，數值欄位才不會被轉成字串
+    inner = getattr(v, "value", None)
+    if type(inner) in (bool, int, float, str):
+        return inner
+    if isinstance(v, bool):
+        return bool(v)
+    if isinstance(v, (int, float)):
+        return float(v) if isinstance(v, float) else int(v)
+    return str(v)
 
 # Script 引擎放在這裡（而不是 main.py）是故意的：
 # main.py 是用 `python main.py` 啟動的進入點，執行時模組名稱是 "__main__"；
@@ -265,10 +301,22 @@ async def handle_client_message(ws: WebSocket, msg: dict) -> None:
     # 這些 handler 會在 main.py 中注入實際的模塊實例
     # 這裡只定義路由框架
     handlers = _action_handlers.get(action)
-    if handlers:
-        await handlers(ws, data)
-    else:
+    if not handlers:
         await ws.send_json({"type": "error", "message": f"Unknown action: {action}"})
+        return
+
+    # 單一指令出錯不該拖垮整條連線：例外若往上拋，ASGI 會直接關閉 WebSocket，
+    # 前端看到的只是無限重連，錯在哪個 action 完全看不出來。
+    try:
+        await handlers(ws, data)
+    except (WebSocketDisconnect, RuntimeError):
+        raise  # 連線本身斷了，交給外層正常收尾
+    except Exception as e:
+        logger.exception("[WS] 指令 %s 執行失敗", action)
+        await ws.send_json({
+            "type": "error", "action": action,
+            "message": f"{action} 執行失敗: {e}",
+        })
 
 
 # Action handler registry (由 main.py 在啟動時注入)

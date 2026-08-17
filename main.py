@@ -30,7 +30,7 @@ from data.database import Database                                     # noqa: E
 from data.bar_builder import BarBuilder                                # noqa: E402
 from data.sources.taifex import TaifexImporter                         # noqa: E402
 from ui.server import (                                                # noqa: E402
-    app, manager, register_action, register_startup_hook, script_engine,
+    app, json_safe, manager, register_action, register_startup_hook, script_engine,
 )
 
 # ── 全域模塊實例 ──────────────────────────────────────
@@ -558,14 +558,16 @@ async def handle_get_account(ws, data: dict):
 
     模擬環境一樣查得到，是確認模擬單有沒有真的成交最直接的地方。
     """
-    await ws.send_json({
+    # 券商回來的保證金/餘額物件裡可能夾帶 SDK 自訂型別（shioaji 的 FetchStatus
+    # 就不是 Enum，json.dumps 認不得），送出去前一律轉成 JSON 安全的值
+    await ws.send_json(json_safe({
         "type": "account_info",
         "simulation": trade.is_simulation,
         "connected": trade.is_connected,
         "margin": await trade.get_margin(),
         "balance": await trade.get_account_balance(),
         "accounts": await trade.list_accounts(),
-    })
+    }))
 
 
 async def handle_get_broker_orders(ws, data: dict):
