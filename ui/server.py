@@ -94,6 +94,11 @@ def condition_payload(c: Condition) -> dict:
         "status": c.status.value,
         "entry_price": c.entry_price,
         "entry_filled_qty": c.entry_filled_qty,
+        # 停利/停損價由後端算好（以實際進場均價為基準），前端只負責顯示
+        "take_profit_price": c.take_profit_price,
+        "stop_loss_price": c.stop_loss_price,
+        "exit_price": c.exit_price,
+        "exit_reason": c.exit_reason,
         "fail_reason": c.fail_reason,
         "created_at": c.created_at.isoformat(),
         "updated_at": c.updated_at.isoformat(),

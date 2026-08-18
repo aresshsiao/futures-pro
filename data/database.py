@@ -74,6 +74,18 @@ class Database:
                     self._conn.execute(f'ALTER TABLE "{symbol}" ADD COLUMN from_csv INTEGER NOT NULL DEFAULT 0')
                     logger.info("[Database] %s 資料表新增 from_csv 欄位（既有資料預設為 0）", symbol)
 
+        # conditions 表隨引擎分期長出新欄位（P2 的出場欄位…）。既有條件不能 drop 重建，
+        # 缺什麼補什麼即可 —— SQLite 的 ADD COLUMN 有 DEFAULT 就不會動到既有資料列。
+        if "conditions" in tables:
+            cols = {row[1] for row in self._conn.execute("PRAGMA table_info(conditions)").fetchall()}
+            for name, ddl in (
+                ("exit_price", "REAL NOT NULL DEFAULT 0"),
+                ("exit_reason", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in cols:
+                    self._conn.execute(f"ALTER TABLE conditions ADD COLUMN {name} {ddl}")
+                    logger.info("[Database] conditions 資料表新增 %s 欄位", name)
+
         self._conn.commit()
 
     def _bar_table_sql(self, symbol: str) -> str:
@@ -124,6 +136,8 @@ class Database:
                 entry_price      REAL NOT NULL DEFAULT 0,
                 entry_filled_qty INTEGER NOT NULL DEFAULT 0,
                 exit_order_id    TEXT NOT NULL DEFAULT '',
+                exit_price       REAL NOT NULL DEFAULT 0,
+                exit_reason      TEXT NOT NULL DEFAULT '',
                 peak_price       REAL NOT NULL DEFAULT 0,
                 fail_reason      TEXT NOT NULL DEFAULT '',
                 created_at       TEXT NOT NULL,
@@ -249,7 +263,8 @@ class Database:
     _CONDITION_COLS = (
         "id", "symbol", "side", "trigger_price", "chase", "qty",
         "take_profit", "stop_loss", "cost_guard", "trail", "status",
-        "entry_order_id", "entry_price", "entry_filled_qty", "exit_order_id",
+        "entry_order_id", "entry_price", "entry_filled_qty",
+        "exit_order_id", "exit_price", "exit_reason",
         "peak_price", "fail_reason", "created_at", "updated_at",
     )
 
@@ -261,7 +276,8 @@ class Database:
             (
                 c.id, c.symbol, c.side.value, c.trigger_price, c.chase, c.qty,
                 c.take_profit, c.stop_loss, int(c.cost_guard), int(c.trail), c.status.value,
-                c.entry_order_id, c.entry_price, c.entry_filled_qty, c.exit_order_id,
+                c.entry_order_id, c.entry_price, c.entry_filled_qty,
+                c.exit_order_id, c.exit_price, c.exit_reason,
                 c.peak_price, c.fail_reason,
                 c.created_at.isoformat(), c.updated_at.isoformat(),
             ),
@@ -283,9 +299,10 @@ class Database:
                 chase=r[4], qty=r[5], take_profit=r[6], stop_loss=r[7],
                 cost_guard=bool(r[8]), trail=bool(r[9]), status=ConditionStatus(r[10]),
                 entry_order_id=r[11], entry_price=r[12], entry_filled_qty=r[13],
-                exit_order_id=r[14], peak_price=r[15], fail_reason=r[16],
-                created_at=datetime.fromisoformat(r[17]),
-                updated_at=datetime.fromisoformat(r[18]),
+                exit_order_id=r[14], exit_price=r[15], exit_reason=r[16],
+                peak_price=r[17], fail_reason=r[18],
+                created_at=datetime.fromisoformat(r[19]),
+                updated_at=datetime.fromisoformat(r[20]),
             )
             for r in rows
         ]

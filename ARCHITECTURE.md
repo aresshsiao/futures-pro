@@ -85,7 +85,7 @@ futures-pro/
 │   ├── quote_module.py      # 問價模塊 — 持有連線 + 訂閱去重
 │   ├── trade_module.py      # 交易模塊 — 獨立於問價模塊
 │   ├── fill_ledger.py       # 成交明細推算 (新倉/平倉別、已實現損益)
-│   └── condition_module.py  # 條件單引擎 (右邊下單) — 見 §7，尚未實作
+│   └── condition_module.py  # 條件單引擎 (右邊下單) — 見 §7
 │
 ├── brokers/
 │   ├── __init__.py
@@ -219,7 +219,10 @@ Core / Gateway 兩層透過同一個 in-process `EventBus` (Pub/Sub) 溝通：
 | `positions_update` | TradeModule | Gateway | 倉位變動（整份清單） |
 | `fills_update` | TradeModule | Gateway | 對帳後的完整成交明細（損益已用券商結算值覆蓋） |
 | `script_signal` | ScriptEngine | TradeModule | 策略訊號 |
-| `condition_update` | ConditionModule | Gateway | 條件單新增/狀態變更/刪除（整筆條件）— §7，尚未實作 |
+| `condition_update` | ConditionModule | Gateway | 條件單新增/狀態變更/刪除（整筆條件）— §7 |
+| `condition_triggered` | ConditionModule | ConditionModule | 觸發 → 送進場單（跨執行緒排回主 loop 用） |
+| `condition_exit` | ConditionModule | ConditionModule | 停利/停損觸及 → 送平倉單 |
+| `condition_trading` | ConditionModule | Gateway | 啟動/暫停條件單交易 |
 | `quote_connected` / `quote_disconnected` | QuoteModule | Gateway | 連線狀態變更 |
 | `trade_connected` / `trade_disconnected` | TradeModule | Gateway | 連線狀態變更 |
 
@@ -270,8 +273,9 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
 
 ## 7. 條件單引擎（右邊下單）
 
-> **實作狀態**：UI 已完成（`RightSideOrderPanel`），**後端引擎尚未實作**。
-> 本節是動工前的設計定稿；目前條件只存在瀏覽器 localStorage，不會觸發、不會送單。
+> **實作狀態**：**P1（觸發＋追價進場）與 P2（停利／停損 OCO 出場）已完成**，
+> 見 `core/condition_module.py`。P3（成本防線、觸後跟隨）與 P4（收盤清倉、當沖、重啟對帳）
+> 尚未實作 —— 面板上那幾個欄位設定得了但不會生效，畫面底部有標註。分期進度見 §7.10。
 
 「右邊下單」是條件單機：在**壓力價掛空、支撐價掛多**，價格碰到就自動追價進場，
 進場後由系統管理停利／停損／保本／移動停損。它跟閃電下單的差別是「先設好、後自動執行」，
@@ -418,15 +422,19 @@ tick (EventBus)
 
 每一期都能獨立上線（UI 已經在那裡了）：
 
-| 期別 | 範圍 | 完成後可用的狀態 |
-|------|------|-----------------|
-| **P1** | 條件 CRUD + SQLite 持久化 + 觸發 + 追價進場 | waiting → triggered → sent → filled |
-| **P2** | 停利／停損（OCO 出場） | + exited |
-| **P3** | 成本防線 + 觸後跟隨 | + guarded |
-| **P4** | 收盤清倉 + 當沖旗標 + 重啟對帳 | + orphaned |
+| 期別 | 範圍 | 完成後可用的狀態 | 進度 |
+|------|------|-----------------|------|
+| **P1** | 條件 CRUD + SQLite 持久化 + 觸發 + 追價進場 | waiting → triggered → sent → filled | ✅ 已完成 |
+| **P2** | 停利／停損（OCO 出場） | + exited | ✅ 已完成 |
+| **P3** | 成本防線 + 觸後跟隨 | + guarded | 未開始 |
+| **P4** | 收盤清倉 + 當沖旗標 + 重啟對帳 | + orphaned | 未開始 |
 
-P1 的驗收標準：模擬帳戶設一個貼近市價的條件，觸發後在 `trade.log` 看到追價單送出、
-成交後條件停在 `filled`，且**同一個條件只送出一張單**。
+P1/P2 的驗收標準：模擬帳戶設一個貼近市價的條件，觸發後在 `trade.log` 看到追價單送出、
+成交後條件停在 `filled`，價格再走到停利／停損時看到 `octype=cover` 的平倉單，
+且**同一個條件的進場與出場各只送出一張單**。
+
+P4 未完成前，重啟時所有「進行中」的條件會被標成 `orphaned` 停住不動 ——
+本地以為還有部位、實際上未必，自動接手管理就是憑空多一筆交易。
 
 ## 8. 已知邊界與注意事項
 

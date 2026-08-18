@@ -228,7 +228,9 @@ class Condition:
     entry_order_id: str = ""     # 進場委託的內部 id
     entry_price: float = 0.0     # 進場成交均價（出場計算一律以此為基準，不是觸發價）
     entry_filled_qty: int = 0
-    exit_order_id: str = ""      # P2
+    exit_order_id: str = ""      # 出場委託的內部 id
+    exit_price: float = 0.0      # 出場成交均價
+    exit_reason: str = ""        # "take_profit" | "stop_loss"（P3 再加 cost_guard / trail）
     peak_price: float = 0.0      # 觸後跟隨用：進場後最有利價（P3）
     fail_reason: str = ""        # 券商拒絕原因，給前端顯示
     created_at: datetime = field(default_factory=datetime.now)
@@ -255,9 +257,66 @@ class Condition:
         """
         return price >= self.trigger_price if self.side == Direction.SELL else price <= self.trigger_price
 
+    # ── 出場（P2）──────────────────────────────────
+    # 一律以 entry_price（實際成交均價）為基準，不是觸發價：
+    # 追價會有滑價，用觸發價算的停損跟真實部位的成本對不起來。
+
+    @property
+    def take_profit_price(self) -> float:
+        """停利價。0 = 未設停利或還沒進場。"""
+        if not self.take_profit or not self.entry_price:
+            return 0.0
+        tp = abs(self.take_profit)
+        return self.entry_price + tp if self.side == Direction.BUY else self.entry_price - tp
+
+    @property
+    def stop_loss_price(self) -> float:
+        """停損價。損點前端以負數輸入，這裡一律取絕對值往不利方向擺。"""
+        if not self.stop_loss or not self.entry_price:
+            return 0.0
+        sl = abs(self.stop_loss)
+        return self.entry_price - sl if self.side == Direction.BUY else self.entry_price + sl
+
+    @property
+    def exit_direction(self) -> Direction:
+        """出場方向 —— 進場的反向。"""
+        return Direction.SELL if self.side == Direction.BUY else Direction.BUY
+
+    def exit_limit_price(self, trigger: float) -> float:
+        """出場也用穿價限價單：賣出場掛低、買出場掛高，理由同 limit_price。"""
+        return (
+            trigger - self.chase if self.exit_direction == Direction.SELL
+            else trigger + self.chase
+        )
+
+    def exit_hit(self, price: float) -> Optional[tuple[str, float]]:
+        """檢查現價是否觸及停利/停損，回傳 (原因, 觸發價) 或 None。
+
+        跳空時兩邊可能同一筆 tick 都成立（例如多單開盤直接跳過停損又衝過停利），
+        這時一律先認停損 —— 中間的路徑看不到，假設走過最不利的那一邊才安全。
+        """
+        sl_price = self.stop_loss_price
+        tp_price = self.take_profit_price
+        if self.side == Direction.BUY:
+            if sl_price and price <= sl_price:
+                return ("stop_loss", sl_price)
+            if tp_price and price >= tp_price:
+                return ("take_profit", tp_price)
+        else:
+            if sl_price and price >= sl_price:
+                return ("stop_loss", sl_price)
+            if tp_price and price <= tp_price:
+                return ("take_profit", tp_price)
+        return None
+
     @property
     def is_waiting(self) -> bool:
         return self.status == ConditionStatus.WAITING
+
+    @property
+    def is_holding(self) -> bool:
+        """已進場、還在管理出場的狀態。"""
+        return self.status in (ConditionStatus.FILLED, ConditionStatus.GUARDED)
 
     @property
     def has_entry(self) -> bool:

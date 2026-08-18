@@ -1344,7 +1344,9 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
 
 // ─── 右邊下單（條件單機）────────────────────────────────────────────
 // 壓力空／支撐多設觸發價，價格碰到就用「觸發價 ∓ 追點」的追價單進場，
-// 進場後再用利點／損點出場。條件目前只存在瀏覽器本機，還沒接後端觸發引擎。
+// 進場後由後端引擎用利點／損點出場（ARCHITECTURE.md §7）。
+// 條件的單一真相在後端 —— 這裡不存 localStorage，一律以推播來的清單為準，
+// 否則多分頁會各說各話，關掉分頁也不該讓條件消失。
 const COND_STATUS = {
   waiting: { label: "等待觸發", icon: "○", color: COLORS.textDim },
   triggered: { label: "已觸發", icon: "⚡", color: COLORS.warn },
@@ -1352,7 +1354,13 @@ const COND_STATUS = {
   filled: { label: "已成交", icon: "●", color: COLORS.success },
   guarded: { label: "已守成本", icon: "🔒", color: COLORS.warn },
   exited: { label: "已出場", icon: "■", color: COLORS.textMuted },
+  // 支線狀態（不在圖例裡，但列表要顯示得出來）
+  failed: { label: "失敗", icon: "✕", color: COLORS.danger },
+  orphaned: { label: "待確認", icon: "?", color: COLORS.warn },
+  cancelled: { label: "已取消", icon: "—", color: COLORS.textMuted },
 };
+// 圖例只列主線六態，跟後端狀態機一致
+const COND_LEGEND = ["waiting", "triggered", "sent", "filled", "guarded", "exited"];
 
 const BLANK_COND_FORM = {
   resistance: "", support: "", chase: "10", qty: "1",
@@ -1366,15 +1374,8 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
   const [dayTrade, setDayTrade] = useState(false);
   const [closeOnEnd, setCloseOnEnd] = useState(false);
   const [equity, setEquity] = useState(null);
-  // 條件寫進 localStorage，重整頁面不會整批消失（也提醒使用者這是本機資料）
-  const [conditions, setConditions] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("rightSideConditions") || "[]"); }
-    catch { return []; }
-  });
-
-  useEffect(() => {
-    localStorage.setItem("rightSideConditions", JSON.stringify(conditions));
-  }, [conditions]);
+  const [conditions, setConditions] = useState([]);
+  const [lastResult, setLastResult] = useState(null);
 
   // 帳戶權益：後端 get_account 會回券商的保證金專戶
   useEffect(() => addHandler("account_info", (msg) => {
@@ -1382,39 +1383,71 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
     const eq = m.equity_amount ?? m.equity ?? m.today_balance;
     setEquity(typeof eq === "number" ? eq : null);
   }), [addHandler]);
+
+  // 整份條件清單（開分頁 / 重連時拉一次）
+  useEffect(() => addHandler("conditions", (msg) => {
+    setConditions(msg.data || []);
+    setTradingOn(!!msg.trading_enabled);
+  }), [addHandler]);
+
+  // 單筆條件異動（新增、狀態變更、刪除）
+  useEffect(() => addHandler("condition_update", (msg) => {
+    const c = msg.data;
+    setConditions(prev => {
+      if (msg.removed) return prev.filter(x => x.id !== c.id);
+      const idx = prev.findIndex(x => x.id === c.id);
+      if (idx < 0) return [...prev, c];
+      const next = [...prev];
+      next[idx] = c;
+      return next;
+    });
+  }), [addHandler]);
+
+  // 交易總開關的真相也在後端（別的分頁按下暫停，這裡要跟著變）
+  useEffect(() => addHandler("condition_trading", (msg) => {
+    setTradingOn(!!msg.enabled);
+  }), [addHandler]);
+
+  useEffect(() => addHandler("condition_result", (msg) => {
+    if (msg.success === false) setLastResult(msg.message || "條件操作失敗");
+  }), [addHandler]);
+
   // 連線就緒才問得到：頁面重整後直接停在這個分頁時，WS 還在連線中，
-  // 這時候送出去的 get_account 會被丟掉
-  useEffect(() => { if (connected) send("get_account", {}); }, [connected, send]);
+  // 這時候送出去的請求會被丟掉
+  useEffect(() => {
+    if (!connected) return;
+    send("get_account", {});
+    send("get_conditions", {});
+  }, [connected, send]);
 
   const pos = positions.find(p => p.symbol === activeSymbol);
   const netQty = pos ? (pos.side === "long" ? pos.qty : -pos.qty) : 0;
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
 
+  // 條件的建立/修改/刪除都送給後端，畫面等 condition_update 推回來才變
   const submitCondition = () => {
     const resistance = num(form.resistance), support = num(form.support);
     if (!resistance && !support) return;
     // 壓力空 → 碰到壓力放空；支撐多 → 碰到支撐作多。兩格都填時各建一筆。
     const specs = [];
-    if (resistance) specs.push({ side: "sell", trigger: resistance });
-    if (support) specs.push({ side: "buy", trigger: support });
+    if (resistance) specs.push({ side: "sell", trigger_price: resistance });
+    if (support) specs.push({ side: "buy", trigger_price: support });
 
-    const chase = Math.abs(num(form.chase));
-    const built = specs.map(s => ({
-      // 追價：賣單掛低於觸發價、買單掛高於觸發價，才吃得到
-      limitPrice: s.side === "sell" ? s.trigger - chase : s.trigger + chase,
-      chase, qty: Math.max(1, num(form.qty)), tp: num(form.tp), sl: num(form.sl),
-      costGuard: form.costGuard, trail: form.trail, symbol: activeSymbol,
-      status: "waiting", ...s,
-    }));
+    const common = {
+      symbol: activeSymbol,
+      chase: Math.abs(num(form.chase)),
+      qty: Math.max(1, num(form.qty)),
+      take_profit: num(form.tp),
+      stop_loss: num(form.sl),
+      cost_guard: form.costGuard,
+      trail: form.trail,
+    };
 
-    setConditions(prev => {
-      if (editingId != null) {
-        // 編輯中：用第一筆覆蓋原條件，其餘（兩格都填時）當新增
-        const [first, ...rest] = built;
-        return prev.map(c => (c.id === editingId ? { ...first, id: editingId } : c))
-          .concat(rest.map((c, i) => ({ ...c, id: Date.now() + i })));
-      }
-      return prev.concat(built.map((c, i) => ({ ...c, id: Date.now() + i })));
+    setLastResult(null);
+    specs.forEach((s, i) => {
+      // 編輯中：第一筆改原條件，兩格都填時的第二筆當新增
+      if (editingId != null && i === 0) send("update_condition", { id: editingId, ...common, ...s });
+      else send("add_condition", { ...common, ...s });
     });
     setEditingId(null);
     setForm(BLANK_COND_FORM);
@@ -1423,15 +1456,20 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
   const editCondition = (c) => {
     setEditingId(c.id);
     setForm({
-      resistance: c.side === "sell" ? String(c.trigger) : "",
-      support: c.side === "buy" ? String(c.trigger) : "",
-      chase: String(c.chase), qty: String(c.qty), tp: String(c.tp), sl: String(c.sl),
-      costGuard: c.costGuard, trail: c.trail,
+      resistance: c.side === "sell" ? String(c.trigger_price) : "",
+      support: c.side === "buy" ? String(c.trigger_price) : "",
+      chase: String(c.chase), qty: String(c.qty),
+      tp: String(c.take_profit), sl: String(c.stop_loss),
+      costGuard: c.cost_guard, trail: c.trail,
     });
   };
   const removeCondition = (id) => {
-    setConditions(prev => prev.filter(c => c.id !== id));
+    send("delete_condition", { id });
     if (editingId === id) { setEditingId(null); setForm(BLANK_COND_FORM); }
+  };
+  const toggleTrading = () => {
+    // 樂觀更新等後端推回來會蓋掉，這裡直接送指令就好
+    send("set_condition_trading", { enabled: !tradingOn });
   };
 
   // ── 共用小樣式 ────────────────────────────────
@@ -1482,12 +1520,14 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
         display: "flex", alignItems: "center", gap: 4, padding: "5px 8px",
         borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
-        <button onClick={() => setTradingOn(v => !v)} style={{
-          padding: "3px 9px", fontSize: 10, fontWeight: 700, borderRadius: 3, cursor: "pointer",
-          background: tradingOn ? COLORS.successBg : COLORS.bgCard,
-          border: `1px solid ${tradingOn ? COLORS.success : COLORS.border}`,
-          color: tradingOn ? COLORS.success : COLORS.textDim,
-        }}>{tradingOn ? "● 啟動交易" : "❚❚ 暫停交易"}</button>
+        <button onClick={toggleTrading}
+          title={tradingOn ? "點擊暫停：只擋新進場，已進場部位的停利停損照常運作" : "點擊啟動條件單交易"}
+          style={{
+            padding: "3px 9px", fontSize: 10, fontWeight: 700, borderRadius: 3, cursor: "pointer",
+            background: tradingOn ? COLORS.successBg : COLORS.bgCard,
+            border: `1px solid ${tradingOn ? COLORS.success : COLORS.border}`,
+            color: tradingOn ? COLORS.success : COLORS.textDim,
+          }}>{tradingOn ? "● 啟動交易" : "❚❚ 暫停交易"}</button>
         <div style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
           {["TX", "MTX", "TMF"].map(s => (
             <button key={s} onClick={() => setActiveSymbol(s)} style={{
@@ -1586,9 +1626,10 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
 
         {/* 狀態圖例 */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 8px", padding: "4px 8px", fontSize: 8, color: COLORS.textMuted }}>
-          {Object.entries(COND_STATUS).map(([k, s]) => (
+          {COND_LEGEND.map(k => (
             <span key={k} style={{ whiteSpace: "nowrap" }}>
-              <span style={{ color: s.color, marginRight: 2 }}>{s.icon}</span>{s.label}
+              <span style={{ color: COND_STATUS[k].color, marginRight: 2 }}>{COND_STATUS[k].icon}</span>
+              {COND_STATUS[k].label}
             </span>
           ))}
         </div>
@@ -1602,40 +1643,69 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
         {conditions.map((c, i) => {
           const st = COND_STATUS[c.status] || COND_STATUS.waiting;
           const sideColor = c.side === "buy" ? COLORS.up : COLORS.down;
+          const entered = c.entry_price > 0;
+          // 進場後改看實際成交均價與後端算好的停利停損價（滑價會讓它跟設定值不同）
+          const fmt = (v) => (v ? Math.round(v * 100) / 100 : "—");
           return (
-            <div key={c.id} style={{
+            <div key={c.id} title={c.fail_reason || ""} style={{
               margin: "4px 6px", padding: "4px 6px", background: COLORS.bgCard,
-              border: `1px solid ${COLORS.border}`, borderLeft: `3px solid ${sideColor}`,
+              border: `1px solid ${c.status === "failed" ? COLORS.danger : COLORS.border}`,
+              borderLeft: `3px solid ${sideColor}`,
               borderRadius: 3, opacity: c.id === editingId ? 0.6 : 1,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontFamily: "monospace" }}>
                 <span style={{ color: COLORS.textMuted, fontSize: 9 }}>{i + 1}</span>
                 <span style={{ color: sideColor, fontWeight: 700 }}>{c.side === "buy" ? "買" : "賣"}</span>
-                <span style={{ color: COLORS.warn, fontWeight: 700 }}>{c.trigger}</span>
+                <span style={{ color: COLORS.warn, fontWeight: 700 }}>{c.trigger_price}</span>
                 <span style={{ color: COLORS.textMuted }}>→</span>
-                <span style={{ color: COLORS.text }}>{c.limitPrice}</span>
+                <span style={{ color: COLORS.text }}>{c.limit_price}</span>
                 <span style={{ color: COLORS.textDim, fontSize: 10 }}>×{c.qty}</span>
                 <span style={{ marginLeft: "auto", fontSize: 9, color: st.color, whiteSpace: "nowrap" }}>
                   {st.icon} {st.label}
                 </span>
               </div>
+
+              {entered && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 9, fontFamily: "monospace" }}>
+                  <span style={{ color: COLORS.textDim }}>成本 {fmt(c.entry_price)}</span>
+                  <span style={{ color: COLORS.up }}>止盈 {fmt(c.take_profit_price)}</span>
+                  <span style={{ color: COLORS.down }}>止損 {fmt(c.stop_loss_price)}</span>
+                  {c.exit_price > 0 && (
+                    <span style={{ marginLeft: "auto", color: COLORS.text }}>
+                      出 {fmt(c.exit_price)}
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 9, color: COLORS.textDim }}>
                 <span>追{c.chase}</span>
-                <span style={{ color: COLORS.up }}>利{c.tp}</span>
-                <span style={{ color: COLORS.down }}>損{c.sl}</span>
-                <span style={{ color: c.costGuard ? COLORS.warn : COLORS.textMuted }}>防線{c.costGuard ? "On" : "Off"}</span>
+                <span style={{ color: COLORS.up }}>利{c.take_profit}</span>
+                <span style={{ color: COLORS.down }}>損{c.stop_loss}</span>
+                <span style={{ color: c.cost_guard ? COLORS.warn : COLORS.textMuted }}>防線{c.cost_guard ? "On" : "Off"}</span>
                 <span style={{ color: c.trail ? COLORS.warn : COLORS.textMuted }}>跟隨{c.trail ? "On" : "Off"}</span>
                 <span style={{ marginLeft: "auto", display: "flex", gap: 3 }}>
-                  <button onClick={() => editCondition(c)} style={{
-                    padding: "0 5px", fontSize: 9, lineHeight: "15px", cursor: "pointer", borderRadius: 2,
-                    background: COLORS.warnBg, border: `1px solid ${COLORS.warn}`, color: COLORS.warn,
-                  }}>編輯</button>
-                  <button onClick={() => removeCondition(c.id)} style={{
-                    padding: "0 5px", fontSize: 9, lineHeight: "15px", cursor: "pointer", borderRadius: 2,
-                    background: COLORS.dangerBg, border: `1px solid ${COLORS.danger}`, color: COLORS.danger,
-                  }}>刪除</button>
+                  {/* 已觸發的條件後端不接受修改，按鈕就別給了 */}
+                  {c.status === "waiting" && (
+                    <button onClick={() => editCondition(c)} style={{
+                      padding: "0 5px", fontSize: 9, lineHeight: "15px", cursor: "pointer", borderRadius: 2,
+                      background: COLORS.warnBg, border: `1px solid ${COLORS.warn}`, color: COLORS.warn,
+                    }}>編輯</button>
+                  )}
+                  <button onClick={() => removeCondition(c.id)}
+                    title={c.entry_filled_qty > 0 ? "刪除條件不會平倉，部位仍在券商端" : "刪除條件"}
+                    style={{
+                      padding: "0 5px", fontSize: 9, lineHeight: "15px", cursor: "pointer", borderRadius: 2,
+                      background: COLORS.dangerBg, border: `1px solid ${COLORS.danger}`, color: COLORS.danger,
+                    }}>刪除</button>
                 </span>
               </div>
+
+              {c.fail_reason && (
+                <div style={{ marginTop: 2, fontSize: 8, color: COLORS.danger, lineHeight: 1.3 }}>
+                  {c.fail_reason}
+                </div>
+              )}
             </div>
           );
         })}
@@ -1651,12 +1721,21 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
         }}>{feedback.text}</div>
       )}
 
-      {/* 條件還沒接後端監控，畫面上必須講清楚，免得以為單真的掛出去了 */}
+      {/* 條件操作失敗（例如想改一筆已觸發的條件） */}
+      {lastResult && (
+        <div style={{
+          padding: "2px 8px", fontSize: 9, textAlign: "center", lineHeight: 1.35, flexShrink: 0,
+          color: COLORS.danger, background: COLORS.dangerBg,
+          borderTop: `1px solid ${COLORS.border}`,
+        }}>{lastResult}</div>
+      )}
+
+      {/* 哪些欄位真的會動、哪些還沒實作，畫面上要講清楚 */}
       <div style={{
         padding: "3px 8px", fontSize: 8, textAlign: "center", lineHeight: 1.4,
         color: COLORS.warn, background: COLORS.warnBg,
         borderTop: `1px solid ${COLORS.border}`, flexShrink: 0,
-      }}>條件僅存於本機、尚未接後端觸發引擎，不會自動送單</div>
+      }}>成本防線／觸後跟隨／當沖／收盤清倉尚未實作，設定不會生效</div>
     </div>
   );
 }
