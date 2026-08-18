@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from core.models import Bar
+from core.models import Bar, Condition, ConditionStatus, Direction
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,29 @@ class Database:
                 file_size   INTEGER NOT NULL,
                 imported_at TEXT NOT NULL,
                 PRIMARY KEY (filename, symbol)
+            );
+            -- 條件單（右邊下單）。條件必須活得比 browser 久，也要撐過 server 重啟，
+            -- 所以放 DB 而不是 localStorage / 記憶體（見 ARCHITECTURE.md §7.1、§7.8）
+            CREATE TABLE IF NOT EXISTS conditions (
+                id               TEXT PRIMARY KEY,
+                symbol           TEXT NOT NULL,
+                side             TEXT NOT NULL,
+                trigger_price    REAL NOT NULL,
+                chase            INTEGER NOT NULL DEFAULT 0,
+                qty              INTEGER NOT NULL DEFAULT 1,
+                take_profit      INTEGER NOT NULL DEFAULT 0,
+                stop_loss        INTEGER NOT NULL DEFAULT 0,
+                cost_guard       INTEGER NOT NULL DEFAULT 0,
+                trail            INTEGER NOT NULL DEFAULT 0,
+                status           TEXT NOT NULL DEFAULT 'waiting',
+                entry_order_id   TEXT NOT NULL DEFAULT '',
+                entry_price      REAL NOT NULL DEFAULT 0,
+                entry_filled_qty INTEGER NOT NULL DEFAULT 0,
+                exit_order_id    TEXT NOT NULL DEFAULT '',
+                peak_price       REAL NOT NULL DEFAULT 0,
+                fail_reason      TEXT NOT NULL DEFAULT '',
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL
             );
         """
         self._conn.executescript(sql)
@@ -220,6 +243,52 @@ class Database:
             rows,
         )
         self._conn.commit()
+
+    # ── 條件單（右邊下單）─────────────────────────────────────
+
+    _CONDITION_COLS = (
+        "id", "symbol", "side", "trigger_price", "chase", "qty",
+        "take_profit", "stop_loss", "cost_guard", "trail", "status",
+        "entry_order_id", "entry_price", "entry_filled_qty", "exit_order_id",
+        "peak_price", "fail_reason", "created_at", "updated_at",
+    )
+
+    def save_condition(self, c: Condition) -> None:
+        """新增或更新一筆條件（狀態每次變更都會叫到，寫入量很小）。"""
+        self._conn.execute(
+            f"""INSERT OR REPLACE INTO conditions ({",".join(self._CONDITION_COLS)})
+                VALUES ({",".join("?" * len(self._CONDITION_COLS))})""",
+            (
+                c.id, c.symbol, c.side.value, c.trigger_price, c.chase, c.qty,
+                c.take_profit, c.stop_loss, int(c.cost_guard), int(c.trail), c.status.value,
+                c.entry_order_id, c.entry_price, c.entry_filled_qty, c.exit_order_id,
+                c.peak_price, c.fail_reason,
+                c.created_at.isoformat(), c.updated_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def delete_condition(self, condition_id: str) -> None:
+        self._conn.execute("DELETE FROM conditions WHERE id = ?", (condition_id,))
+        self._conn.commit()
+
+    def load_conditions(self) -> list[Condition]:
+        """載回所有條件（server 重啟後由 ConditionModule 呼叫）。"""
+        rows = self._conn.execute(
+            f"SELECT {','.join(self._CONDITION_COLS)} FROM conditions ORDER BY created_at"
+        ).fetchall()
+        return [
+            Condition(
+                id=r[0], symbol=r[1], side=Direction(r[2]), trigger_price=r[3],
+                chase=r[4], qty=r[5], take_profit=r[6], stop_loss=r[7],
+                cost_guard=bool(r[8]), trail=bool(r[9]), status=ConditionStatus(r[10]),
+                entry_order_id=r[11], entry_price=r[12], entry_filled_qty=r[13],
+                exit_order_id=r[14], peak_price=r[15], fail_reason=r[16],
+                created_at=datetime.fromisoformat(r[17]),
+                updated_at=datetime.fromisoformat(r[18]),
+            )
+            for r in rows
+        ]
 
     # ── Bars 查詢 ─────────────────────────────────────────────
 

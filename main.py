@@ -24,13 +24,15 @@ from config import settings                                            # noqa: E
 from core.event_bus import EventBus                                    # noqa: E402
 from core.quote_module import QuoteModule                              # noqa: E402
 from core.trade_module import TradeModule                              # noqa: E402
+from core.condition_module import ConditionModule                      # noqa: E402
 from core.models import Direction, OrderStatus, OrderType, Timeframe   # noqa: E402
 from scripts.engine import load_meta_from_file                         # noqa: E402
 from data.database import Database                                     # noqa: E402
 from data.bar_builder import BarBuilder                                # noqa: E402
 from data.sources.taifex import TaifexImporter                         # noqa: E402
 from ui.server import (                                                # noqa: E402
-    app, json_safe, manager, register_action, register_startup_hook, script_engine,
+    app, condition_payload, json_safe, manager, register_action,
+    register_startup_hook, script_engine,
 )
 
 # ── 全域模塊實例 ──────────────────────────────────────
@@ -39,6 +41,8 @@ bus = EventBus()
 db = Database()
 quote = QuoteModule()
 trade = TradeModule()
+# 條件單引擎（右邊下單）— 共用 TradeModule 送單，條件持久化在 DB
+conditions = ConditionModule(trade, db)
 bar_builder = BarBuilder()
 taifex = TaifexImporter()
 # script_engine 定義在 ui/server.py（理由見該檔案註解），這裡直接重用同一個實例
@@ -549,6 +553,59 @@ async def forward_fills(_fills):
     每筆各拉一次就是上百發券商 API。改由對帳完成後推一次，前端什麼都不用做。
     """
     await manager.broadcast(await _fills_payload())
+
+
+# ── 條件單（右邊下單）─────────────────────────────────
+
+async def handle_get_conditions(ws, data: dict):
+    """前端: 取回整份條件清單（開啟分頁 / 重連時）"""
+    await ws.send_json({
+        "type": "conditions",
+        "trading_enabled": conditions.trading_enabled,
+        "data": [condition_payload(c) for c in conditions.list_conditions()],
+    })
+
+
+async def handle_add_condition(ws, data: dict):
+    """前端: 新增條件。side: "sell"=壓力空 / "buy"=支撐多"""
+    c = await conditions.add(
+        symbol=data["symbol"],
+        side=Direction(data["side"]),
+        trigger_price=data["trigger_price"],
+        qty=data.get("qty", 1),
+        chase=data.get("chase", 0),
+        take_profit=data.get("take_profit", 0),
+        stop_loss=data.get("stop_loss", 0),
+        cost_guard=data.get("cost_guard", False),
+        trail=data.get("trail", False),
+    )
+    # 新增本身已由 condition_update 廣播出去，這裡只回報收下了哪一筆
+    await ws.send_json({"type": "condition_result", "success": True, "id": c.id})
+
+
+async def handle_update_condition(ws, data: dict):
+    c = await conditions.update(data["id"], **{
+        k: data.get(k) for k in (
+            "symbol", "side", "trigger_price", "qty", "chase",
+            "take_profit", "stop_loss", "cost_guard", "trail",
+        )
+    })
+    await ws.send_json({
+        "type": "condition_result",
+        "success": c is not None,
+        "id": data["id"],
+        "message": "" if c else "條件已觸發或不存在，無法修改",
+    })
+
+
+async def handle_delete_condition(ws, data: dict):
+    ok = await conditions.remove(data["id"])
+    await ws.send_json({"type": "condition_result", "success": ok, "id": data["id"]})
+
+
+async def handle_set_condition_trading(ws, data: dict):
+    """前端: 啟動 / 暫停條件單交易（暫停只擋新進場）"""
+    await conditions.set_trading(bool(data.get("enabled", False)))
 
 
 # ── 帳務 / 券商端查詢 ─────────────────────────────────
@@ -1372,6 +1429,11 @@ def setup():
     register_action("get_orders", handle_get_orders)
     register_action("get_fills", handle_get_fills)
     register_action("get_account", handle_get_account)
+    register_action("get_conditions", handle_get_conditions)
+    register_action("add_condition", handle_add_condition)
+    register_action("update_condition", handle_update_condition)
+    register_action("delete_condition", handle_delete_condition)
+    register_action("set_condition_trading", handle_set_condition_trading)
     register_action("get_broker_orders", handle_get_broker_orders)
     register_action("get_profit_loss", handle_get_profit_loss)
     register_action("get_position_detail", handle_get_position_detail)
@@ -1444,6 +1506,8 @@ def setup():
 
     # 資料庫
     db.connect()
+    # 條件單要撐過 server 重啟；重啟前已進場的會被標成待確認，不自動接手（§7.8）
+    conditions.load_from_db()
     # 優先從 TWSE 下載完整交易日曆，ZIP 目錄作為補充
     if db.build_calendar_from_twse() == 0:
         db.build_calendar_from_zip_dir("data/raw/taifex")

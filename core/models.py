@@ -40,6 +40,20 @@ class PositionSide(str, Enum):
     SHORT = "short"  # 空方
 
 
+class ConditionStatus(str, Enum):
+    """條件單狀態（右邊下單）。主線六態對應前端的六個燈號，見 ARCHITECTURE.md §7.3"""
+    WAITING = "waiting"        # 等待觸發
+    TRIGGERED = "triggered"    # 已觸發（進場單即將送出）
+    SENT = "sent"              # 已送單（追價單在券商端）
+    FILLED = "filled"          # 已成交（進場完成）
+    GUARDED = "guarded"        # 已守成本（P3）
+    EXITED = "exited"          # 已出場（P2）
+    # 支線
+    CANCELLED = "cancelled"    # 使用者刪除
+    FAILED = "failed"          # 進場單被券商拒絕（不自動重試）
+    ORPHANED = "orphaned"      # 重啟後對不上倉位，等人工確認（P4）
+
+
 class Timeframe(str, Enum):
     TICK = "tick"
     M1 = "1m"
@@ -191,6 +205,67 @@ class Position:
 
     def _get_point_value(self) -> float:
         return point_value(self.symbol)
+
+
+@dataclass
+class Condition:
+    """條件單（右邊下單）— 壓力空 / 支撐多
+
+    語意見 ARCHITECTURE.md §7。P1 只用到觸發與進場相關欄位，
+    出場欄位（利點/損點/成本防線/觸後跟隨）先存下來，由 P2/P3 使用。
+    """
+    id: str
+    symbol: str
+    side: Direction              # SELL = 壓力空（漲到壓力放空）、BUY = 支撐多（跌到支撐作多）
+    trigger_price: float
+    chase: int = 0               # 追點 — 進場單穿價的點數（= 可接受的滑價上限）
+    qty: int = 1
+    take_profit: int = 0         # 利點，0 = 不設（P2）
+    stop_loss: int = 0           # 損點，前端以負數輸入，0 = 不設（P2）
+    cost_guard: bool = False     # 成本防線（P3）
+    trail: bool = False          # 觸後跟隨（P3）
+    status: ConditionStatus = ConditionStatus.WAITING
+    entry_order_id: str = ""     # 進場委託的內部 id
+    entry_price: float = 0.0     # 進場成交均價（出場計算一律以此為基準，不是觸發價）
+    entry_filled_qty: int = 0
+    exit_order_id: str = ""      # P2
+    peak_price: float = 0.0      # 觸後跟隨用：進場後最有利價（P3）
+    fail_reason: str = ""        # 券商拒絕原因，給前端顯示
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+
+    @property
+    def limit_price(self) -> float:
+        """進場的穿價限價。
+
+        賣單掛得比觸發價低、買單掛得比觸發價高，這樣一觸發就會立刻成交，
+        但最差成交價被鎖在 chase 點以內 —— 這是追點的意義，不是掛單偏移量。
+        用市價單的話滑價無上限（見 ARCHITECTURE.md §7.4）。
+        """
+        return (
+            self.trigger_price - self.chase if self.side == Direction.SELL
+            else self.trigger_price + self.chase
+        )
+
+    def is_hit(self, price: float) -> bool:
+        """市價是否觸及觸發價。
+
+        方向跟 STOP_BUY / STOP_SELL 相反：右邊下單是在壓力/支撐逆勢接單，
+        壓力空要「漲上去」才觸發，支撐多要「跌下來」才觸發。
+        """
+        return price >= self.trigger_price if self.side == Direction.SELL else price <= self.trigger_price
+
+    @property
+    def is_waiting(self) -> bool:
+        return self.status == ConditionStatus.WAITING
+
+    @property
+    def has_entry(self) -> bool:
+        """是否已經（或可能已經）在券商端建立部位 —— 刪除這種條件不會平倉。"""
+        return self.status in (
+            ConditionStatus.SENT, ConditionStatus.FILLED,
+            ConditionStatus.GUARDED, ConditionStatus.ORPHANED,
+        )
 
 
 # 每點價值 (台指期=200, 小台指=50, 電子期=4000, 金融期=1000)

@@ -21,7 +21,8 @@ from ui.auth import create_token, require_auth, verify_password, ws_require_auth
 
 from core.event_bus import EventBus
 from core.models import (
-    Bar, Direction, Fill, IndicatorOutput, Order, OrderBook, OrderType, Position, Tick,
+    Bar, Condition, Direction, Fill, IndicatorOutput, Order, OrderBook, OrderType,
+    Position, Tick,
 )
 from scripts.engine import ScriptEngine
 
@@ -70,6 +71,33 @@ def json_safe(v: Any) -> Any:
 # setup() 的 script_engine（裡面沒有載入任何 script），導致 /api/scripts
 # 永遠回空清單。ui/server.py 一定是被「import」進來而不是直接執行，沒有這個問題。
 script_engine = ScriptEngine()
+
+
+def condition_payload(c: Condition) -> dict:
+    """條件單送給前端的格式。廣播與 get_conditions 共用同一份，前端才能用同一個 handler。
+
+    limit_price 由後端算好一起送：追價的算法（穿價方向）屬於引擎的規則，
+    前端各自再算一次就會有兩個版本。
+    """
+    return {
+        "id": c.id,
+        "symbol": c.symbol,
+        "side": c.side.value,
+        "trigger_price": c.trigger_price,
+        "limit_price": c.limit_price,
+        "chase": c.chase,
+        "qty": c.qty,
+        "take_profit": c.take_profit,
+        "stop_loss": c.stop_loss,
+        "cost_guard": c.cost_guard,
+        "trail": c.trail,
+        "status": c.status.value,
+        "entry_price": c.entry_price,
+        "entry_filled_qty": c.entry_filled_qty,
+        "fail_reason": c.fail_reason,
+        "created_at": c.created_at.isoformat(),
+        "updated_at": c.updated_at.isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -215,6 +243,17 @@ def setup_event_bridge():
             ],
         })
 
+    async def forward_condition(c: Condition, removed: bool = False):
+        """條件單新增/狀態變更/刪除都走這裡，前端依 removed 決定是更新還是移除。"""
+        await manager.broadcast({
+            "type": "condition_update",
+            "removed": removed,
+            "data": condition_payload(c),
+        })
+
+    async def forward_condition_trading(enabled: bool):
+        await manager.broadcast({"type": "condition_trading", "enabled": enabled})
+
     async def forward_indicator_output(output: IndicatorOutput):
         await manager.broadcast({
             "type": "indicator_output",
@@ -242,6 +281,8 @@ def setup_event_bridge():
     bus.on("order_filled", forward_fill)
     bus.on("positions_update", forward_positions)
     bus.on("option_chain_update", forward_option_chain)
+    bus.on("condition_update", forward_condition)
+    bus.on("condition_trading", forward_condition_trading)
 
     async def forward_quote_con(name):
         await manager.broadcast({"type": "broker_status_update", "kind": "quote", "connected": True, "name": name})
