@@ -1362,6 +1362,12 @@ const COND_STATUS = {
 // 圖例只列主線六態，跟後端狀態機一致
 const COND_LEGEND = ["waiting", "triggered", "sent", "filled", "guarded", "exited"];
 
+// 生效中的停損是哪一種（成本防線 / 觸後跟隨會把停損價推離原始設定）
+const STOP_KIND_LABEL = {
+  stop_loss: "固定停損", cost_guard: "成本防線（守在進場價）", trail: "移動停損（跟隨最有利價）",
+};
+const STOP_KIND_MARK = { cost_guard: "🔒", trail: "↗" };
+
 const BLANK_COND_FORM = {
   resistance: "", support: "", chase: "10", qty: "1",
   tp: "30", sl: "-10", costGuard: false, trail: false,
@@ -1388,6 +1394,8 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
   useEffect(() => addHandler("conditions", (msg) => {
     setConditions(msg.data || []);
     setTradingOn(!!msg.trading_enabled);
+    setDayTrade(!!msg.day_trade);
+    setCloseOnEnd(!!msg.close_on_end);
   }), [addHandler]);
 
   // 單筆條件異動（新增、狀態變更、刪除）
@@ -1403,9 +1411,11 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
     });
   }), [addHandler]);
 
-  // 交易總開關的真相也在後端（別的分頁按下暫停，這裡要跟著變）
+  // 全域開關的真相也在後端（別的分頁按下暫停，這裡要跟著變）
   useEffect(() => addHandler("condition_trading", (msg) => {
-    setTradingOn(!!msg.enabled);
+    setTradingOn(!!msg.trading_enabled);
+    setDayTrade(!!msg.day_trade);
+    setCloseOnEnd(!!msg.close_on_end);
   }), [addHandler]);
 
   useEffect(() => addHandler("condition_result", (msg) => {
@@ -1610,8 +1620,9 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
           display: "flex", alignItems: "center", gap: 8, padding: "5px 8px",
           borderTop: `1px solid ${COLORS.border}`, borderBottom: `1px solid ${COLORS.border}`
         }}>
-          {checkBox("當沖", dayTrade, () => setDayTrade(v => !v))}
-          {checkBox("收盤清倉", closeOnEnd, () => setCloseOnEnd(v => !v))}
+          {/* 當沖會連帶打開收盤清倉，實際狀態以後端推回來的為準 */}
+          {checkBox("當沖", dayTrade, () => send("set_condition_options", { day_trade: !dayTrade }))}
+          {checkBox("收盤清倉", closeOnEnd, () => send("set_condition_options", { close_on_end: !closeOnEnd }))}
           <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
             <button onClick={() => placeOrder("market_buy", 0, Math.max(1, num(form.qty)))} style={{
               padding: "3px 10px", fontSize: 10, fontWeight: 700, borderRadius: 3, cursor: "pointer",
@@ -1669,7 +1680,11 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 9, fontFamily: "monospace" }}>
                   <span style={{ color: COLORS.textDim }}>成本 {fmt(c.entry_price)}</span>
                   <span style={{ color: COLORS.up }}>止盈 {fmt(c.take_profit_price)}</span>
-                  <span style={{ color: COLORS.down }}>止損 {fmt(c.stop_loss_price)}</span>
+                  {/* 顯示實際生效的停損：保本/移動停損會把它推離原始設定值 */}
+                  <span style={{ color: c.stop_kind && c.stop_kind !== "stop_loss" ? COLORS.warn : COLORS.down }}
+                    title={STOP_KIND_LABEL[c.stop_kind] || "固定停損"}>
+                    {STOP_KIND_MARK[c.stop_kind] || ""}止損 {fmt(c.active_stop_price)}
+                  </span>
                   {c.exit_price > 0 && (
                     <span style={{ marginLeft: "auto", color: COLORS.text }}>
                       出 {fmt(c.exit_price)}
@@ -1730,12 +1745,14 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
         }}>{lastResult}</div>
       )}
 
-      {/* 哪些欄位真的會動、哪些還沒實作，畫面上要講清楚 */}
-      <div style={{
-        padding: "3px 8px", fontSize: 8, textAlign: "center", lineHeight: 1.4,
-        color: COLORS.warn, background: COLORS.warnBg,
-        borderTop: `1px solid ${COLORS.border}`, flexShrink: 0,
-      }}>成本防線／觸後跟隨／當沖／收盤清倉尚未實作，設定不會生效</div>
+      {/* 待確認的條件是重啟後對不上倉位的，畫面上要看得到，不然它只是靜靜躺著 */}
+      {conditions.some(c => c.status === "orphaned") && (
+        <div style={{
+          padding: "3px 8px", fontSize: 8, textAlign: "center", lineHeight: 1.4,
+          color: COLORS.warn, background: COLORS.warnBg,
+          borderTop: `1px solid ${COLORS.border}`, flexShrink: 0,
+        }}>有條件重啟後對不上券商倉位，已停止管理 —— 請確認部位後自行處理或刪除</div>
+      )}
     </div>
   );
 }

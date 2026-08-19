@@ -6,23 +6,35 @@ core/condition_module.py — 條件單引擎（右邊下單）
 目前實作範圍：
   P1 — 條件 CRUD + 持久化 + 觸發 + 追價進場（waiting → triggered → sent → filled）
   P2 — 停利／停損 OCO 出場（filled → exited）
+  P3 — 成本防線 + 觸後跟隨（filled → guarded）
 
-成本防線、觸後跟隨（P3）與收盤清倉、重啟對帳（P4）尚未實作，
-欄位已經存下來但引擎還不會用。
+收盤清倉、當沖旗標與重啟對帳（P4）尚未實作。
 """
 from __future__ import annotations
+import asyncio
 import logging
 import uuid
 from datetime import datetime
 from typing import Optional
 
+from config import settings
 from core.event_bus import EventBus
 from core.models import (
     Condition, ConditionStatus, Direction, Order, OrderStatus, OrderType,
+    Position, PositionSide,
 )
 from core.trade_module import TradeModule
 
 logger = logging.getLogger(__name__)
+
+# 出場原因 → log/畫面用的中文
+EXIT_REASON_TEXT = {
+    "take_profit": "停利",
+    "stop_loss": "停損",
+    "cost_guard": "成本防線",
+    "trail": "移動停損",
+    "session_close": "收盤清倉",
+}
 
 
 class ConditionModule:
@@ -38,14 +50,27 @@ class ConditionModule:
     現有的觸價單（STOP_BUY/STOP_SELL）是另一套機制，兩者互不干涉。
     """
 
-    def __init__(self, trade: TradeModule, db=None):
+    def __init__(self, trade: TradeModule, db=None, close_times=None, check_interval=None):
         self.bus = EventBus()
         self._trade = trade
         self._db = db
+        # 收盤清倉的時點與檢查週期（測試會直接指定，正式從 config/settings.py 取）
+        self._close_times = list(
+            close_times if close_times is not None
+            else getattr(settings, "CONDITION_SESSION_CLOSE_TIMES", [])
+        )
+        self._check_interval = (
+            check_interval if check_interval is not None
+            else getattr(settings, "CONDITION_SESSION_CHECK_SEC", 20)
+        )
         self._conditions: dict[str, Condition] = {}
         # 全域開關預設「暫停」：server 重啟後不該自己把昨天留下的條件送出去，
         # 一定要使用者按下「啟動交易」才會開始送單
         self._trading_enabled = False
+        self._day_trade = False       # 當沖：進場一律新倉、出場一律平倉，並自動打開收盤清倉
+        self._close_on_end = False    # 收盤清倉
+        self._last_price: dict[str, float] = {}   # 收盤清倉要靠它算平倉價
+        self._session_closed_at: str = ""         # 已執行過的清倉時點（同一分鐘不重複跑）
 
         # 正在送出場單的條件 id。出場沒有像進場那樣的中繼狀態（狀態圖只有六個燈），
         # 用這個集合擋掉「同一筆部位連送好幾張平倉單」
@@ -73,38 +98,143 @@ class ConditionModule:
     # ── 生命週期 ──────────────────────────────────────
 
     def load_from_db(self) -> int:
-        """server 啟動時載回條件。
+        """server 啟動時載回條件（此時還沒連上券商，先不判斷部位死活）。
 
-        P1 不做重啟對帳（P4 才會比對券商倉位），所以這裡把「進行中」的條件
-        直接標成 orphaned 停住 —— 本地以為還有部位、實際上未必，
-        自動接手管理就是憑空多一筆交易（見 ARCHITECTURE.md §7.8）。
+        進行中的條件一律先擱置成 orphaned，等 reconcile_with_broker() 拿到
+        真實倉位後才決定要不要接手 —— 中間這段時間就算有 tick 進來也不會亂動。
         """
         if self._db is None:
             return 0
         loaded = self._db.load_conditions()
-        orphaned = 0
+        pending = 0
         for c in loaded:
             if c.has_entry:
                 c.status = ConditionStatus.ORPHANED
                 c.updated_at = datetime.now()
                 self._db.save_condition(c)
-                orphaned += 1
+                pending += 1
             self._conditions[c.id] = c
         logger.info(
-            "[ConditionModule] 載入條件 %d 筆（其中 %d 筆重啟前已進場，標為待確認）",
-            len(loaded), orphaned,
+            "[ConditionModule] 載入條件 %d 筆（其中 %d 筆重啟前已進場，待對帳）",
+            len(loaded), pending,
         )
         return len(loaded)
+
+    async def reconcile_with_broker(self, positions: list[Position]) -> int:
+        """重啟對帳：拿券商的真實倉位決定哪些條件可以繼續管理。
+
+        重啟後最危險的就是「本地以為還有部位」：憑空送出一張平倉單，
+        等於平掉別人的倉、或是反向開一筆新倉（見 ARCHITECTURE.md §7.8）。
+
+        比對用**每個商品的淨口數**，不試圖把條件一對一配到某張券商委託上 ——
+        券商倉位是彙總後的數字，本來就分不出哪一口屬於哪個條件。
+        同商品的條件只要總量對得起來就整組接手，對不起來就整組擱置等人工處理。
+
+        回傳實際恢復管理的條件數。
+        """
+        restored, orphaned = 0, 0
+        by_symbol: dict[str, list[Condition]] = {}
+        for c in self._conditions.values():
+            if c.status == ConditionStatus.ORPHANED:
+                by_symbol.setdefault(c.symbol, []).append(c)
+
+        pos_by_symbol = {p.symbol: p for p in positions}
+
+        for symbol, group in by_symbol.items():
+            # 進場單還在路上就重啟的（sent）永遠不接手：那張單成交了沒、成交幾口，
+            # 重啟後已經無從得知，猜錯就是拿錯誤的成本去掛停損
+            unknown = [c for c in group if not c.entry_filled_qty]
+            known = [c for c in group if c.entry_filled_qty]
+
+            expected = sum(
+                c.entry_filled_qty if c.side == Direction.BUY else -c.entry_filled_qty
+                for c in known
+            )
+            pos = pos_by_symbol.get(symbol)
+            actual = 0
+            if pos:
+                actual = pos.qty if pos.side == PositionSide.LONG else -pos.qty
+
+            # 條件記的部位要能被真實倉位「涵蓋」：方向一致且真實口數不少於預期。
+            # 券商端多出來的部位可能是手動下的單，那不歸這裡管，不影響接手。
+            covered = (
+                expected != 0
+                and (expected > 0) == (actual > 0)
+                and abs(actual) >= abs(expected)
+            )
+            for c in known:
+                if covered:
+                    # 回到進場後的管理狀態；保本是否已啟動由浮盈重新判斷即可
+                    c.status = ConditionStatus.FILLED
+                    c.updated_at = datetime.now()
+                    self._write_db(c)
+                    restored += 1
+                else:
+                    orphaned += 1
+            orphaned += len(unknown)
+
+            if known and not covered:
+                logger.warning(
+                    "[ConditionModule] %s 對帳不符：條件記錄 %+d 口、券商實際 %+d 口"
+                    " → 該商品的條件全部擱置等人工確認",
+                    symbol, expected, actual,
+                )
+            elif known and covered:
+                logger.info(
+                    "[ConditionModule] %s 對帳相符（%+d 口），恢復管理 %d 筆條件",
+                    symbol, expected, len(known),
+                )
+            if unknown:
+                logger.warning(
+                    "[ConditionModule] %s 有 %d 筆條件重啟前正在送單，無法確認成交狀況，擱置",
+                    symbol, len(unknown),
+                )
+
+        if restored or orphaned:
+            logger.info("[ConditionModule] 重啟對帳完成：恢復 %d 筆、擱置 %d 筆", restored, orphaned)
+            for c in self._conditions.values():
+                await self.bus.emit("condition_update", c, False)
+        return restored
 
     async def set_trading(self, enabled: bool) -> None:
         """啟動 / 暫停交易。
 
-        暫停只擋「新的進場」，不影響已進場部位 —— P2 的出場保護一律照常運作，
+        暫停只擋「新的進場」，不影響已進場部位 —— 出場保護一律照常運作，
         否則按下暫停等於裸倉（見 ARCHITECTURE.md §7.6）。
         """
         self._trading_enabled = bool(enabled)
         logger.info("[ConditionModule] 條件單交易%s", "啟動" if enabled else "暫停")
-        await self.bus.emit("condition_trading", self._trading_enabled)
+        await self._broadcast_settings()
+
+    async def set_options(self, day_trade=None, close_on_end=None) -> None:
+        """當沖 / 收盤清倉。
+
+        當沖會自動把收盤清倉一起打開 —— 當沖部位留倉就不是當沖了，
+        兩者分開設定只會製造「以為在當沖、實際留倉」的意外。
+        """
+        if day_trade is not None:
+            self._day_trade = bool(day_trade)
+            if self._day_trade:
+                self._close_on_end = True
+        if close_on_end is not None:
+            self._close_on_end = bool(close_on_end)
+            if not self._close_on_end:
+                self._day_trade = False   # 不清倉就不算當沖，別讓兩個旗標互相矛盾
+        logger.info(
+            "[ConditionModule] 當沖=%s 收盤清倉=%s", self._day_trade, self._close_on_end,
+        )
+        await self._broadcast_settings()
+
+    @property
+    def settings(self) -> dict:
+        return {
+            "trading_enabled": self._trading_enabled,
+            "day_trade": self._day_trade,
+            "close_on_end": self._close_on_end,
+        }
+
+    async def _broadcast_settings(self) -> None:
+        await self.bus.emit("condition_trading", self.settings)
 
     # ── CRUD ─────────────────────────────────────────
 
@@ -184,6 +314,7 @@ class ConditionModule:
         """
         # 未連線就不要觸發：照送只會被券商打回票，把一堆條件變成 failed，
         # 使用者還得一筆一筆重設。留在原狀態，等連線回來再說。
+        self._last_price[tick.symbol] = tick.price
         if not self._trade.is_connected:
             return
 
@@ -215,20 +346,64 @@ class ConditionModule:
         self.bus.emit_sync("condition_triggered", c)
 
     def _check_exit(self, c: Condition, price: float) -> None:
-        """停利／停損（OCO）。只送一張出場單，另一邊自然失效。"""
+        """停利／停損（OCO）。只送一張出場單，另一邊自然失效。
+
+        送單前先更新移動停損與成本防線 —— 停損價要用這一筆 tick 之後的值判斷，
+        否則新高的那一筆會用舊停損價比對，跟隨永遠慢一拍。
+        """
         if c.id in self._exiting:
             return   # 出場單正在送，別再送第二張
+
+        stop_before = c.active_stop_price
+        self._update_peak(c, price)
+        armed = self._arm_cost_guard(c)
+
         hit = c.exit_hit(price)
-        if hit is None:
+        if hit is not None:
+            reason, trigger = hit
+            self._exiting.add(c.id)
+            logger.info(
+                "[ConditionModule] 條件 %s %s: 進場 %s → 觸及 %s (市價 %s)",
+                c.id, EXIT_REASON_TEXT.get(reason, reason), c.entry_price, trigger, price,
+            )
+            self.bus.emit_sync("condition_exit", c, reason, trigger)
             return
-        reason, trigger = hit
-        self._exiting.add(c.id)
+
+        # 停損價被推動了才更新畫面。趨勢盤每一筆新高都會動，但沒動的 tick 佔多數，
+        # 不比對就是每個 tick 對每筆條件廣播一次。
+        if armed or c.active_stop_price != stop_before:
+            c.updated_at = datetime.now()
+            # 只有狀態變化（進 guarded）才值得寫 DB；移動停損純粹是盤中推算值，
+            # 每個新高寫一次 SQLite 只是拿磁碟換沒人要的精度
+            self._sync_update(c, write_db=armed)
+
+    def _update_peak(self, c: Condition, price: float) -> None:
+        """記錄進場後看過的最有利價（多單取最高、空單取最低）。只增不減。"""
+        if not c.entry_price:
+            return
+        if not c.peak_price:
+            c.peak_price = c.entry_price
+        better = price > c.peak_price if c.side == Direction.BUY else price < c.peak_price
+        if better:
+            c.peak_price = price
+
+    def _arm_cost_guard(self, c: Condition) -> bool:
+        """浮盈達門檻就把停損移到進場價（保本），狀態轉 guarded。
+
+        用 peak_price（看過的最大浮盈）判斷而不是現價：價格回落不該讓保本失效，
+        保本是棘輪，只進不退。回傳是否在這一筆 tick 啟動。
+        """
+        threshold = c.cost_guard_threshold
+        if not threshold or c.status != ConditionStatus.FILLED:
+            return False
+        if c.best_profit() < threshold:
+            return False
+        c.status = ConditionStatus.GUARDED
         logger.info(
-            "[ConditionModule] 條件 %s %s: 進場 %s → %s 觸及 %s (市價 %s)",
-            c.id, "停損" if reason == "stop_loss" else "停利",
-            c.entry_price, reason, trigger, price,
+            "[ConditionModule] 條件 %s 成本防線啟動: 浮盈 %.1f ≥ %.1f，停損移到進場價 %s",
+            c.id, c.best_profit(), threshold, c.entry_price,
         )
-        self.bus.emit_sync("condition_exit", c, reason, trigger)
+        return True
 
     # ── 進場 ─────────────────────────────────────────
 
@@ -281,11 +456,17 @@ class ConditionModule:
         # 平倉口數以實際進場成交口數為準，不是原本設定的 qty：
         # 部分成交時用 qty 會多平出一筆反向部位
         qty = c.entry_filled_qty or c.qty
-        price = c.exit_limit_price(trigger)
+        # 收盤清倉時若連最後成交價都沒有（剛啟動就到點、該商品沒訂閱），
+        # 就只能送市價單 —— 收盤前平不掉部位比滑價嚴重得多
+        if trigger:
+            order_type, price = OrderType.LIMIT, c.exit_limit_price(trigger)
+        else:
+            order_type, price = OrderType.MARKET, 0.0
+            logger.warning("[ConditionModule] 條件 %s 無可用報價，改以市價平倉", c.id)
         order: Optional[Order] = await self._trade.place_order(
             symbol=c.symbol,
             direction=c.exit_direction,
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             qty=qty,
             price=price,
             source=f"condition:{c.id}:{reason}",
@@ -315,11 +496,55 @@ class ConditionModule:
             # 的話歸零會讓重試次數永遠回到 1，變成無限重送。等真的成交才清。
             logger.info(
                 "[ConditionModule] 條件 %s 已送出%s單 %s @%s x%s",
-                c.id, "停損" if reason == "stop_loss" else "停利", order.id, price, qty,
+                c.id, EXIT_REASON_TEXT.get(reason, reason), order.id, price, qty,
             )
 
         c.updated_at = datetime.now()
         await self._persist(c)
+
+    # ── 收盤清倉（P4）─────────────────────────────────
+
+    async def run_session_close_watcher(self) -> None:
+        """比對時鐘，到收盤清倉時點就把引擎的部位平掉。
+
+        只看時鐘、不打券商 API，所以固定週期輪詢就夠了；用排程器算下一次觸發時間
+        反而要處理跨日、夏令、系統休眠喚醒之後補跑等一堆狀況。
+        """
+        while True:
+            try:
+                await self._check_session_close()
+            except Exception:
+                # 這個 watcher 掛掉等於收盤不會清倉，比記一筆 log 嚴重得多，一定要撐住
+                logger.exception("[ConditionModule] 收盤清倉檢查失敗")
+            await asyncio.sleep(self._check_interval)
+
+    async def _check_session_close(self) -> None:
+        if not self._close_on_end:
+            return
+        now = datetime.now()
+        hhmm = now.strftime("%H:%M")
+        if hhmm not in self._close_times:
+            return
+        # 同一分鐘內輪詢會跑好幾次，只認第一次
+        marker = f"{now:%Y-%m-%d} {hhmm}"
+        if self._session_closed_at == marker:
+            return
+        self._session_closed_at = marker
+
+        holding = [c for c in self._conditions.values() if c.is_holding]
+        logger.info(
+            "[ConditionModule] %s 收盤清倉：平掉 %d 筆部位，並把交易切回暫停",
+            hhmm, len(holding),
+        )
+        for c in holding:
+            if c.id in self._exiting:
+                continue
+            self._exiting.add(c.id)
+            await self._exit_position(c, "session_close", self._last_price.get(c.symbol, 0.0))
+        # 未觸發的條件不刪（那是使用者辛苦設的），改成把總開關關掉：
+        # 收盤後不會再有新進場，明天要不要繼續由使用者自己決定
+        if self._trading_enabled:
+            await self.set_trading(False)
 
     # ── 委託回報 ──────────────────────────────────────
 
@@ -398,10 +623,25 @@ class ConditionModule:
 
     async def _persist(self, c: Condition) -> None:
         """寫 DB + 廣播。每次狀態變更都要做，前端各分頁才會同步。"""
-        if self._db is not None:
-            try:
-                self._db.save_condition(c)
-            except Exception:
-                # 寫檔失敗不該讓引擎停擺：記憶體裡的狀態才是這一輪的依據
-                logger.exception("[ConditionModule] 條件 %s 寫入 DB 失敗", c.id)
+        self._write_db(c)
         await self.bus.emit("condition_update", c, False)
+
+    def _sync_update(self, c: Condition, write_db: bool = True) -> None:
+        """_persist 的同步版，給 tick handler 用。
+
+        tick handler 跑在主 loop 執行緒（emit_sync 會把券商 callback 排回來），
+        所以這裡直接寫 sqlite 是安全的 —— 換成別的執行緒就會踩到
+        sqlite3 的 check_same_thread。
+        """
+        if write_db:
+            self._write_db(c)
+        self.bus.emit_sync("condition_update", c, False)
+
+    def _write_db(self, c: Condition) -> None:
+        if self._db is None:
+            return
+        try:
+            self._db.save_condition(c)
+        except Exception:
+            # 寫檔失敗不該讓引擎停擺：記憶體裡的狀態才是這一輪的依據
+            logger.exception("[ConditionModule] 條件 %s 寫入 DB 失敗", c.id)

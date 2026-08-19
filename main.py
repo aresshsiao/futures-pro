@@ -561,7 +561,7 @@ async def handle_get_conditions(ws, data: dict):
     """前端: 取回整份條件清單（開啟分頁 / 重連時）"""
     await ws.send_json({
         "type": "conditions",
-        "trading_enabled": conditions.trading_enabled,
+        **conditions.settings,
         "data": [condition_payload(c) for c in conditions.list_conditions()],
     })
 
@@ -606,6 +606,14 @@ async def handle_delete_condition(ws, data: dict):
 async def handle_set_condition_trading(ws, data: dict):
     """前端: 啟動 / 暫停條件單交易（暫停只擋新進場）"""
     await conditions.set_trading(bool(data.get("enabled", False)))
+
+
+async def handle_set_condition_options(ws, data: dict):
+    """前端: 當沖 / 收盤清倉"""
+    await conditions.set_options(
+        day_trade=data.get("day_trade"),
+        close_on_end=data.get("close_on_end"),
+    )
 
 
 # ── 帳務 / 券商端查詢 ─────────────────────────────────
@@ -816,6 +824,10 @@ async def startup_core():
         logger.warning("[Core] 自動連線 %s (%s) 失敗: %s", broker_id, kind, message)
         return
 
+    # 條件單重啟對帳：一定要等連上券商拿到真實倉位才能做，
+    # 在那之前所有進行中的條件都擱置著不動（見 ARCHITECTURE.md §7.8）
+    await conditions.reconcile_with_broker(trade.positions)
+
     symbols = getattr(settings, "DEFAULT_SUBSCRIBE_SYMBOLS", [])
     for sym in symbols:
         await _ensure_backfilled(sym)
@@ -870,6 +882,11 @@ async def _loop_lag_monitor():
 
 async def startup_loop_monitor():
     asyncio.create_task(_loop_lag_monitor())
+
+
+async def startup_condition_watcher():
+    """條件單的收盤清倉排程 —— 與是否自動連線券商無關，一律啟動。"""
+    asyncio.create_task(conditions.run_session_close_watcher())
 
 
 async def handle_broker_config(ws, data: dict):
@@ -1434,6 +1451,7 @@ def setup():
     register_action("update_condition", handle_update_condition)
     register_action("delete_condition", handle_delete_condition)
     register_action("set_condition_trading", handle_set_condition_trading)
+    register_action("set_condition_options", handle_set_condition_options)
     register_action("get_broker_orders", handle_get_broker_orders)
     register_action("get_profit_loss", handle_get_profit_loss)
     register_action("get_position_detail", handle_get_position_detail)
@@ -1470,6 +1488,8 @@ def setup():
     register_startup_hook(startup_script_timer)
     # event loop 延遲監控 — 回報變慢時用來分辨「卡在自己」還是「卡在券商端」
     register_startup_hook(startup_loop_monitor)
+    # 條件單收盤清倉排程
+    register_startup_hook(startup_condition_watcher)
 
     # 載入內建 Script（指標 / 策略）
     for meta in BUILTIN_SCRIPTS:

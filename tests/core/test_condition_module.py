@@ -20,7 +20,8 @@ import pytest
 from core.condition_module import ConditionModule
 from core.event_bus import EventBus
 from core.models import (
-    Condition, ConditionStatus, Direction, OrderStatus, OrderType, Tick,
+    Condition, ConditionStatus, Direction, OrderStatus, OrderType,
+    Position, PositionSide, Tick,
 )
 from core.trade_module import TradeModule
 
@@ -202,9 +203,9 @@ class TestEntryFill:
 
 # ─── 出場（P2）──────────────────────────────────────────────
 
-async def entered(cm, t, side=Direction.SELL, entry=18000.0, qty=1, **kw):
+async def entered(cm, t, side=Direction.SELL, entry=18000.0, qty=1, chase=5, **kw):
     """把一個條件推到「已進場」狀態，回傳它。"""
-    c = await cm.add("TX", side, entry, qty=qty, chase=5, **kw)
+    c = await cm.add("TX", side, entry, qty=qty, chase=chase, **kw)
     cm._check_conditions(tick("TX", entry + (10 if side == Direction.SELL else -10)))
     await settle()
     order = t._orders[c.entry_order_id]
@@ -369,6 +370,393 @@ class TestExit:
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == ConditionModule.MAX_EXIT_ATTEMPTS
         assert c.status is ConditionStatus.FAILED
+
+
+# ─── 成本防線與觸後跟隨（P3）────────────────────────────────
+
+class TestCostGuard:
+    def test_arms_when_profit_reaches_stop_loss_distance(self):
+        """浮盈 ≥ 損點 → 停損移到進場價，狀態轉 guarded。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+                              take_profit=50, cost_guard=True)
+            cm._check_conditions(tick("TX", 18009))   # 浮盈 9 < 10，還不夠
+            await settle()
+            before = (c.status, c.active_stop_price)
+            cm._check_conditions(tick("TX", 18010))   # 浮盈 10 → 啟動
+            await settle()
+            return before, c
+
+        (status_before, stop_before), c = asyncio.run(scenario())
+        assert status_before is ConditionStatus.FILLED
+        assert stop_before == 17990.0                 # 還是原始停損
+        assert c.status is ConditionStatus.GUARDED
+        assert c.active_stop_price == 18000.0         # 守在進場價
+
+    def test_stays_armed_after_price_falls_back(self):
+        """保本是棘輪：價格回落不該讓它失效。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+                              take_profit=50, cost_guard=True)
+            cm._check_conditions(tick("TX", 18010))
+            await settle()
+            cm._check_conditions(tick("TX", 18002))   # 回落但還沒碰到保本價
+            await settle()
+            return c
+
+        c = asyncio.run(scenario())
+        assert c.status is ConditionStatus.GUARDED
+        assert c.active_stop_price == 18000.0
+
+    def test_guarded_position_exits_at_entry_price(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+                              take_profit=50, cost_guard=True, chase=5)
+            cm._check_conditions(tick("TX", 18010))   # 啟動保本
+            await settle()
+            a.placed.clear()
+            cm._check_conditions(tick("TX", 18000))   # 回到成本 → 出場
+            await settle()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert len(adapter.placed) == 1
+        assert adapter.placed[0]["price"] == 17995    # 保本價 − 追點
+        assert c.exit_reason == "cost_guard"
+
+    def test_no_arming_without_stop_loss(self):
+        """沒設損點就沒有門檻可言，保本無從啟動。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, take_profit=50, cost_guard=True)
+            cm._check_conditions(tick("TX", 18040))
+            await settle()
+            return c
+
+        c = asyncio.run(scenario())
+        assert c.status is ConditionStatus.FILLED
+        assert c.active_stop_price == 0.0
+
+    def test_disabled_cost_guard_never_arms(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+                              take_profit=50, cost_guard=False)
+            cm._check_conditions(tick("TX", 18040))
+            await settle()
+            return c
+
+        c = asyncio.run(scenario())
+        assert c.status is ConditionStatus.FILLED
+        assert c.active_stop_price == 17990.0    # 停損沒被移動
+
+
+class TestTrailingStop:
+    def test_stop_follows_new_highs(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=True)
+            stops = []
+            for p in (18005, 18020, 18050):
+                cm._check_conditions(tick("TX", p))
+                await settle()
+                stops.append(c.active_stop_price)
+            return stops, c
+
+        stops, c = asyncio.run(scenario())
+        assert stops == [17995.0, 18010.0, 18040.0]   # 一路跟著最高價往上
+        assert c.peak_price == 18050
+
+    def test_stop_never_moves_back_down(self):
+        """跟隨只往有利方向動 —— 回檔時停損必須留在原地。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=True)
+            cm._check_conditions(tick("TX", 18050))
+            await settle()
+            high_stop = c.active_stop_price
+            cm._check_conditions(tick("TX", 18042))   # 回檔但沒碰到停損
+            await settle()
+            return high_stop, c
+
+        high_stop, c = asyncio.run(scenario())
+        assert high_stop == 18040.0
+        assert c.active_stop_price == 18040.0
+        assert c.peak_price == 18050                  # peak 不會被回檔拉低
+
+    def test_short_trails_downward(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.SELL, 18000, stop_loss=-10, trail=True)
+            cm._check_conditions(tick("TX", 17950))
+            await settle()
+            return c
+
+        c = asyncio.run(scenario())
+        assert c.peak_price == 17950
+        assert c.active_stop_price == 17960.0    # 空單的停損在上方，跟著新低往下
+
+    def test_trailing_stop_triggers_exit(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=True, chase=5)
+            cm._check_conditions(tick("TX", 18050))   # 停損被推到 18040
+            await settle()
+            a.placed.clear()
+            cm._check_conditions(tick("TX", 18040))
+            await settle()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert len(adapter.placed) == 1
+        assert adapter.placed[0]["price"] == 18035    # 移動停損價 − 追點
+        assert c.exit_reason == "trail"
+
+    def test_trail_and_cost_guard_take_most_protective(self):
+        """兩個都開時取最保護的那個 —— 跟隨走遠後會蓋過保本。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+                              cost_guard=True, trail=True)
+            cm._check_conditions(tick("TX", 18010))   # 保本啟動（停損 18000）
+            await settle()
+            armed_stop = c.active_stop_price
+            cm._check_conditions(tick("TX", 18060))   # 跟隨推到 18050
+            await settle()
+            return armed_stop, c
+
+        armed_stop, c = asyncio.run(scenario())
+        assert armed_stop == 18000.0
+        assert c.status is ConditionStatus.GUARDED
+        assert c.active_stop_price == 18050.0
+        assert c.stop_kind == "trail"
+
+    def test_disabled_trail_keeps_fixed_stop(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=False)
+            cm._check_conditions(tick("TX", 18100))
+            await settle()
+            return c
+
+        assert asyncio.run(scenario()).active_stop_price == 17990.0
+
+
+# ─── 收盤清倉、當沖、重啟對帳（P4）──────────────────────────
+
+class TestSessionClose:
+    def test_closes_holdings_at_session_time(self):
+        async def scenario():
+            cm, t, a = await build()
+            # 讓收盤時點就是「現在」，不必等真的到 13:44
+            cm._close_times = [datetime.now().strftime("%H:%M")]
+            await cm.set_options(close_on_end=True)
+            c = await entered(cm, t, Direction.BUY, 18000, chase=5)
+            cm._check_conditions(tick("TX", 18020))    # 餵一筆報價當平倉價依據
+            await settle()
+            a.placed.clear()
+            await cm._check_session_close()
+            return c, a, cm
+
+        c, adapter, cm = asyncio.run(scenario())
+        assert len(adapter.placed) == 1
+        sent = adapter.placed[0]
+        assert sent["direction"] is Direction.SELL     # 多單平倉
+        assert sent["price"] == 18015                  # 最後成交價 − 追點
+        assert sent["octype"] == "cover"
+        assert c.exit_reason == "session_close"
+        assert cm.trading_enabled is False             # 收盤後不再進新倉
+
+    def test_does_nothing_when_close_on_end_off(self):
+        async def scenario():
+            cm, t, a = await build()
+            cm._close_times = [datetime.now().strftime("%H:%M")]
+            await entered(cm, t, Direction.BUY, 18000)
+            a.placed.clear()
+            await cm._check_session_close()
+            return a
+
+        assert asyncio.run(scenario()).placed == []
+
+    def test_runs_once_per_time_point(self):
+        """輪詢週期比一分鐘短，同一個時點會被檢查好幾次。"""
+        async def scenario():
+            cm, t, a = await build()
+            cm._close_times = [datetime.now().strftime("%H:%M")]
+            await cm.set_options(close_on_end=True)
+            await entered(cm, t, Direction.BUY, 18000)
+            cm._check_conditions(tick("TX", 18020))
+            await settle()
+            a.placed.clear()
+            for _ in range(3):
+                await cm._check_session_close()
+            return a
+
+        assert len(asyncio.run(scenario()).placed) == 1
+
+    def test_falls_back_to_market_without_quote(self):
+        """沒有報價就算不出穿價價位 —— 收盤前平不掉部位比滑價嚴重。"""
+        async def scenario():
+            cm, t, a = await build()
+            cm._close_times = [datetime.now().strftime("%H:%M")]
+            await cm.set_options(close_on_end=True)
+            await entered(cm, t, Direction.BUY, 18000)
+            cm._last_price.clear()      # 假裝沒收到過任何 tick
+            a.placed.clear()
+            await cm._check_session_close()
+            return a
+
+        adapter = asyncio.run(scenario())
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET
+
+    def test_waiting_conditions_are_kept_not_deleted(self):
+        """未觸發的條件是使用者辛苦設的，收盤只把總開關關掉，不刪除。"""
+        async def scenario():
+            cm, t, a = await build()
+            cm._close_times = [datetime.now().strftime("%H:%M")]
+            await cm.set_options(close_on_end=True)
+            await cm.add("TX", Direction.SELL, 18500)
+            await cm._check_session_close()
+            return cm
+
+        cm = asyncio.run(scenario())
+        assert len(cm.list_conditions()) == 1
+        assert cm.list_conditions()[0].status is ConditionStatus.WAITING
+        assert cm.trading_enabled is False
+
+
+class TestDayTradeFlag:
+    def test_day_trade_turns_on_close_on_end(self):
+        """當沖部位留倉就不是當沖了，兩個旗標不該各走各的。"""
+        async def scenario():
+            cm, t, a = await build()
+            await cm.set_options(day_trade=True)
+            return cm.settings
+
+        s = asyncio.run(scenario())
+        assert s["day_trade"] is True and s["close_on_end"] is True
+
+    def test_turning_off_close_on_end_also_clears_day_trade(self):
+        async def scenario():
+            cm, t, a = await build()
+            await cm.set_options(day_trade=True)
+            await cm.set_options(close_on_end=False)
+            return cm.settings
+
+        s = asyncio.run(scenario())
+        assert s["close_on_end"] is False and s["day_trade"] is False
+
+
+def position(symbol="TX", side=PositionSide.LONG, qty=1, avg=18000.0):
+    return Position(symbol=symbol, side=side, qty=qty, avg_price=avg)
+
+
+class TestRestartReconcile:
+    def test_matching_position_restores_management(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=2, stop_loss=-10)
+            c.status = ConditionStatus.ORPHANED        # 模擬重啟後的起始狀態
+            restored = await cm.reconcile_with_broker([position(qty=2)])
+            return restored, c
+
+        restored, c = asyncio.run(scenario())
+        assert restored == 1
+        assert c.status is ConditionStatus.FILLED      # 恢復管理
+
+    def test_mismatched_qty_stays_orphaned(self):
+        """條件說 2 口、券商只有 1 口 —— 差在哪不知道，不能猜。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=2)
+            c.status = ConditionStatus.ORPHANED
+            restored = await cm.reconcile_with_broker([position(qty=1)])
+            return restored, c
+
+        restored, c = asyncio.run(scenario())
+        assert restored == 0
+        assert c.status is ConditionStatus.ORPHANED
+
+    def test_opposite_direction_stays_orphaned(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=1)
+            c.status = ConditionStatus.ORPHANED
+            restored = await cm.reconcile_with_broker([position(side=PositionSide.SHORT, qty=1)])
+            return restored, c
+
+        restored, c = asyncio.run(scenario())
+        assert restored == 0
+        assert c.status is ConditionStatus.ORPHANED
+
+    def test_no_position_at_all_stays_orphaned(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=1)
+            c.status = ConditionStatus.ORPHANED
+            restored = await cm.reconcile_with_broker([])
+            return restored, c
+
+        restored, c = asyncio.run(scenario())
+        assert restored == 0
+        assert c.status is ConditionStatus.ORPHANED
+
+    def test_extra_broker_qty_still_matches(self):
+        """券商端多出來的口數可能是手動下的單，不歸引擎管，不該擋住接手。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=1)
+            c.status = ConditionStatus.ORPHANED
+            restored = await cm.reconcile_with_broker([position(qty=5)])
+            return restored, c
+
+        restored, c = asyncio.run(scenario())
+        assert restored == 1 and c.status is ConditionStatus.FILLED
+
+    def test_in_flight_entry_never_resumes(self):
+        """重啟前正在送單的條件：成交了沒、成交幾口都無從得知，一律不接手。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.BUY, 18000, qty=1)
+            cm._check_conditions(tick("TX", 17990))
+            await settle()
+            c.status = ConditionStatus.ORPHANED        # 停在 sent 時重啟
+            restored = await cm.reconcile_with_broker([position(qty=1)])
+            return restored, c
+
+        restored, c = asyncio.run(scenario())
+        assert restored == 0
+        assert c.status is ConditionStatus.ORPHANED
+
+    def test_two_conditions_sum_to_position(self):
+        """同商品多筆條件用淨口數比對 —— 券商倉位本來就分不出哪一口屬於誰。"""
+        async def scenario():
+            cm, t, a = await build()
+            c1 = await entered(cm, t, Direction.BUY, 18000, qty=1)
+            c2 = await entered(cm, t, Direction.BUY, 18010, qty=2)
+            c1.status = c2.status = ConditionStatus.ORPHANED
+            restored = await cm.reconcile_with_broker([position(qty=3)])
+            return restored, c1, c2
+
+        restored, c1, c2 = asyncio.run(scenario())
+        assert restored == 2
+        assert c1.status is c2.status is ConditionStatus.FILLED
+
+    def test_orphaned_condition_does_not_trade(self):
+        """擱置中的條件不能因為價格碰到停損就自己送單。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10)
+            c.status = ConditionStatus.ORPHANED
+            a.placed.clear()
+            cm._check_conditions(tick("TX", 17900))
+            await settle()
+            return a
+
+        assert asyncio.run(scenario()).placed == []
 
 
 # ─── CRUD ───────────────────────────────────────────────────

@@ -94,9 +94,14 @@ def condition_payload(c: Condition) -> dict:
         "status": c.status.value,
         "entry_price": c.entry_price,
         "entry_filled_qty": c.entry_filled_qty,
-        # 停利/停損價由後端算好（以實際進場均價為基準），前端只負責顯示
+        # 停利/停損價由後端算好（以實際進場均價為基準），前端只負責顯示。
+        # active_stop_price 是實際生效的那個 —— 保本與移動停損會把它推走，
+        # 畫面要顯示這個值，不然使用者看到的停損跟真正在跑的不是同一條。
         "take_profit_price": c.take_profit_price,
         "stop_loss_price": c.stop_loss_price,
+        "active_stop_price": c.active_stop_price,
+        "stop_kind": c.stop_kind,
+        "peak_price": c.peak_price,
         "exit_price": c.exit_price,
         "exit_reason": c.exit_reason,
         "fail_reason": c.fail_reason,
@@ -256,8 +261,9 @@ def setup_event_bridge():
             "data": condition_payload(c),
         })
 
-    async def forward_condition_trading(enabled: bool):
-        await manager.broadcast({"type": "condition_trading", "enabled": enabled})
+    async def forward_condition_trading(settings_: dict):
+        """條件單的全域開關（啟動交易／當沖／收盤清倉）—— 真相在後端，各分頁跟著同步。"""
+        await manager.broadcast({"type": "condition_trading", **settings_})
 
     async def forward_indicator_output(output: IndicatorOutput):
         await manager.broadcast({

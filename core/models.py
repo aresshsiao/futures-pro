@@ -271,11 +271,56 @@ class Condition:
 
     @property
     def stop_loss_price(self) -> float:
-        """停損價。損點前端以負數輸入，這裡一律取絕對值往不利方向擺。"""
+        """固定停損價。損點前端以負數輸入，這裡一律取絕對值往不利方向擺。"""
         if not self.stop_loss or not self.entry_price:
             return 0.0
         sl = abs(self.stop_loss)
         return self.entry_price - sl if self.side == Direction.BUY else self.entry_price + sl
+
+    @property
+    def trail_stop_price(self) -> float:
+        """觸後跟隨的停損價：跟著最有利價 peak_price 保持一個損點的距離。
+
+        跟隨距離沿用損點 —— 沒設損點就沒有距離可言，跟隨也就無從算起。
+        """
+        if not self.trail or not self.stop_loss or not self.peak_price:
+            return 0.0
+        sl = abs(self.stop_loss)
+        return self.peak_price - sl if self.side == Direction.BUY else self.peak_price + sl
+
+    @property
+    def cost_guard_threshold(self) -> float:
+        """成本防線的啟動門檻（浮盈點數）。用損點而不是利點：
+        賺到「夠賠的量」就先立於不敗，不必等到接近停利才保本。"""
+        return abs(self.stop_loss) if (self.cost_guard and self.stop_loss) else 0.0
+
+    def best_profit(self) -> float:
+        """進場後看過的最大浮盈點數（以 peak_price 計，只增不減）。"""
+        if not self.entry_price or not self.peak_price:
+            return 0.0
+        return (
+            self.peak_price - self.entry_price if self.side == Direction.BUY
+            else self.entry_price - self.peak_price
+        )
+
+    @property
+    def active_stop_price(self) -> float:
+        """實際生效的停損價 —— 固定停損／保本／移動停損取「最保護」的那一個。
+
+        多單的停損在下方，愈高愈保護（取 max）；空單反之（取 min）。
+        三者能直接這樣合併是因為它們只會往有利方向動，不會互相拉扯。
+        """
+        candidates = []
+        if self.stop_loss_price:
+            candidates.append(self.stop_loss_price)
+        # 成本防線一旦啟動（狀態進 guarded）就固定守在進場價
+        if self.status == ConditionStatus.GUARDED and self.entry_price:
+            candidates.append(self.entry_price)
+        if self.trail_stop_price:
+            candidates.append(self.trail_stop_price)
+        if not candidates:
+            return 0.0
+        return max(candidates) if self.side == Direction.BUY else min(candidates)
 
     @property
     def exit_direction(self) -> Direction:
@@ -289,22 +334,36 @@ class Condition:
             else trigger + self.chase
         )
 
+    @property
+    def stop_kind(self) -> str:
+        """目前生效的停損是哪一種 —— 出場後要看得出來是被什麼掃到的。"""
+        stop = self.active_stop_price
+        if not stop:
+            return ""
+        if self.trail_stop_price and stop == self.trail_stop_price:
+            return "trail"
+        if self.status == ConditionStatus.GUARDED and stop == self.entry_price:
+            return "cost_guard"
+        return "stop_loss"
+
     def exit_hit(self, price: float) -> Optional[tuple[str, float]]:
         """檢查現價是否觸及停利/停損，回傳 (原因, 觸發價) 或 None。
+
+        停損用 active_stop_price（含保本與移動停損），不是原始的固定停損價。
 
         跳空時兩邊可能同一筆 tick 都成立（例如多單開盤直接跳過停損又衝過停利），
         這時一律先認停損 —— 中間的路徑看不到，假設走過最不利的那一邊才安全。
         """
-        sl_price = self.stop_loss_price
+        sl_price = self.active_stop_price
         tp_price = self.take_profit_price
         if self.side == Direction.BUY:
             if sl_price and price <= sl_price:
-                return ("stop_loss", sl_price)
+                return (self.stop_kind, sl_price)
             if tp_price and price >= tp_price:
                 return ("take_profit", tp_price)
         else:
             if sl_price and price >= sl_price:
-                return ("stop_loss", sl_price)
+                return (self.stop_kind, sl_price)
             if tp_price and price <= tp_price:
                 return ("take_profit", tp_price)
         return None
