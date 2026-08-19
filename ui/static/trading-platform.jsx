@@ -1434,6 +1434,8 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
   const netQty = pos ? (pos.side === "long" ? pos.qty : -pos.qty) : 0;
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
 
+  // 送出後表單完全不清空（含壓力空/支撐多）：同一組設定常常要微調價位連掛好幾筆，
+  // 清掉等於每加一筆都要重打一次
   // 條件的建立/修改/刪除都送給後端，畫面等 condition_update 推回來才變
   const submitCondition = () => {
     const resistance = num(form.resistance), support = num(form.support);
@@ -1460,7 +1462,6 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
       else send("add_condition", { ...common, ...s });
     });
     setEditingId(null);
-    setForm(BLANK_COND_FORM);
   };
 
   const editCondition = (c) => {
@@ -1475,7 +1476,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
   };
   const removeCondition = (id) => {
     send("delete_condition", { id });
-    if (editingId === id) { setEditingId(null); setForm(BLANK_COND_FORM); }
+    if (editingId === id) setEditingId(null);
   };
   const toggleTrading = () => {
     // 樂觀更新等後端推回來會蓋掉，這裡直接送指令就好
@@ -1508,14 +1509,21 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
         onChange={e => setForm(f => ({ ...f, [key]: e.target.value.replace(/[^-\d.]/g, "") }))} />
     </div>
   );
-  const switchBtn = (label, on, toggle) => (
-    <button onClick={toggle} style={{
-      flex: 1, padding: "3px 0", fontSize: 9, fontWeight: 600, borderRadius: 3, cursor: "pointer",
-      background: on ? "rgba(59,130,246,0.15)" : "transparent",
-      border: `1px solid ${on ? COLORS.accent : COLORS.border}`,
-      color: on ? COLORS.accent : COLORS.textDim,
-    }}>{label} {on ? "On" : "Off"}</button>
-  );
+  // 開關做成跟 numField 同樣的「標題在上、控制項在下」，六格才能排成整齊的一列
+  const switchField = (label, key, title) => {
+    const on = form[key];
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+        <span style={{ fontSize: 9, color: COLORS.textDim, textAlign: "center" }}>{label}</span>
+        <button onClick={() => setForm(f => ({ ...f, [key]: !f[key] }))} title={title} style={{
+          height: 21, padding: 0, fontSize: 10, fontWeight: 600, borderRadius: 3, cursor: "pointer",
+          background: on ? "rgba(59,130,246,0.15)" : COLORS.bg,
+          border: `1px solid ${on ? COLORS.accent : COLORS.border}`,
+          color: on ? COLORS.accent : COLORS.textMuted,
+        }}>{on ? "On" : "Off"}</button>
+      </div>
+    );
+  };
   const checkBox = (label, on, toggle) => (
     <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, color: COLORS.textDim, cursor: "pointer" }}>
       <input type="checkbox" checked={on} onChange={toggle} style={{ width: 11, height: 11, accentColor: COLORS.accent, margin: 0 }} />
@@ -1537,7 +1545,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
             background: tradingOn ? COLORS.successBg : COLORS.bgCard,
             border: `1px solid ${tradingOn ? COLORS.success : COLORS.border}`,
             color: tradingOn ? COLORS.success : COLORS.textDim,
-          }}>{tradingOn ? "● 啟動交易" : "❚❚ 暫停交易"}</button>
+          }}>{tradingOn ? "● 啟動中" : "❚❚ 已暫停"}</button>
         <div style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
           {["TX", "MTX", "TMF"].map(s => (
             <button key={s} onClick={() => setActiveSymbol(s)} style={{
@@ -1590,15 +1598,13 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
             {numField("壓力空", "resistance", COLORS.down)}
             {numField("支撐多", "support", COLORS.up)}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 4 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 3 }}>
             {numField("追點", "chase")}
             {numField("口數", "qty")}
             {numField("利點", "tp")}
             {numField("損點", "sl")}
-          </div>
-          <div style={{ display: "flex", gap: 4 }}>
-            {switchBtn("成本防線", form.costGuard, () => setForm(f => ({ ...f, costGuard: !f.costGuard })))}
-            {switchBtn("觸後跟隨", form.trail, () => setForm(f => ({ ...f, trail: !f.trail })))}
+            {switchField("成本", "costGuard", "成本防線：浮盈達損點時把停損移到進場價")}
+            {switchField("跟隨", "trail", "觸後跟隨：停損跟著最有利價移動，只進不退")}
           </div>
           <div style={{ display: "flex", gap: 4 }}>
             <button onClick={submitCondition} style={{
@@ -1607,7 +1613,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
               border: "none", color: "#fff",
             }}>{editingId != null ? "✓ 更新條件" : "⊕ 新增條件"}</button>
             {editingId != null && (
-              <button onClick={() => { setEditingId(null); setForm(BLANK_COND_FORM); }} style={{
+              <button onClick={() => setEditingId(null)} style={{
                 padding: "5px 10px", fontSize: 10, borderRadius: 3, cursor: "pointer",
                 background: "transparent", border: `1px solid ${COLORS.border}`, color: COLORS.textDim,
               }}>取消</button>
