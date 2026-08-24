@@ -76,7 +76,7 @@ script_engine = ScriptEngine()
 def condition_payload(c: Condition) -> dict:
     """條件單送給前端的格式。廣播與 get_conditions 共用同一份，前端才能用同一個 handler。
 
-    limit_price 由後端算好一起送：追價的算法（穿價方向）屬於引擎的規則，
+    limit_price 由後端算好一起送：回檔進場價的算法屬於引擎的規則，
     前端各自再算一次就會有兩個版本。
     """
     return {
@@ -84,8 +84,10 @@ def condition_payload(c: Condition) -> dict:
         "symbol": c.symbol,
         "side": c.side.value,
         "trigger_price": c.trigger_price,
-        "limit_price": c.limit_price,
-        "chase": c.chase,
+        # 掛單價 = 極值 ∓ 返點。跟隨開著時會隨行情走，所以由後端算好一起送
+        "limit_price": c.entry_target_price,
+        "trigger_extreme": c.trigger_extreme,
+        "pullback": c.pullback,
         "qty": c.qty,
         "take_profit": c.take_profit,
         "stop_loss": c.stop_loss,
@@ -95,7 +97,7 @@ def condition_payload(c: Condition) -> dict:
         "entry_price": c.entry_price,
         "entry_filled_qty": c.entry_filled_qty,
         # 停利/停損價由後端算好（以實際進場均價為基準），前端只負責顯示。
-        # active_stop_price 是實際生效的那個 —— 保本與移動停損會把它推走，
+        # active_stop_price 是實際生效的那個 —— 成本防線啟動後會把它推到進場價，
         # 畫面要顯示這個值，不然使用者看到的停損跟真正在跑的不是同一條。
         "take_profit_price": c.take_profit_price,
         "stop_loss_price": c.stop_loss_price,

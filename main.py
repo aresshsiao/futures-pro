@@ -557,6 +557,12 @@ async def forward_fills(_fills):
 
 # ── 條件單（右邊下單）─────────────────────────────────
 
+async def handle_ping(ws, data: dict):
+    """前端心跳。前端靠「多久沒收到任何訊息」判斷連線是不是還活著 ——
+    半夜沒有 tick 的時段沒有這個回覆就會被誤判成死連線。"""
+    await ws.send_json({"type": "pong"})
+
+
 async def handle_get_conditions(ws, data: dict):
     """前端: 取回整份條件清單（開啟分頁 / 重連時）"""
     await ws.send_json({
@@ -573,7 +579,7 @@ async def handle_add_condition(ws, data: dict):
         side=Direction(data["side"]),
         trigger_price=data["trigger_price"],
         qty=data.get("qty", 1),
-        chase=data.get("chase", 0),
+        pullback=data.get("pullback", 0),
         take_profit=data.get("take_profit", 0),
         stop_loss=data.get("stop_loss", 0),
         cost_guard=data.get("cost_guard", False),
@@ -586,7 +592,7 @@ async def handle_add_condition(ws, data: dict):
 async def handle_update_condition(ws, data: dict):
     c = await conditions.update(data["id"], **{
         k: data.get(k) for k in (
-            "symbol", "side", "trigger_price", "qty", "chase",
+            "symbol", "side", "trigger_price", "qty", "pullback",
             "take_profit", "stop_loss", "cost_guard", "trail",
         )
     })
@@ -1446,6 +1452,7 @@ def setup():
     register_action("get_orders", handle_get_orders)
     register_action("get_fills", handle_get_fills)
     register_action("get_account", handle_get_account)
+    register_action("ping", handle_ping)
     register_action("get_conditions", handle_get_conditions)
     register_action("add_condition", handle_add_condition)
     register_action("update_condition", handle_update_condition)

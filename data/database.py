@@ -74,13 +74,20 @@ class Database:
                     self._conn.execute(f'ALTER TABLE "{symbol}" ADD COLUMN from_csv INTEGER NOT NULL DEFAULT 0')
                     logger.info("[Database] %s 資料表新增 from_csv 欄位（既有資料預設為 0）", symbol)
 
-        # conditions 表隨引擎分期長出新欄位（P2 的出場欄位…）。既有條件不能 drop 重建，
+        # conditions 表隨引擎分期長出新欄位。既有條件不能 drop 重建，
         # 缺什麼補什麼即可 —— SQLite 的 ADD COLUMN 有 DEFAULT 就不會動到既有資料列。
         if "conditions" in tables:
             cols = {row[1] for row in self._conn.execute("PRAGMA table_info(conditions)").fetchall()}
+            # chase（誤解成「追價點數」時的舊名）→ pullback（返點，回檔確認點數）。
+            # 欄位值本身不用動：同樣是使用者填的點數，只是語意改了。
+            if "chase" in cols and "pullback" not in cols:
+                self._conn.execute("ALTER TABLE conditions RENAME COLUMN chase TO pullback")
+                cols.add("pullback")
+                logger.info("[Database] conditions 資料表欄位改名: chase → pullback")
             for name, ddl in (
                 ("exit_price", "REAL NOT NULL DEFAULT 0"),
                 ("exit_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("trigger_extreme", "REAL NOT NULL DEFAULT 0"),
             ):
                 if name not in cols:
                     self._conn.execute(f"ALTER TABLE conditions ADD COLUMN {name} {ddl}")
@@ -125,12 +132,13 @@ class Database:
                 symbol           TEXT NOT NULL,
                 side             TEXT NOT NULL,
                 trigger_price    REAL NOT NULL,
-                chase            INTEGER NOT NULL DEFAULT 0,
+                pullback         INTEGER NOT NULL DEFAULT 0,
                 qty              INTEGER NOT NULL DEFAULT 1,
                 take_profit      INTEGER NOT NULL DEFAULT 0,
                 stop_loss        INTEGER NOT NULL DEFAULT 0,
                 cost_guard       INTEGER NOT NULL DEFAULT 0,
                 trail            INTEGER NOT NULL DEFAULT 0,
+                trigger_extreme  REAL NOT NULL DEFAULT 0,
                 status           TEXT NOT NULL DEFAULT 'waiting',
                 entry_order_id   TEXT NOT NULL DEFAULT '',
                 entry_price      REAL NOT NULL DEFAULT 0,
@@ -261,8 +269,8 @@ class Database:
     # ── 條件單（右邊下單）─────────────────────────────────────
 
     _CONDITION_COLS = (
-        "id", "symbol", "side", "trigger_price", "chase", "qty",
-        "take_profit", "stop_loss", "cost_guard", "trail", "status",
+        "id", "symbol", "side", "trigger_price", "pullback", "qty",
+        "take_profit", "stop_loss", "cost_guard", "trail", "trigger_extreme", "status",
         "entry_order_id", "entry_price", "entry_filled_qty",
         "exit_order_id", "exit_price", "exit_reason",
         "peak_price", "fail_reason", "created_at", "updated_at",
@@ -274,8 +282,9 @@ class Database:
             f"""INSERT OR REPLACE INTO conditions ({",".join(self._CONDITION_COLS)})
                 VALUES ({",".join("?" * len(self._CONDITION_COLS))})""",
             (
-                c.id, c.symbol, c.side.value, c.trigger_price, c.chase, c.qty,
-                c.take_profit, c.stop_loss, int(c.cost_guard), int(c.trail), c.status.value,
+                c.id, c.symbol, c.side.value, c.trigger_price, c.pullback, c.qty,
+                c.take_profit, c.stop_loss, int(c.cost_guard), int(c.trail),
+                c.trigger_extreme, c.status.value,
                 c.entry_order_id, c.entry_price, c.entry_filled_qty,
                 c.exit_order_id, c.exit_price, c.exit_reason,
                 c.peak_price, c.fail_reason,
@@ -296,13 +305,14 @@ class Database:
         return [
             Condition(
                 id=r[0], symbol=r[1], side=Direction(r[2]), trigger_price=r[3],
-                chase=r[4], qty=r[5], take_profit=r[6], stop_loss=r[7],
-                cost_guard=bool(r[8]), trail=bool(r[9]), status=ConditionStatus(r[10]),
-                entry_order_id=r[11], entry_price=r[12], entry_filled_qty=r[13],
-                exit_order_id=r[14], exit_price=r[15], exit_reason=r[16],
-                peak_price=r[17], fail_reason=r[18],
-                created_at=datetime.fromisoformat(r[19]),
-                updated_at=datetime.fromisoformat(r[20]),
+                pullback=r[4], qty=r[5], take_profit=r[6], stop_loss=r[7],
+                cost_guard=bool(r[8]), trail=bool(r[9]), trigger_extreme=r[10],
+                status=ConditionStatus(r[11]),
+                entry_order_id=r[12], entry_price=r[13], entry_filled_qty=r[14],
+                exit_order_id=r[15], exit_price=r[16], exit_reason=r[17],
+                peak_price=r[18], fail_reason=r[19],
+                created_at=datetime.fromisoformat(r[20]),
+                updated_at=datetime.fromisoformat(r[21]),
             )
             for r in rows
         ]

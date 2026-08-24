@@ -3,8 +3,8 @@ tests/core/test_condition_module.py — 條件單引擎（右邊下單）測試
 
 重點在幾件事：
   1. 觸發方向跟現有觸價單相反 —— 壓力空要「漲上去」才觸發、支撐多要「跌下來」。
-  2. 觸發後送的是穿價限價單，不是市價單（追點 = 可接受的滑價上限）。
-  3. 同一個條件只能送出一張進場單，不管中間流過幾筆 tick。
+  2. 兩段式進場：碰到觸發價只是開始盯，要等價格從極值回檔「返點」才送單。
+  3. 「跟隨」是進場端的語意：觸發後繼續追極值，掛單價跟著極值走。
   4. 停利／停損是 OCO，只送一張平倉單；跳空同時觸及時一律先認停損。
   5. 「暫停交易」只擋新進場，已進場部位的停損照常運作 —— 否則按下暫停等於裸倉。
   6. 未連線時不觸發（留在 waiting），不然條件會被券商一次打成 failed。
@@ -13,7 +13,7 @@ EventBus 是 singleton，每個測試前後都要清乾淨，否則上一個測�
 會繼續收事件。
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -56,55 +56,153 @@ async def settle():
         await asyncio.sleep(0)
 
 
-# ─── 觸發方向與追價 ──────────────────────────────────────────
+# ─── 觸發與回檔進場 ─────────────────────────────────────────
 
 class TestTrigger:
-    def test_limit_price_is_chase_through(self):
-        """賣單掛低於觸發價、買單掛高於觸發價 —— 參考圖的 17059 → 17049。"""
-        sell = Condition(id="a", symbol="TX", side=Direction.SELL, trigger_price=17059, chase=10)
-        buy = Condition(id="b", symbol="TX", side=Direction.BUY, trigger_price=17059, chase=10)
-        assert sell.limit_price == 17049
-        assert buy.limit_price == 17069
+    def test_entry_target_is_extreme_minus_pullback(self):
+        """掛單價 = 極值 ∓ 返點 —— 參考圖的 17059 觸發、返點 10 → 掛 17049。"""
+        sell = Condition(id="a", symbol="TX", side=Direction.SELL, trigger_price=17059, pullback=10)
+        buy = Condition(id="b", symbol="TX", side=Direction.BUY, trigger_price=17059, pullback=10)
+        assert sell.entry_target_price == 17049      # 壓力空：最高 − 返點
+        assert buy.entry_target_price == 17069       # 支撐多：最低 + 返點
 
-    def test_resistance_short_triggers_on_rise(self):
-        """壓力空：漲到壓力價才觸發（跌下去不算）。"""
+    def test_resistance_short_arms_on_rise(self):
+        """壓力空：漲到壓力價才進入盯盤（跌下去不算）。"""
         c = Condition(id="a", symbol="TX", side=Direction.SELL, trigger_price=18000)
         assert c.is_hit(18000) is True
         assert c.is_hit(18010) is True
         assert c.is_hit(17990) is False
 
-    def test_support_long_triggers_on_fall(self):
-        """支撐多：跌到支撐價才觸發。"""
+    def test_support_long_arms_on_fall(self):
         c = Condition(id="a", symbol="TX", side=Direction.BUY, trigger_price=18000)
         assert c.is_hit(18000) is True
         assert c.is_hit(17990) is True
         assert c.is_hit(18010) is False
 
-    def test_trigger_sends_limit_order_not_market(self):
+    def test_touching_trigger_does_not_enter_yet(self):
+        """碰到觸發價只是開始盯，沒回檔就不該送單 —— 這是返點的全部意義。"""
         async def scenario():
             cm, t, a = await build()
-            c = await cm.add("TX", Direction.SELL, 18000, qty=2, chase=10)
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=10)
+            cm._check_conditions(tick("TX", 18000))
+            await settle()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert adapter.placed == []
+        assert c.status is ConditionStatus.TRIGGERED
+        assert c.trigger_extreme == 18000
+
+    def test_enters_after_pullback(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, qty=2, pullback=10)
+            cm._check_conditions(tick("TX", 18004))   # 觸發，極值 18004
+            await settle()
+            cm._check_conditions(tick("TX", 17996))   # 還沒回檔滿 10 點
+            await settle()
+            mid = list(a.placed)
+            cm._check_conditions(tick("TX", 17994))   # 18004 − 10 → 進場
+            await settle()
+            return c, a, mid
+
+        c, adapter, mid = asyncio.run(scenario())
+        assert mid == []
+        assert len(adapter.placed) == 1
+        sent = adapter.placed[0]
+        assert sent["order_type"] is OrderType.LIMIT
+        assert sent["price"] == 17994            # 極值 18004 − 返點 10
+        assert sent["direction"] is Direction.SELL
+        assert sent["qty"] == 2
+        assert sent["octype"] == "new"
+        assert c.status is ConditionStatus.SENT
+
+    def test_zero_pullback_enters_on_the_trigger_tick(self):
+        """返點 0 = 碰到就進，不必等回檔。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=0)
             cm._check_conditions(tick("TX", 18000))
             await settle()
             return c, a
 
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == 1
-        sent = adapter.placed[0]
-        assert sent["order_type"] is OrderType.LIMIT      # 不是市價單
-        assert sent["price"] == 17990                     # 觸發價 − 追點
-        assert sent["direction"] is Direction.SELL
-        assert sent["qty"] == 2
-        assert sent["octype"] == "new"
+        assert adapter.placed[0]["price"] == 18000
         assert c.status is ConditionStatus.SENT
 
-    def test_triggers_only_once_across_many_ticks(self):
-        """狀態沒有當場離開 waiting 的話，送單完成前的每筆 tick 都會再送一張。"""
+    def test_support_long_enters_on_bounce(self):
         async def scenario():
             cm, t, a = await build()
-            await cm.add("TX", Direction.SELL, 18000, chase=5)
+            c = await cm.add("TX", Direction.BUY, 18000, pullback=10)
+            cm._check_conditions(tick("TX", 17995))   # 跌破支撐，極值（最低）17995
+            await settle()
+            before = list(a.placed)
+            cm._check_conditions(tick("TX", 18005))   # 17995 + 10 → 反彈進場
+            await settle()
+            return c, a, before
+
+        c, adapter, before = asyncio.run(scenario())
+        assert before == []
+        assert adapter.placed[0]["direction"] is Direction.BUY
+        assert adapter.placed[0]["price"] == 18005    # 最低 17995 + 返點 10
+
+    def test_without_trail_extreme_is_frozen_at_trigger(self):
+        """沒開跟隨：極值停在觸發當下，掛單價固定 = 觸發價 ∓ 返點。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=10, trail=False)
+            cm._check_conditions(tick("TX", 18000))
+            await settle()
+            cm._check_conditions(tick("TX", 18050))   # 續漲，但極值不跟
+            await settle()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert c.trigger_extreme == 18000
+        assert c.entry_target_price == 17990
+        assert adapter.placed == []                   # 18050 沒觸及 17990
+
+    def test_trail_follows_the_extreme(self):
+        """開了跟隨：續漲時極值跟著走，掛單價一起往上抬。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=10, trail=True)
+            cm._check_conditions(tick("TX", 18000))
+            await settle()
+            cm._check_conditions(tick("TX", 18050))   # 續漲 → 極值 18050
+            await settle()
+            targets = c.trigger_extreme, c.entry_target_price
+            cm._check_conditions(tick("TX", 18040))   # 回檔 10 點 → 進場
+            await settle()
+            return c, a, targets
+
+        c, adapter, (extreme, target) = asyncio.run(scenario())
+        assert extreme == 18050 and target == 18040
+        assert len(adapter.placed) == 1
+        assert adapter.placed[0]["price"] == 18040
+
+    def test_trail_extreme_never_moves_backwards(self):
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=50, trail=True)
+            cm._check_conditions(tick("TX", 18060))
+            await settle()
+            cm._check_conditions(tick("TX", 18030))   # 回檔沒滿 50 點
+            await settle()
+            return c
+
+        c = asyncio.run(scenario())
+        assert c.trigger_extreme == 18060             # 不會被回檔拉低
+
+    def test_enters_only_once_across_many_ticks(self):
+        """狀態沒有當場鎖住的話，送單完成前的每筆 tick 都會再送一張。"""
+        async def scenario():
+            cm, t, a = await build()
+            await cm.add("TX", Direction.SELL, 18000, pullback=5)
             for _ in range(5):
-                cm._check_conditions(tick("TX", 18010))
+                cm._check_conditions(tick("TX", 18000))
+                cm._check_conditions(tick("TX", 17990))
             await settle()
             return a
 
@@ -114,7 +212,7 @@ class TestTrigger:
     def test_other_symbol_does_not_trigger(self):
         async def scenario():
             cm, t, a = await build()
-            await cm.add("TX", Direction.SELL, 18000)
+            await cm.add("TX", Direction.SELL, 18000, pullback=0)
             cm._check_conditions(tick("MTX", 18500))
             await settle()
             return a
@@ -124,7 +222,7 @@ class TestTrigger:
     def test_paused_trading_blocks_entry(self):
         async def scenario():
             cm, t, a = await build(trading=False)
-            c = await cm.add("TX", Direction.SELL, 18000)
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=0)
             cm._check_conditions(tick("TX", 18010))
             await settle()
             return c, a
@@ -133,11 +231,27 @@ class TestTrigger:
         assert adapter.placed == []
         assert c.status is ConditionStatus.WAITING   # 留著等啟動，不是被作廢
 
+    def test_pausing_after_trigger_also_blocks_entry(self):
+        """已觸發、還在等回檔的也算「新進場」，暫停一樣要擋。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=10)
+            cm._check_conditions(tick("TX", 18000))
+            await settle()
+            await cm.set_trading(False)
+            cm._check_conditions(tick("TX", 17990))
+            await settle()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert adapter.placed == []
+        assert c.status is ConditionStatus.TRIGGERED
+
     def test_disconnected_broker_keeps_condition_waiting(self):
         """未連線就照送，只會把條件一次全打成 failed，使用者得逐筆重設。"""
         async def scenario():
             cm, t, a = await build()
-            c = await cm.add("TX", Direction.SELL, 18000)
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=0)
             await t.disconnect()
             cm._check_conditions(tick("TX", 18010))
             await settle()
@@ -151,7 +265,7 @@ class TestTrigger:
         async def scenario():
             # broker_id 空字串 = 券商沒收下這張單
             cm, t, a = await build(broker_id="", last_error="保證金不足")
-            c = await cm.add("TX", Direction.SELL, 18000)
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=0)
             cm._check_conditions(tick("TX", 18010))
             await settle()
             return c
@@ -167,10 +281,11 @@ class TestEntryFill:
     def test_full_fill_moves_to_filled_with_avg_price(self):
         async def scenario():
             cm, t, a = await build()
-            c = await cm.add("TX", Direction.SELL, 18000, qty=1, chase=10, take_profit=30, stop_loss=-10)
-            cm._check_conditions(tick("TX", 18010))
+            c = await cm.add("TX", Direction.SELL, 18000, qty=1, pullback=0,
+                             take_profit=30, stop_loss=-10)
+            cm._check_conditions(tick("TX", 18000))
             await settle()
-            # 券商回報成交（成交價比掛單價好一點，測試出場基準用的是實際成交價）
+            # 券商回報成交（成交價跟掛單價不同，測試出場基準用的是實際成交價）
             order = t._orders[c.entry_order_id]
             order.filled_qty, order.avg_fill_price = 1, 17992.0
             order.status = OrderStatus.FILLED
@@ -187,8 +302,8 @@ class TestEntryFill:
     def test_partial_fill_stays_sent(self):
         async def scenario():
             cm, t, a = await build()
-            c = await cm.add("TX", Direction.SELL, 18000, qty=3)
-            cm._check_conditions(tick("TX", 18010))
+            c = await cm.add("TX", Direction.SELL, 18000, qty=3, pullback=0)
+            cm._check_conditions(tick("TX", 18000))
             await settle()
             order = t._orders[c.entry_order_id]
             order.filled_qty, order.avg_fill_price = 1, 18000.0
@@ -203,10 +318,13 @@ class TestEntryFill:
 
 # ─── 出場（P2）──────────────────────────────────────────────
 
-async def entered(cm, t, side=Direction.SELL, entry=18000.0, qty=1, chase=5, **kw):
-    """把一個條件推到「已進場」狀態，回傳它。"""
-    c = await cm.add("TX", side, entry, qty=qty, chase=chase, **kw)
-    cm._check_conditions(tick("TX", entry + (10 if side == Direction.SELL else -10)))
+async def entered(cm, t, side=Direction.SELL, entry=18000.0, qty=1, pullback=0, **kw):
+    """把一個條件推到「已進場」狀態，回傳它。
+
+    預設返點 0，碰到觸發價就直接進場 —— 出場相關的測試不必再演一次回檔。
+    """
+    c = await cm.add("TX", side, entry, qty=qty, pullback=pullback, **kw)
+    cm._check_conditions(tick("TX", entry))
     await settle()
     order = t._orders[c.entry_order_id]
     order.filled_qty, order.avg_fill_price = qty, entry
@@ -229,8 +347,9 @@ class TestExit:
         assert len(adapter.placed) == 1
         sent = adapter.placed[0]
         assert sent["direction"] is Direction.BUY     # 出場是進場的反向
+        # 停利是「有到價才要」，掛限價等它成交沒關係
         assert sent["order_type"] is OrderType.LIMIT
-        assert sent["price"] == 17975                 # 停利價 + 追點（買出場掛高）
+        assert sent["price"] == 17970
         assert sent["octype"] == "cover"
         assert c.exit_reason == "take_profit"
 
@@ -246,7 +365,8 @@ class TestExit:
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == 1
         assert adapter.placed[0]["direction"] is Direction.SELL
-        assert adapter.placed[0]["price"] == 17985    # 停損價 − 追點（賣出場掛低）
+        # 停損是「一定要出去」，掛限價沒成交等於保護失效 → 一律市價
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET
         assert c.exit_reason == "stop_loss"
 
     def test_gap_through_both_prefers_stop_loss(self):
@@ -290,8 +410,8 @@ class TestExit:
         """部分成交後只平掉真正進場的口數，用原設定 qty 會多平出反向部位。"""
         async def scenario():
             cm, t, a = await build()
-            c = await cm.add("TX", Direction.SELL, 18000, qty=3, chase=5, stop_loss=-10)
-            cm._check_conditions(tick("TX", 18010))
+            c = await cm.add("TX", Direction.SELL, 18000, qty=3, pullback=0, stop_loss=-10)
+            cm._check_conditions(tick("TX", 18000))
             await settle()
             order = t._orders[c.entry_order_id]
             order.filled_qty, order.avg_fill_price = 3, 18000.0
@@ -414,7 +534,7 @@ class TestCostGuard:
         async def scenario():
             cm, t, a = await build()
             c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
-                              take_profit=50, cost_guard=True, chase=5)
+                              take_profit=50, cost_guard=True)
             cm._check_conditions(tick("TX", 18010))   # 啟動保本
             await settle()
             a.placed.clear()
@@ -424,7 +544,7 @@ class TestCostGuard:
 
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == 1
-        assert adapter.placed[0]["price"] == 17995    # 保本價 − 追點
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET   # 保護性出場
         assert c.exit_reason == "cost_guard"
 
     def test_no_arming_without_stop_loss(self):
@@ -454,110 +574,29 @@ class TestCostGuard:
         assert c.active_stop_price == 17990.0    # 停損沒被移動
 
 
-class TestTrailingStop:
-    def test_stop_follows_new_highs(self):
-        async def scenario():
-            cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=True)
-            stops = []
-            for p in (18005, 18020, 18050):
-                cm._check_conditions(tick("TX", p))
-                await settle()
-                stops.append(c.active_stop_price)
-            return stops, c
-
-        stops, c = asyncio.run(scenario())
-        assert stops == [17995.0, 18010.0, 18040.0]   # 一路跟著最高價往上
-        assert c.peak_price == 18050
-
-    def test_stop_never_moves_back_down(self):
-        """跟隨只往有利方向動 —— 回檔時停損必須留在原地。"""
-        async def scenario():
-            cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=True)
-            cm._check_conditions(tick("TX", 18050))
-            await settle()
-            high_stop = c.active_stop_price
-            cm._check_conditions(tick("TX", 18042))   # 回檔但沒碰到停損
-            await settle()
-            return high_stop, c
-
-        high_stop, c = asyncio.run(scenario())
-        assert high_stop == 18040.0
-        assert c.active_stop_price == 18040.0
-        assert c.peak_price == 18050                  # peak 不會被回檔拉低
-
-    def test_short_trails_downward(self):
-        async def scenario():
-            cm, t, a = await build()
-            c = await entered(cm, t, Direction.SELL, 18000, stop_loss=-10, trail=True)
-            cm._check_conditions(tick("TX", 17950))
-            await settle()
-            return c
-
-        c = asyncio.run(scenario())
-        assert c.peak_price == 17950
-        assert c.active_stop_price == 17960.0    # 空單的停損在上方，跟著新低往下
-
-    def test_trailing_stop_triggers_exit(self):
-        async def scenario():
-            cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=True, chase=5)
-            cm._check_conditions(tick("TX", 18050))   # 停損被推到 18040
-            await settle()
-            a.placed.clear()
-            cm._check_conditions(tick("TX", 18040))
-            await settle()
-            return c, a
-
-        c, adapter = asyncio.run(scenario())
-        assert len(adapter.placed) == 1
-        assert adapter.placed[0]["price"] == 18035    # 移動停損價 − 追點
-        assert c.exit_reason == "trail"
-
-    def test_trail_and_cost_guard_take_most_protective(self):
-        """兩個都開時取最保護的那個 —— 跟隨走遠後會蓋過保本。"""
-        async def scenario():
-            cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
-                              cost_guard=True, trail=True)
-            cm._check_conditions(tick("TX", 18010))   # 保本啟動（停損 18000）
-            await settle()
-            armed_stop = c.active_stop_price
-            cm._check_conditions(tick("TX", 18060))   # 跟隨推到 18050
-            await settle()
-            return armed_stop, c
-
-        armed_stop, c = asyncio.run(scenario())
-        assert armed_stop == 18000.0
-        assert c.status is ConditionStatus.GUARDED
-        assert c.active_stop_price == 18050.0
-        assert c.stop_kind == "trail"
-
-    def test_disabled_trail_keeps_fixed_stop(self):
-        async def scenario():
-            cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10, trail=False)
-            cm._check_conditions(tick("TX", 18100))
-            await settle()
-            return c
-
-        assert asyncio.run(scenario()).active_stop_price == 17990.0
-
-
 # ─── 收盤清倉、當沖、重啟對帳（P4）──────────────────────────
 
 class TestSessionClose:
+    """收盤清倉是用「上次檢查 → 現在」有沒有跨過收盤時點來判斷的，
+    不是比對「現在是不是剛好那一分鐘」—— 系統休眠會讓那一分鐘從來沒被看到。"""
+
+    @staticmethod
+    def arm(cm, minutes_ago=1, last_check_minutes_ago=5):
+        """把收盤時點設在 minutes_ago 分鐘前，並假裝上次檢查更早之前跑過。"""
+        now = datetime.now()
+        target = now - timedelta(minutes=minutes_ago)
+        cm._close_times = [target.strftime("%H:%M")]
+        cm._last_check_at = now - timedelta(minutes=last_check_minutes_ago)
+
     def test_closes_holdings_at_session_time(self):
         async def scenario():
             cm, t, a = await build()
-            # 讓收盤時點就是「現在」，不必等真的到 13:44
-            cm._close_times = [datetime.now().strftime("%H:%M")]
             await cm.set_options(close_on_end=True)
-            c = await entered(cm, t, Direction.BUY, 18000, chase=5)
-            cm._check_conditions(tick("TX", 18020))    # 餵一筆報價當平倉價依據
+            c = await entered(cm, t, Direction.BUY, 18000)
+            cm._check_conditions(tick("TX", 18020))
             await settle()
             a.placed.clear()
+            self.arm(cm)
             await cm._check_session_close()
             return c, a, cm
 
@@ -565,17 +604,51 @@ class TestSessionClose:
         assert len(adapter.placed) == 1
         sent = adapter.placed[0]
         assert sent["direction"] is Direction.SELL     # 多單平倉
-        assert sent["price"] == 18015                  # 最後成交價 − 追點
+        assert sent["order_type"] is OrderType.MARKET  # 一定要平掉，不掛限價
         assert sent["octype"] == "cover"
         assert c.exit_reason == "session_close"
         assert cm.trading_enabled is False             # 收盤後不再進新倉
 
+    def test_slept_through_close_time_still_fires(self):
+        """筆電從 13:30 睡到 15:00，13:44 那一分鐘從來沒被看到 —— 醒來要補平掉，
+        不然部位就這樣留倉過夜。"""
+        async def scenario():
+            cm, t, a = await build()
+            await cm.set_options(close_on_end=True)
+            c = await entered(cm, t, Direction.BUY, 18000)
+            cm._check_conditions(tick("TX", 18020))
+            await settle()
+            a.placed.clear()
+            # 收盤時點在 1 小時前，上次檢查在 2 小時前（中間整段都在休眠）
+            self.arm(cm, minutes_ago=60, last_check_minutes_ago=120)
+            await cm._check_session_close()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert len(adapter.placed) == 1
+        assert c.exit_reason == "session_close"
+
+    def test_fresh_start_does_not_backfill(self):
+        """晚上才啟動程式，不該把今天下午的收盤清倉補跑一次。"""
+        async def scenario():
+            cm, t, a = await build()
+            await cm.set_options(close_on_end=True)
+            await entered(cm, t, Direction.BUY, 18000)
+            a.placed.clear()
+            now = datetime.now()
+            cm._close_times = [(now - timedelta(minutes=60)).strftime("%H:%M")]
+            cm._last_check_at = None      # 剛啟動，沒有上一次檢查
+            await cm._check_session_close()
+            return a
+
+        assert asyncio.run(scenario()).placed == []
+
     def test_does_nothing_when_close_on_end_off(self):
         async def scenario():
             cm, t, a = await build()
-            cm._close_times = [datetime.now().strftime("%H:%M")]
             await entered(cm, t, Direction.BUY, 18000)
             a.placed.clear()
+            self.arm(cm)
             await cm._check_session_close()
             return a
 
@@ -585,12 +658,12 @@ class TestSessionClose:
         """輪詢週期比一分鐘短，同一個時點會被檢查好幾次。"""
         async def scenario():
             cm, t, a = await build()
-            cm._close_times = [datetime.now().strftime("%H:%M")]
             await cm.set_options(close_on_end=True)
             await entered(cm, t, Direction.BUY, 18000)
             cm._check_conditions(tick("TX", 18020))
             await settle()
             a.placed.clear()
+            self.arm(cm)
             for _ in range(3):
                 await cm._check_session_close()
             return a
@@ -598,14 +671,14 @@ class TestSessionClose:
         assert len(asyncio.run(scenario()).placed) == 1
 
     def test_falls_back_to_market_without_quote(self):
-        """沒有報價就算不出穿價價位 —— 收盤前平不掉部位比滑價嚴重。"""
+        """收盤清倉本來就走市價，沒有報價也照樣要平掉。"""
         async def scenario():
             cm, t, a = await build()
-            cm._close_times = [datetime.now().strftime("%H:%M")]
             await cm.set_options(close_on_end=True)
             await entered(cm, t, Direction.BUY, 18000)
             cm._last_price.clear()      # 假裝沒收到過任何 tick
             a.placed.clear()
+            self.arm(cm)
             await cm._check_session_close()
             return a
 
@@ -616,9 +689,9 @@ class TestSessionClose:
         """未觸發的條件是使用者辛苦設的，收盤只把總開關關掉，不刪除。"""
         async def scenario():
             cm, t, a = await build()
-            cm._close_times = [datetime.now().strftime("%H:%M")]
             await cm.set_options(close_on_end=True)
             await cm.add("TX", Direction.SELL, 18500)
+            self.arm(cm)
             await cm._check_session_close()
             return cm
 

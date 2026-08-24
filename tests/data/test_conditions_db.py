@@ -23,7 +23,7 @@ def db(tmp_path):
 def make(cid="c1", **kw):
     base = dict(
         symbol="TX", side=Direction.SELL, trigger_price=17059.0,
-        chase=10, qty=2, take_profit=30, stop_loss=-10,
+        pullback=10, qty=2, take_profit=30, stop_loss=-10,
         cost_guard=True, trail=False,
     )
     base.update(kw)
@@ -39,7 +39,7 @@ class TestRoundTrip:
         assert back.id == c.id
         assert back.side is Direction.SELL          # enum 不能退化成字串
         assert back.trigger_price == 17059.0
-        assert back.chase == 10 and back.qty == 2
+        assert back.pullback == 10 and back.qty == 2
         assert back.take_profit == 30 and back.stop_loss == -10
         assert back.cost_guard is True and back.trail is False
         assert back.status is ConditionStatus.WAITING
@@ -104,8 +104,8 @@ class TestMigration:
             )""")
         now = datetime.now().isoformat()
         db._conn.execute(
-            "INSERT INTO conditions (id,symbol,side,trigger_price,created_at,updated_at)"
-            " VALUES ('legacy','TX','sell',17059,?,?)", (now, now),
+            "INSERT INTO conditions (id,symbol,side,trigger_price,chase,created_at,updated_at)"
+            " VALUES ('legacy','TX','sell',17059,10,?,?)", (now, now),
         )
         db._conn.commit()
         db.close()
@@ -118,5 +118,7 @@ class TestMigration:
 
         assert len(rows) == 1
         assert rows[0].id == "legacy"
+        # chase → pullback 只是改名，使用者填的點數要原封不動留著
+        assert rows[0].pullback == 10
         assert rows[0].exit_price == 0.0      # 新欄位吃預設值
         assert rows[0].exit_reason == ""

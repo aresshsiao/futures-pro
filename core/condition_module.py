@@ -1,12 +1,14 @@
 """
 core/condition_module.py — 條件單引擎（右邊下單）
 
-在壓力價掛空、支撐價掛多，價格碰到就自動追價進場。設計見 ARCHITECTURE.md §7。
+在壓力價掛空、支撐價掛多。碰到觸發價只是「開始盯」，要等價格從極值回檔
+「返點」才真的進場；開了「觸後跟隨」則會一路追極值，進場價跟著極值走。
+設計見 ARCHITECTURE.md §7。
 
 目前實作範圍：
-  P1 — 條件 CRUD + 持久化 + 觸發 + 追價進場（waiting → triggered → sent → filled）
+  P1 — 條件 CRUD + 持久化 + 觸發 + 回檔進場（waiting → triggered → sent → filled）
   P2 — 停利／停損 OCO 出場（filled → exited）
-  P3 — 成本防線 + 觸後跟隨（filled → guarded）
+  P3 — 成本防線（filled → guarded）；觸後跟隨屬於進場端，見 _check_entry
 
 收盤清倉、當沖旗標與重啟對帳（P4）尚未實作。
 """
@@ -14,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from config import settings
@@ -32,7 +34,6 @@ EXIT_REASON_TEXT = {
     "take_profit": "停利",
     "stop_loss": "停損",
     "cost_guard": "成本防線",
-    "trail": "移動停損",
     "session_close": "收盤清倉",
 }
 
@@ -43,8 +44,8 @@ class ConditionModule:
 
     職責:
       1. 條件的 CRUD 與持久化（DB 是條件的單一真相，不是瀏覽器）
-      2. 每筆 tick 檢查是否觸及觸發價
-      3. 觸發後以穿價限價單進場，追蹤成交結果
+      2. 每筆 tick 檢查觸發（碰到觸發價）與回檔（極值 ∓ 返點）
+      3. 回檔到價後以限價單進場，追蹤成交結果
 
     與 TradeModule 的關係：共用它的 place_order 送單，但各自獨立訂閱 tick。
     現有的觸價單（STOP_BUY/STOP_SELL）是另一套機制，兩者互不干涉。
@@ -70,10 +71,12 @@ class ConditionModule:
         self._day_trade = False       # 當沖：進場一律新倉、出場一律平倉，並自動打開收盤清倉
         self._close_on_end = False    # 收盤清倉
         self._last_price: dict[str, float] = {}   # 收盤清倉要靠它算平倉價
-        self._session_closed_at: str = ""         # 已執行過的清倉時點（同一分鐘不重複跑）
+        # 上次檢查收盤清倉的時間。用「區間有沒有跨過收盤時點」判斷，休眠睡過頭也補得回來
+        self._last_check_at: Optional[datetime] = None
 
-        # 正在送出場單的條件 id。出場沒有像進場那樣的中繼狀態（狀態圖只有六個燈），
-        # 用這個集合擋掉「同一筆部位連送好幾張平倉單」
+        # 正在送單的條件 id。狀態圖只有六個燈，中間「已決定送出、券商還沒回覆」
+        # 那一小段沒有對應狀態，用這兩個集合擋掉重複送單
+        self._entering: set[str] = set()
         self._exiting: set[str] = set()
         self._exit_attempts: dict[str, int] = {}
 
@@ -240,13 +243,13 @@ class ConditionModule:
 
     async def add(
         self, symbol: str, side: Direction, trigger_price: float, qty: int = 1,
-        chase: int = 0, take_profit: int = 0, stop_loss: int = 0,
+        pullback: int = 0, take_profit: int = 0, stop_loss: int = 0,
         cost_guard: bool = False, trail: bool = False,
     ) -> Condition:
         c = Condition(
             id=str(uuid.uuid4())[:8],
             symbol=symbol, side=side, trigger_price=float(trigger_price),
-            chase=max(0, int(chase)), qty=max(1, int(qty)),
+            pullback=max(0, int(pullback)), qty=max(1, int(qty)),
             take_profit=int(take_profit), stop_loss=int(stop_loss),
             cost_guard=bool(cost_guard), trail=bool(trail),
         )
@@ -254,7 +257,7 @@ class ConditionModule:
         logger.info(
             "[ConditionModule] 新增條件 %s: %s %s 觸發 %s 追%s口%s",
             c.id, c.symbol, "壓力空" if c.side == Direction.SELL else "支撐多",
-            c.trigger_price, c.chase, c.qty,
+            c.trigger_price, c.pullback, c.qty,
         )
         await self._persist(c)
         return c
@@ -269,13 +272,13 @@ class ConditionModule:
             logger.warning("[ConditionModule] 條件 %s 已是 %s，不接受修改", c.id, c.status.value)
             return None
 
-        for key in ("symbol", "trigger_price", "chase", "qty",
+        for key in ("symbol", "trigger_price", "pullback", "qty",
                     "take_profit", "stop_loss", "cost_guard", "trail"):
             if key in fields and fields[key] is not None:
                 setattr(c, key, fields[key])
         if fields.get("side") is not None:
             c.side = Direction(fields["side"])
-        c.chase = max(0, int(c.chase))
+        c.pullback = max(0, int(c.pullback))
         c.qty = max(1, int(c.qty))
         c.trigger_price = float(c.trigger_price)
         c.updated_at = datetime.now()
@@ -321,8 +324,8 @@ class ConditionModule:
         for c in list(self._conditions.values()):
             if c.symbol != tick.symbol:
                 continue
-            if c.is_waiting:
-                # 暫停交易只擋新進場，所以開關只檢查在這一支
+            if c.is_waiting or c.status == ConditionStatus.TRIGGERED:
+                # 暫停交易只擋新進場（含已觸發、還在等回檔的），開關只檢查在這一支
                 if self._trading_enabled:
                     self._check_entry(c, tick.price)
             elif c.is_holding:
@@ -331,17 +334,44 @@ class ConditionModule:
                 self._check_exit(c, tick.price)
 
     def _check_entry(self, c: Condition, price: float) -> None:
-        if not c.is_hit(price):
-            return
-        # 立刻離開 waiting。送單是 async 的，狀態沒有當場改掉的話，
-        # 送單完成前的每一筆 tick 都會再觸發一次，同一個條件送出好幾張單
+        """兩段式進場：先碰到觸發價進入盯盤，再等回檔「返點」才送單。"""
+        if c.is_waiting:
+            if not c.is_hit(price):
+                return
+            c.status = ConditionStatus.TRIGGERED
+            c.update_extreme(price)
+            c.updated_at = datetime.now()
+            logger.info(
+                "[ConditionModule] 條件 %s 觸發: %s %s 觸發價 %s (市價 %s)，"
+                "等回檔 %s 點到 %s%s",
+                c.id, c.symbol, "壓力空" if c.side == Direction.SELL else "支撐多",
+                c.trigger_price, price, c.pullback, c.entry_target_price,
+                "（跟隨中）" if c.trail else "",
+            )
+            # 這個狀態可能維持很久（等回檔），一定要落 DB，重啟才不會退回 waiting
+            self._sync_update(c)
+            # 觸發的同一筆 tick 就可能已經滿足回檔條件（返點 0，或跳空直接穿過去）
+            if not c.entry_hit(price):
+                return
+        else:
+            moved = c.update_extreme(price)
+            if moved:
+                # 極值被推進 → 進場價跟著走，畫面要看得到（不寫 DB，盤中推算值）
+                c.updated_at = datetime.now()
+                self._sync_update(c, write_db=False)
+            if not c.entry_hit(price):
+                return
+
+        # 送單是 async 的，狀態要等券商回覆才會變成 sent；在那之前得自己記住
+        # 「這筆正在送」，否則送單完成前的每一筆 tick 都會再送一次
         # （現有觸價單踩過這個坑，見 trade_module._check_stop_orders）
-        c.status = ConditionStatus.TRIGGERED
+        if c.id in self._entering:
+            return
+        self._entering.add(c.id)
         c.updated_at = datetime.now()
         logger.info(
-            "[ConditionModule] 條件 %s 觸發: %s %s 觸發價 %s (市價 %s) → 掛 %s",
-            c.id, c.symbol, "壓力空" if c.side == Direction.SELL else "支撐多",
-            c.trigger_price, price, c.limit_price,
+            "[ConditionModule] 條件 %s 回檔進場: 極值 %s → 市價 %s，掛 %s",
+            c.id, c.trigger_extreme, price, c.entry_target_price,
         )
         self.bus.emit_sync("condition_triggered", c)
 
@@ -408,18 +438,25 @@ class ConditionModule:
     # ── 進場 ─────────────────────────────────────────
 
     async def _enter_position(self, c: Condition) -> None:
-        """觸發後送出穿價限價單。"""
+        """回檔到進場價後送出限價單。
+
+        掛在 entry_target_price（極值 ∓ 返點）—— 價格剛回檔到這裡，這張單就在盤上。
+        不再往前穿價：返點本身就是「等它回頭」的意思，穿過去等於放棄了回檔確認。
+        """
         if self._conditions.get(c.id) is not c:
+            self._entering.discard(c.id)
             return   # 不是本模塊的條件（EventBus 是全域的，別人的條件不該由這裡送單）
         if c.status != ConditionStatus.TRIGGERED:
-            return   # 已被刪除或重複觸發
+            self._entering.discard(c.id)
+            return   # 已被刪除或已經送過
 
+        price = c.entry_target_price
         order: Optional[Order] = await self._trade.place_order(
             symbol=c.symbol,
             direction=c.side,
             order_type=OrderType.LIMIT,
             qty=c.qty,
-            price=c.limit_price,
+            price=price,
             source=f"condition:{c.id}",
             octype="new",          # 條件單的進場一律是新倉
         )
@@ -434,9 +471,10 @@ class ConditionModule:
             c.entry_order_id = order.id
             logger.info(
                 "[ConditionModule] 條件 %s 已送出進場單 %s @%s x%s",
-                c.id, order.id, c.limit_price, c.qty,
+                c.id, order.id, price, c.qty,
             )
 
+        self._entering.discard(c.id)
         c.updated_at = datetime.now()
         await self._persist(c)
 
@@ -447,8 +485,12 @@ class ConditionModule:
     # 保證金不足之類的拒絕不會自己好，每個 tick 重打一次就是連續轟炸券商 API。
     MAX_EXIT_ATTEMPTS = 3
 
+    # 保護性出場（停損／成本防線／收盤清倉）一律市價：這幾種都是「一定要出去」，
+    # 掛限價沒成交就等於保護失效。停利則是「有到價才要」，掛限價等它成交沒關係。
+    _MARKET_EXIT_REASONS = ("stop_loss", "cost_guard", "session_close")
+
     async def _exit_position(self, c: Condition, reason: str, trigger: float) -> None:
-        """送出平倉單（穿價限價，octype=cover）。"""
+        """送出平倉單（octype=cover）。"""
         if self._conditions.get(c.id) is not c or not c.is_holding:
             self._exiting.discard(c.id)
             return
@@ -456,13 +498,10 @@ class ConditionModule:
         # 平倉口數以實際進場成交口數為準，不是原本設定的 qty：
         # 部分成交時用 qty 會多平出一筆反向部位
         qty = c.entry_filled_qty or c.qty
-        # 收盤清倉時若連最後成交價都沒有（剛啟動就到點、該商品沒訂閱），
-        # 就只能送市價單 —— 收盤前平不掉部位比滑價嚴重得多
-        if trigger:
-            order_type, price = OrderType.LIMIT, c.exit_limit_price(trigger)
-        else:
+        if reason in self._MARKET_EXIT_REASONS or not trigger:
             order_type, price = OrderType.MARKET, 0.0
-            logger.warning("[ConditionModule] 條件 %s 無可用報價，改以市價平倉", c.id)
+        else:
+            order_type, price = OrderType.LIMIT, trigger
         order: Optional[Order] = await self._trade.place_order(
             symbol=c.symbol,
             direction=c.exit_direction,
@@ -519,22 +558,47 @@ class ConditionModule:
             await asyncio.sleep(self._check_interval)
 
     async def _check_session_close(self) -> None:
+        """判斷「有沒有跨過收盤時點」，而不是「現在是不是剛好那一分鐘」。
+
+        比對當下分鐘的版本會被系統休眠整個跳過：筆電從 13:30 睡到 15:00，
+        13:44 這一分鐘從來沒被看到，部位就這樣留倉過夜。改用「上次檢查時間 → 現在」
+        這段區間有沒有涵蓋收盤時點來判斷，睡醒後補跑得到。
+
+        用區間也順便解決了另一頭：程式在晚上才啟動時，_last_check_at 是 None，
+        不會有任何區間涵蓋今天下午的 13:44，所以不會莫名其妙補跑一次白天的清倉。
+        """
         if not self._close_on_end:
             return
         now = datetime.now()
-        hhmm = now.strftime("%H:%M")
-        if hhmm not in self._close_times:
+        previous, self._last_check_at = self._last_check_at, now
+        if previous is None:
+            return   # 第一次檢查沒有區間可比，只記錄起點
+
+        crossed = None
+        for hhmm in self._close_times:
+            try:
+                hh, mm = (int(x) for x in hhmm.split(":"))
+            except ValueError:
+                logger.warning("[ConditionModule] 收盤清倉時間格式錯誤，略過: %r", hhmm)
+                continue
+            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            # 跨午夜時（夜盤 04:59），目標時間可能落在「昨天」那一側
+            for candidate in (target, target - timedelta(days=1)):
+                if previous < candidate <= now:
+                    crossed = hhmm
+                    break
+            if crossed:
+                break
+        if crossed is None:
             return
-        # 同一分鐘內輪詢會跑好幾次，只認第一次
-        marker = f"{now:%Y-%m-%d} {hhmm}"
-        if self._session_closed_at == marker:
-            return
-        self._session_closed_at = marker
 
         holding = [c for c in self._conditions.values() if c.is_holding]
+        late = (now - now.replace(hour=int(crossed[:2]), minute=int(crossed[3:]),
+                                  second=0, microsecond=0)).total_seconds()
         logger.info(
-            "[ConditionModule] %s 收盤清倉：平掉 %d 筆部位，並把交易切回暫停",
-            hhmm, len(holding),
+            "[ConditionModule] %s 收盤清倉%s：平掉 %d 筆部位，並把交易切回暫停",
+            crossed, f"（延遲 {late / 60:.0f} 分鐘，系統休眠？）" if late > 120 else "",
+            len(holding),
         )
         for c in holding:
             if c.id in self._exiting:
@@ -575,8 +639,8 @@ class ConditionModule:
                 c.take_profit_price or "—", c.stop_loss_price or "—",
             )
         elif order.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
-            # 穿價單沒吃到就被取消/退回：停在 failed 等人工處理，不自動改價重送
-            # ——追價迴圈在跳空時會一路追到底（見 ARCHITECTURE.md §7.4）
+            # 進場單沒吃到就被取消/退回：停在 failed 等人工處理，不自動改價重送
+            # ——重掛迴圈在跳空時會一路追到底（見 ARCHITECTURE.md §7.4）
             c.status = ConditionStatus.FAILED
             c.fail_reason = order.reject_reason or f"進場單{order.status.value}"
             logger.warning("[ConditionModule] 條件 %s 進場單未成交: %s", c.id, c.fail_reason)

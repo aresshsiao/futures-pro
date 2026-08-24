@@ -186,6 +186,13 @@ function LoginPage({ onLogin }) {
 }
 
 // ─── WebSocket Hook ───────────────────────────────────────────────────
+// 心跳：每 PING_SEC 送一次 ping，超過 DEAD_SEC 沒收到任何訊息就視為死連線。
+// 筆電休眠、網路斷掉的瞬間，TCP 可能變成「半開」——瀏覽器這端的 readyState
+// 還是 OPEN、onclose 也不會觸發，但資料再也不會進來。畫面顯示「連線正常」卻整個凍住，
+// 這是最難察覺的失效方式，一定要靠自己量「多久沒收到東西」才抓得到。
+const WS_PING_SEC = 15;
+const WS_DEAD_SEC = 45;
+
 function useWebSocket(url) {
   const wsRef = useRef(null);
   const handlersRef = useRef({}); // type -> Set<fn>，同一 type 可以有多個元件各自訂閱
@@ -195,17 +202,35 @@ function useWebSocket(url) {
     if (!url) return;
     let ws;
     let stopped = false;
+    let heartbeat = null;
+    let lastSeen = Date.now();
 
     function connect() {
       if (stopped) return;
       ws = new WebSocket(url);
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        lastSeen = Date.now();
+        clearInterval(heartbeat);
+        heartbeat = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          if (Date.now() - lastSeen > WS_DEAD_SEC * 1000) {
+            // close() 會觸發 onclose，走既有的重連流程
+            console.warn("[WS] 超過 %d 秒沒有任何訊息，判定連線已死，重連", WS_DEAD_SEC);
+            ws.close();
+            return;
+          }
+          ws.send(JSON.stringify({ action: "ping", data: {} }));
+        }, WS_PING_SEC * 1000);
+      };
 
       ws.onmessage = (e) => {
+        lastSeen = Date.now();
         try {
           const msg = JSON.parse(e.data);
+          if (msg.type === "pong") return;
           const handlers = handlersRef.current[msg.type];
           if (handlers) handlers.forEach(fn => fn(msg));
         } catch (_) { }
@@ -213,6 +238,7 @@ function useWebSocket(url) {
 
       ws.onclose = () => {
         setConnected(false);
+        clearInterval(heartbeat);
         if (!stopped) setTimeout(connect, 3000);
       };
     }
@@ -220,9 +246,27 @@ function useWebSocket(url) {
     connect();
     return () => {
       stopped = true;
+      clearInterval(heartbeat);
       ws?.close();
     };
   }, [url]);
+
+  // 從休眠 / 背景分頁回來時立刻檢查一次，不必等下一次心跳
+  useEffect(() => {
+    const wake = () => {
+      const ws = wsRef.current;
+      if (document.visibilityState === "visible" && ws && ws.readyState !== WebSocket.OPEN) {
+        // readyState 不是 OPEN 但也沒觸發過重連（例如 CLOSING 卡住）→ 主動關掉
+        try { ws.close(); } catch (_) { }
+      }
+    };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", wake);
+    return () => {
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("online", wake);
+    };
+  }, []);
 
   const send = useCallback((action, data = {}) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1343,7 +1387,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
 }
 
 // ─── 右邊下單（條件單機）────────────────────────────────────────────
-// 壓力空／支撐多設觸發價，價格碰到就用「觸發價 ∓ 追點」的追價單進場，
+// 壓力空／支撐多設觸發價，碰到只是開始盯；價格從極值回檔「返點」才進場，
 // 進場後由後端引擎用利點／損點出場（ARCHITECTURE.md §7）。
 // 條件的單一真相在後端 —— 這裡不存 localStorage，一律以推播來的清單為準，
 // 否則多分頁會各說各話，關掉分頁也不該讓條件消失。
@@ -1364,12 +1408,12 @@ const COND_LEGEND = ["waiting", "triggered", "sent", "filled", "guarded", "exite
 
 // 生效中的停損是哪一種（成本防線 / 觸後跟隨會把停損價推離原始設定）
 const STOP_KIND_LABEL = {
-  stop_loss: "固定停損", cost_guard: "成本防線（守在進場價）", trail: "移動停損（跟隨最有利價）",
+  stop_loss: "固定停損", cost_guard: "成本防線（守在進場價）",
 };
-const STOP_KIND_MARK = { cost_guard: "🔒", trail: "↗" };
+const STOP_KIND_MARK = { cost_guard: "🔒" };
 
 const BLANK_COND_FORM = {
-  resistance: "", support: "", chase: "10", qty: "1",
+  resistance: "", support: "", pullback: "10", qty: "1",
   tp: "30", sl: "-10", costGuard: false, trail: false,
 };
 
@@ -1447,7 +1491,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
 
     const common = {
       symbol: activeSymbol,
-      chase: Math.abs(num(form.chase)),
+      pullback: Math.abs(num(form.pullback)),
       qty: Math.max(1, num(form.qty)),
       take_profit: num(form.tp),
       stop_loss: num(form.sl),
@@ -1469,7 +1513,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
     setForm({
       resistance: c.side === "sell" ? String(c.trigger_price) : "",
       support: c.side === "buy" ? String(c.trigger_price) : "",
-      chase: String(c.chase), qty: String(c.qty),
+      pullback: String(c.pullback), qty: String(c.qty),
       tp: String(c.take_profit), sl: String(c.stop_loss),
       costGuard: c.cost_guard, trail: c.trail,
     });
@@ -1599,12 +1643,12 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
             {numField("支撐多", "support", COLORS.up)}
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 3 }}>
-            {numField("追點", "chase")}
+            {numField("返點", "pullback")}
             {numField("口數", "qty")}
             {numField("利點", "tp")}
             {numField("損點", "sl")}
             {switchField("成本", "costGuard", "成本防線：浮盈達損點時把停損移到進場價")}
-            {switchField("跟隨", "trail", "觸後跟隨：停損跟著最有利價移動，只進不退")}
+            {switchField("跟隨", "trail", "觸後跟隨：觸發後繼續追極值，進場價跟著「最高/最低 ∓ 返點」走")}
           </div>
           <div style={{ display: "flex", gap: 4 }}>
             <button onClick={submitCondition} style={{
@@ -1673,14 +1717,25 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
               <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontFamily: "monospace" }}>
                 <span style={{ color: COLORS.textMuted, fontSize: 9 }}>{i + 1}</span>
                 <span style={{ color: sideColor, fontWeight: 700 }}>{c.side === "buy" ? "買" : "賣"}</span>
-                <span style={{ color: COLORS.warn, fontWeight: 700 }}>{c.trigger_price}</span>
+                <span style={{ color: COLORS.warn, fontWeight: 700 }} title="觸發價">{c.trigger_price}</span>
                 <span style={{ color: COLORS.textMuted }}>→</span>
-                <span style={{ color: COLORS.text }}>{c.limit_price}</span>
+                <span style={{ color: COLORS.text }} title={`掛單價 = 極值 ${c.side === "sell" ? "−" : "+"} 返點`}>
+                  {fmt(c.limit_price)}
+                </span>
                 <span style={{ color: COLORS.textDim, fontSize: 10 }}>×{c.qty}</span>
                 <span style={{ marginLeft: "auto", fontSize: 9, color: st.color, whiteSpace: "nowrap" }}>
                   {st.icon} {st.label}
                 </span>
               </div>
+
+              {/* 已觸發＝正在等回檔，把追到的極值秀出來才知道掛單價為什麼是這個數字 */}
+              {c.status === "triggered" && (
+                <div style={{ marginTop: 2, fontSize: 9, fontFamily: "monospace", color: COLORS.textDim }}>
+                  {c.side === "sell" ? "最高" : "最低"} {fmt(c.trigger_extreme)}
+                  <span style={{ marginLeft: 6 }}>等回檔 {c.pullback} 點</span>
+                  {c.trail && <span style={{ marginLeft: 6, color: COLORS.warn }}>↗ 跟隨中</span>}
+                </div>
+              )}
 
               {entered && (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 9, fontFamily: "monospace" }}>
@@ -1700,7 +1755,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
               )}
 
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 9, color: COLORS.textDim }}>
-                <span>追{c.chase}</span>
+                <span>返{c.pullback}</span>
                 <span style={{ color: COLORS.up }}>利{c.take_profit}</span>
                 <span style={{ color: COLORS.down }}>損{c.stop_loss}</span>
                 <span style={{ color: c.cost_guard ? COLORS.warn : COLORS.textMuted }}>防線{c.cost_guard ? "On" : "Off"}</span>
@@ -3053,6 +3108,20 @@ export default function TradingPlatform() {
   const [candleColorScheme, setCandleColorScheme] = useState("green-up");
 
   function logout() { clearToken(); setAuthed(false); }
+
+  // token 過期時，WebSocket 會在握手階段就被擋掉（401），瀏覽器只給一個
+  // 沒有原因的 onclose —— 前端無從分辨是「網路斷了」還是「憑證過期」，
+  // 於是每 3 秒重連一次、永遠連不上，畫面卡在「後端未連線」也不會叫人重新登入。
+  // 連不上超過一段時間就主動驗一次 token，是過期就登出讓使用者重新輸入密碼。
+  useEffect(() => {
+    if (connected || !authed) return;
+    const timer = setTimeout(() => {
+      fetch("/api/config", { headers: authHeaders() })
+        .then(r => { if (r.status === 401) logout(); })
+        .catch(() => { });   // 純粹連不到後端（server 沒開）就不動它，繼續重連
+    }, 10000);
+    return () => clearTimeout(timer);
+  }, [connected, authed]);
 
   useEffect(() => {
     fetch("/api/scripts", { headers: authHeaders() })

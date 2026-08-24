@@ -44,7 +44,7 @@ class ConditionStatus(str, Enum):
     """條件單狀態（右邊下單）。主線六態對應前端的六個燈號，見 ARCHITECTURE.md §7.3"""
     WAITING = "waiting"        # 等待觸發
     TRIGGERED = "triggered"    # 已觸發（進場單即將送出）
-    SENT = "sent"              # 已送單（追價單在券商端）
+    SENT = "sent"              # 已送單（回檔進場單在券商端）
     FILLED = "filled"          # 已成交（進場完成）
     GUARDED = "guarded"        # 已守成本（P3）
     EXITED = "exited"          # 已出場（P2）
@@ -218,48 +218,71 @@ class Condition:
     symbol: str
     side: Direction              # SELL = 壓力空（漲到壓力放空）、BUY = 支撐多（跌到支撐作多）
     trigger_price: float
-    chase: int = 0               # 追點 — 進場單穿價的點數（= 可接受的滑價上限）
+    pullback: int = 0            # 返點 — 從極值回檔幾點才進場（0 = 碰到觸發價就進）
     qty: int = 1
-    take_profit: int = 0         # 利點，0 = 不設（P2）
-    stop_loss: int = 0           # 損點，前端以負數輸入，0 = 不設（P2）
-    cost_guard: bool = False     # 成本防線（P3）
-    trail: bool = False          # 觸後跟隨（P3）
+    take_profit: int = 0         # 利點，0 = 不設
+    stop_loss: int = 0           # 損點，前端以負數輸入，0 = 不設
+    cost_guard: bool = False     # 成本防線
+    trail: bool = False          # 觸後跟隨 — 觸發後繼續追極值，進場價跟著極值走
+    trigger_extreme: float = 0.0  # 觸發後追到的極值（壓力空取最高、支撐多取最低）
     status: ConditionStatus = ConditionStatus.WAITING
     entry_order_id: str = ""     # 進場委託的內部 id
     entry_price: float = 0.0     # 進場成交均價（出場計算一律以此為基準，不是觸發價）
     entry_filled_qty: int = 0
     exit_order_id: str = ""      # 出場委託的內部 id
     exit_price: float = 0.0      # 出場成交均價
-    exit_reason: str = ""        # "take_profit" | "stop_loss"（P3 再加 cost_guard / trail）
-    peak_price: float = 0.0      # 觸後跟隨用：進場後最有利價（P3）
+    exit_reason: str = ""        # "take_profit" | "stop_loss" | "cost_guard" | "session_close"
+    peak_price: float = 0.0      # 成本防線用：進場後最有利價
     fail_reason: str = ""        # 券商拒絕原因，給前端顯示
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
-    @property
-    def limit_price(self) -> float:
-        """進場的穿價限價。
-
-        賣單掛得比觸發價低、買單掛得比觸發價高，這樣一觸發就會立刻成交，
-        但最差成交價被鎖在 chase 點以內 —— 這是追點的意義，不是掛單偏移量。
-        用市價單的話滑價無上限（見 ARCHITECTURE.md §7.4）。
-        """
-        return (
-            self.trigger_price - self.chase if self.side == Direction.SELL
-            else self.trigger_price + self.chase
-        )
+    # ── 進場：觸發 → 回檔確認 ───────────────────────
+    # 兩段式。碰到觸發價只是「開始盯」，要等價格從極值回檔「返點」才真的進場——
+    # 壓力空在壓力區碰一下就放空常常是接刀，等它回頭才確認賣壓真的存在。
 
     def is_hit(self, price: float) -> bool:
-        """市價是否觸及觸發價。
+        """市價是否觸及觸發價（進入盯盤狀態）。
 
         方向跟 STOP_BUY / STOP_SELL 相反：右邊下單是在壓力/支撐逆勢接單，
         壓力空要「漲上去」才觸發，支撐多要「跌下來」才觸發。
         """
         return price >= self.trigger_price if self.side == Direction.SELL else price <= self.trigger_price
 
+    def update_extreme(self, price: float) -> bool:
+        """觸發後追蹤極值（壓力空取最高、支撐多取最低）。回傳極值是否被推進。
+
+        沒開「觸後跟隨」時極值固定在觸發當下，進場價因此是固定的
+        `觸發價 ∓ 返點`；開了才會跟著行情繼續走。
+        """
+        base = self.trigger_extreme or self.trigger_price
+        further = price > base if self.side == Direction.SELL else price < base
+        if not self.trigger_extreme:
+            self.trigger_extreme = max(price, self.trigger_price) if self.side == Direction.SELL \
+                else min(price, self.trigger_price)
+            return True
+        if self.trail and further:
+            self.trigger_extreme = price
+            return True
+        return False
+
+    @property
+    def entry_target_price(self) -> float:
+        """回檔進場價（畫面上的「掛單價」）= 極值 ∓ 返點。
+
+        壓力空：最高價 − 返點（跌回來才空）；支撐多：最低價 + 返點（彈回來才多）。
+        """
+        base = self.trigger_extreme or self.trigger_price
+        return base - self.pullback if self.side == Direction.SELL else base + self.pullback
+
+    def entry_hit(self, price: float) -> bool:
+        """價格是否已從極值回檔到進場價。"""
+        target = self.entry_target_price
+        return price <= target if self.side == Direction.SELL else price >= target
+
     # ── 出場（P2）──────────────────────────────────
     # 一律以 entry_price（實際成交均價）為基準，不是觸發價：
-    # 追價會有滑價，用觸發價算的停損跟真實部位的成本對不起來。
+    # 成交價未必等於掛單價，用觸發價算的停損跟真實部位的成本對不起來。
 
     @property
     def take_profit_price(self) -> float:
@@ -278,17 +301,6 @@ class Condition:
         return self.entry_price - sl if self.side == Direction.BUY else self.entry_price + sl
 
     @property
-    def trail_stop_price(self) -> float:
-        """觸後跟隨的停損價：跟著最有利價 peak_price 保持一個損點的距離。
-
-        跟隨距離沿用損點 —— 沒設損點就沒有距離可言，跟隨也就無從算起。
-        """
-        if not self.trail or not self.stop_loss or not self.peak_price:
-            return 0.0
-        sl = abs(self.stop_loss)
-        return self.peak_price - sl if self.side == Direction.BUY else self.peak_price + sl
-
-    @property
     def cost_guard_threshold(self) -> float:
         """成本防線的啟動門檻（浮盈點數）。用損點而不是利點：
         賺到「夠賠的量」就先立於不敗，不必等到接近停利才保本。"""
@@ -305,10 +317,9 @@ class Condition:
 
     @property
     def active_stop_price(self) -> float:
-        """實際生效的停損價 —— 固定停損／保本／移動停損取「最保護」的那一個。
+        """實際生效的停損價 —— 固定停損與保本取「最保護」的那一個。
 
         多單的停損在下方，愈高愈保護（取 max）；空單反之（取 min）。
-        三者能直接這樣合併是因為它們只會往有利方向動，不會互相拉扯。
         """
         candidates = []
         if self.stop_loss_price:
@@ -316,8 +327,6 @@ class Condition:
         # 成本防線一旦啟動（狀態進 guarded）就固定守在進場價
         if self.status == ConditionStatus.GUARDED and self.entry_price:
             candidates.append(self.entry_price)
-        if self.trail_stop_price:
-            candidates.append(self.trail_stop_price)
         if not candidates:
             return 0.0
         return max(candidates) if self.side == Direction.BUY else min(candidates)
@@ -327,21 +336,12 @@ class Condition:
         """出場方向 —— 進場的反向。"""
         return Direction.SELL if self.side == Direction.BUY else Direction.BUY
 
-    def exit_limit_price(self, trigger: float) -> float:
-        """出場也用穿價限價單：賣出場掛低、買出場掛高，理由同 limit_price。"""
-        return (
-            trigger - self.chase if self.exit_direction == Direction.SELL
-            else trigger + self.chase
-        )
-
     @property
     def stop_kind(self) -> str:
         """目前生效的停損是哪一種 —— 出場後要看得出來是被什麼掃到的。"""
         stop = self.active_stop_price
         if not stop:
             return ""
-        if self.trail_stop_price and stop == self.trail_stop_price:
-            return "trail"
         if self.status == ConditionStatus.GUARDED and stop == self.entry_price:
             return "cost_guard"
         return "stop_loss"
