@@ -436,6 +436,10 @@ class TradeModule:
     def active_orders(self) -> list[Order]:
         return [o for o in self._orders.values() if o.is_active]
 
+    def get_order(self, order_id: str) -> Optional[Order]:
+        """依內部委託 id 取回委託。撤單後要知道「撤掉之前吃到幾口」時用得到。"""
+        return self._orders.get(order_id)
+
     @property
     def positions(self) -> list[Position]:
         return list(self._positions.values())

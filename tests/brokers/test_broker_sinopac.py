@@ -365,6 +365,33 @@ class TestTradeAdapterOrders:
         assert kwargs["price"] == 0
         assert kwargs["price_type"] is sj_mod.FuturesPriceType.MKT
 
+    def test_market_range_order_uses_mkp(self):
+        """停損停利出場用的範圍市價：券商端是 MKP，一樣不指定價格。"""
+        adapter, api, sj_mod, _ = self._adapter_with_trade()
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(adapter.place_order("TX", Direction.SELL, OrderType.MARKET_RANGE, 2, price=18000))
+        kwargs = sj_mod.FuturesOrder.call_args.kwargs
+        assert kwargs["price"] == 0
+        assert kwargs["price_type"] is sj_mod.FuturesPriceType.MKP
+
+    def test_market_family_orders_are_forced_to_ioc(self):
+        """期交所不收 ROD 的市價／範圍市價單，預設的 ROD 要自動換成 IOC，
+        否則出場單會整張被退件 —— 停損等於失效。"""
+        adapter, api, sj_mod, _ = self._adapter_with_trade()
+        for order_type in (OrderType.MARKET, OrderType.MARKET_RANGE):
+            with patch.dict(sys.modules, {"shioaji": sj_mod}):
+                run(adapter.place_order("TX", Direction.SELL, order_type, 1))
+            kwargs = sj_mod.FuturesOrder.call_args.kwargs
+            assert kwargs["order_type"] is sj_mod.OrderType.IOC
+
+    def test_market_range_keeps_explicit_fok(self):
+        """呼叫端指定的合法 TIF 不會被蓋掉。"""
+        adapter, api, sj_mod, _ = self._adapter_with_trade()
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(adapter.place_order("TX", Direction.SELL, OrderType.MARKET_RANGE, 1,
+                                    time_in_force="FOK"))
+        assert sj_mod.FuturesOrder.call_args.kwargs["order_type"] is sj_mod.OrderType.FOK
+
     def test_limit_order_keeps_price(self):
         adapter, api, sj_mod, _ = self._adapter_with_trade()
         with patch.dict(sys.modules, {"shioaji": sj_mod}):
@@ -699,6 +726,24 @@ class TestTradeAdapterCallbacks:
         assert o.direction is Direction.BUY
         assert o.order_type is OrderType.LIMIT
         assert o.status is OrderStatus.SUBMITTED
+
+    @pytest.mark.parametrize("price_type,expected", [
+        ("LMT", OrderType.LIMIT),
+        ("MKT", OrderType.MARKET),
+        ("MKP", OrderType.MARKET_RANGE),
+    ])
+    def test_order_callback_maps_price_type(self, price_type, expected):
+        """MKP 不能再跟 MKT 併成同一種：委託簿要看得出出場單是範圍市價。"""
+        _, handler, orders, _ = self._adapter_with_callbacks()
+        handler("FORDER", {
+            "operation": {"op_code": "00", "op_msg": ""},
+            "order": {"id": "A001", "action": "Sell", "quantity": 1,
+                      "price": 0.0, "price_type": price_type},
+            "status": {"id": "A001", "status": "Submitted",
+                       "deal_quantity": 0, "cancel_quantity": 0},
+            "contract": {"code": "TXFH6"},
+        })
+        assert orders[0].order_type is expected
 
     # OrderState 實際送進 callback 的值（全大寫），不是 "FuturesDeal" 這種好看的名字。
     # 這裡照抄 shioaji 的原值，測試才擋得住「成交被當成委託」這種災難。

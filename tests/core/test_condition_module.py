@@ -110,8 +110,12 @@ class TestTrigger:
         assert mid == []
         assert len(adapter.placed) == 1
         sent = adapter.placed[0]
-        assert sent["order_type"] is OrderType.LIMIT
-        assert sent["price"] == 17994            # 極值 18004 − 返點 10
+        # 回檔到價的判斷已經在 tick 上做完，送出去的當下價格就在進場價，
+        # 再掛一張限價單只是多一次落空的機會 → 一定範圍市價 + IOC 當場吃掉
+        assert sent["order_type"] is OrderType.MARKET_RANGE
+        assert sent["price"] == 0.0
+        assert sent["tif"] == "IOC"
+        assert c.entry_target_price == 17994      # 極值 18004 − 返點 10
         assert sent["direction"] is Direction.SELL
         assert sent["qty"] == 2
         assert sent["octype"] == "new"
@@ -128,7 +132,7 @@ class TestTrigger:
 
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == 1
-        assert adapter.placed[0]["price"] == 18000
+        assert c.entry_target_price == 18000
         assert c.status is ConditionStatus.SENT
 
     def test_support_long_enters_on_bounce(self):
@@ -145,7 +149,7 @@ class TestTrigger:
         c, adapter, before = asyncio.run(scenario())
         assert before == []
         assert adapter.placed[0]["direction"] is Direction.BUY
-        assert adapter.placed[0]["price"] == 18005    # 最低 17995 + 返點 10
+        assert c.entry_target_price == 18005          # 最低 17995 + 返點 10
 
     def test_without_trail_extreme_is_frozen_at_trigger(self):
         """沒開跟隨：極值停在觸發當下，掛單價固定 = 觸發價 ∓ 返點。"""
@@ -180,7 +184,6 @@ class TestTrigger:
         c, adapter, (extreme, target) = asyncio.run(scenario())
         assert extreme == 18050 and target == 18040
         assert len(adapter.placed) == 1
-        assert adapter.placed[0]["price"] == 18040
 
     def test_trail_extreme_never_moves_backwards(self):
         async def scenario():
@@ -315,6 +318,43 @@ class TestEntryFill:
         assert c.status is ConditionStatus.SENT
         assert c.entry_filled_qty == 1
 
+    def test_ioc_partial_entry_counts_as_entered(self):
+        """進場走 IOC，撮不完的部分會被取消 —— 回報是 CANCELLED 而不是 FILLED。
+        當成失敗擱在 failed 的話，真的吃到的那幾口就完全沒有停利停損保護。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, qty=3, pullback=0, stop_loss=-10)
+            cm._check_conditions(tick("TX", 18000))
+            await settle()
+            order = t._orders[c.entry_order_id]
+            order.filled_qty, order.avg_fill_price = 1, 18000.0   # 3 口只吃到 1 口
+            order.status = OrderStatus.CANCELLED
+            await EventBus().emit("order_update", order)
+            entered_state = (c.status, c.entry_filled_qty)
+            a.placed.clear()
+            cm._check_conditions(tick("TX", 18010))               # 停損
+            await settle()
+            return entered_state, a
+
+        (status, filled), adapter = asyncio.run(scenario())
+        assert status is ConditionStatus.FILLED
+        assert filled == 1
+        assert adapter.placed[0]["qty"] == 1        # 只平真正吃到的那 1 口
+
+    def test_entry_with_no_fill_still_fails(self):
+        """一口都沒吃到就被取消：那才是真的沒進場，停在 failed 等人工處理。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await cm.add("TX", Direction.SELL, 18000, pullback=0)
+            cm._check_conditions(tick("TX", 18000))
+            await settle()
+            order = t._orders[c.entry_order_id]
+            order.status = OrderStatus.CANCELLED
+            await EventBus().emit("order_update", order)
+            return c
+
+        assert asyncio.run(scenario()).status is ConditionStatus.FAILED
+
 
 # ─── 出場（P2）──────────────────────────────────────────────
 
@@ -347,9 +387,10 @@ class TestExit:
         assert len(adapter.placed) == 1
         sent = adapter.placed[0]
         assert sent["direction"] is Direction.BUY     # 出場是進場的反向
-        # 停利是「有到價才要」，掛限價等它成交沒關係
+        # 停利是「有到價才要」，掛被動限價等它成交，等不到就繼續持有
         assert sent["order_type"] is OrderType.LIMIT
         assert sent["price"] == 17970
+        assert sent["tif"] == "ROD"
         assert sent["octype"] == "cover"
         assert c.exit_reason == "take_profit"
 
@@ -365,8 +406,10 @@ class TestExit:
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == 1
         assert adapter.placed[0]["direction"] is Direction.SELL
-        # 停損是「一定要出去」，掛限價沒成交等於保護失效 → 一律市價
-        assert adapter.placed[0]["order_type"] is OrderType.MARKET
+        # 停損是「一定要出去」，掛限價沒成交等於保護失效 → 一定範圍市價 + IOC
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET_RANGE
+        assert adapter.placed[0]["price"] == 0.0
+        assert adapter.placed[0]["tif"] == "IOC"
         assert c.exit_reason == "stop_loss"
 
     def test_gap_through_both_prefers_stop_loss(self):
@@ -491,6 +534,84 @@ class TestExit:
         assert len(adapter.placed) == ConditionModule.MAX_EXIT_ATTEMPTS
         assert c.status is ConditionStatus.FAILED
 
+    def test_stop_loss_preempts_resting_take_profit_order(self):
+        """停利掛的是 ROD 限價單，「送出去」不等於「出得去」——它可能一直不成交。
+        價格反向殺到停損時若照 OCO 擋下來，整筆部位就沒有停損了。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, take_profit=30, stop_loss=-10)
+            cm._check_conditions(tick("TX", 18030))   # 停利到價 → 掛限價單
+            await settle()
+            tp_id = c.exit_order_id
+            a.placed.clear()
+            cm._check_conditions(tick("TX", 17990))   # 沒成交就反向殺到停損
+            await settle()
+            return c, a, t._orders[tp_id]
+
+        c, adapter, tp_order = asyncio.run(scenario())
+        assert tp_order.status is OrderStatus.CANCELLED   # 先把停利單撤掉
+        assert len(adapter.placed) == 1
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET_RANGE
+        assert adapter.placed[0]["qty"] == 1              # 沒有多送一張，不會變成反向開倉
+        assert c.exit_reason == "stop_loss"
+
+    def test_take_profit_does_not_preempt_itself(self):
+        """反過來不成立：停利單掛著時再到價一次，不該把自己撤掉重掛。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, take_profit=30, stop_loss=-10)
+            a.placed.clear()
+            for _ in range(4):
+                cm._check_conditions(tick("TX", 18035))
+                await settle()
+            return a
+
+        assert len(asyncio.run(scenario()).placed) == 1
+
+    def test_partially_filled_exit_only_resends_the_remainder(self):
+        """範圍市價是 IOC，撮不完的部分會被取消。重送時若不扣掉已平的口數，
+        第二張單就是照原口數再送一次 —— 平完之後還會反手開出新倉。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=3, stop_loss=-10)
+            a.placed.clear()
+            cm._check_conditions(tick("TX", 17990))
+            await settle()
+            order = t._orders[c.exit_order_id]           # 3 口只撮到 1 口，其餘取消
+            order.filled_qty, order.avg_fill_price = 1, 17990.0
+            order.status = OrderStatus.CANCELLED
+            await EventBus().emit("order_update", order)
+            cm._check_conditions(tick("TX", 17985))      # 下一筆 tick 重送剩下的
+            await settle()
+            return c, a
+
+        c, adapter = asyncio.run(scenario())
+        assert [p["qty"] for p in adapter.placed] == [3, 2]
+        assert c.status is not ConditionStatus.FAILED    # 有出掉幾口就是有進展
+
+    def test_split_exit_price_is_volume_weighted(self):
+        """分批出場的均價要按口數加權，不能被最後一張單的均價蓋掉。"""
+        async def scenario():
+            cm, t, a = await build()
+            c = await entered(cm, t, Direction.BUY, 18000, qty=3, stop_loss=-10)
+            cm._check_conditions(tick("TX", 17990))
+            await settle()
+            first = t._orders[c.exit_order_id]
+            first.filled_qty, first.avg_fill_price = 1, 17990.0
+            first.status = OrderStatus.CANCELLED
+            await EventBus().emit("order_update", first)
+            cm._check_conditions(tick("TX", 17985))
+            await settle()
+            second = t._orders[c.exit_order_id]
+            second.filled_qty, second.avg_fill_price = 2, 17985.5
+            second.status = OrderStatus.FILLED
+            await EventBus().emit("order_update", second)
+            return c
+
+        c = asyncio.run(scenario())
+        assert c.status is ConditionStatus.EXITED
+        assert c.exit_price == pytest.approx((17990.0 + 17985.5 * 2) / 3)
+
 
 # ─── 成本防線與觸後跟隨（P3）────────────────────────────────
 
@@ -544,7 +665,7 @@ class TestCostGuard:
 
         c, adapter = asyncio.run(scenario())
         assert len(adapter.placed) == 1
-        assert adapter.placed[0]["order_type"] is OrderType.MARKET   # 保護性出場
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET_RANGE   # 保護性出場
         assert c.exit_reason == "cost_guard"
 
     def test_no_arming_without_stop_loss(self):
@@ -604,7 +725,7 @@ class TestSessionClose:
         assert len(adapter.placed) == 1
         sent = adapter.placed[0]
         assert sent["direction"] is Direction.SELL     # 多單平倉
-        assert sent["order_type"] is OrderType.MARKET  # 一定要平掉，不掛限價
+        assert sent["order_type"] is OrderType.MARKET_RANGE  # 一定要平掉，不掛限價
         assert sent["octype"] == "cover"
         assert c.exit_reason == "session_close"
         assert cm.trading_enabled is False             # 收盤後不再進新倉
@@ -671,7 +792,7 @@ class TestSessionClose:
         assert len(asyncio.run(scenario()).placed) == 1
 
     def test_falls_back_to_market_without_quote(self):
-        """收盤清倉本來就走市價，沒有報價也照樣要平掉。"""
+        """收盤清倉本來就走範圍市價，沒有報價也照樣要平掉。"""
         async def scenario():
             cm, t, a = await build()
             await cm.set_options(close_on_end=True)
@@ -683,7 +804,7 @@ class TestSessionClose:
             return a
 
         adapter = asyncio.run(scenario())
-        assert adapter.placed[0]["order_type"] is OrderType.MARKET
+        assert adapter.placed[0]["order_type"] is OrderType.MARKET_RANGE
 
     def test_waiting_conditions_are_kept_not_deleted(self):
         """未觸發的條件是使用者辛苦設的，收盤只把總開關關掉，不刪除。"""

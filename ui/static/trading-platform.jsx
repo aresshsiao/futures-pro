@@ -53,8 +53,12 @@ function positionPnlPct(p, lastPrice) {
 }
 
 const ORDER_TYPE_LABEL = {
-  limit: "限價", market: "市價", stop_buy: "觸價買", stop_sell: "觸價賣",
+  limit: "限價", market: "市價", market_range: "範圍市價",
+  stop_buy: "觸價買", stop_sell: "觸價賣",
 };
+
+// 不指定價格的委託種類：委託簿的「價格」欄要顯示種類名稱而不是 0
+const NO_PRICE_ORDER_TYPES = new Set(["market", "market_range"]);
 
 const ORDER_STATUS_LABEL = {
   pending: "傳送中", submitted: "委託中", partial: "部分成交",
@@ -1951,7 +1955,7 @@ function PositionOrdersPanel({ positions, orders, latestPrices, cancelOrder, clo
                         <td style={{ padding: "4px", textAlign: "left", color: COLORS.text, fontSize: 10 }}>{o.symbol}</td>
                         <td style={{ padding: "4px", textAlign: "left", color: orderColor(o), fontWeight: 600, fontSize: 10 }}>{orderLabel(o)}</td>
                         <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>
-                          {o.order_type === "market" ? "市價" : o.price}
+                          {NO_PRICE_ORDER_TYPES.has(o.order_type) ? ORDER_TYPE_LABEL[o.order_type] : o.price}
                         </td>
                         <td style={{ padding: "4px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>
                           {o.filled_qty > 0 ? `${o.filled_qty}/${o.qty}` : o.qty}

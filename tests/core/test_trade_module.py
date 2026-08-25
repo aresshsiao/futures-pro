@@ -59,7 +59,7 @@ class FakeAdapter:
                           octype="auto", time_in_force="ROD"):
         self.placed.append({
             "symbol": symbol, "direction": direction, "order_type": order_type,
-            "qty": qty, "price": price, "octype": octype,
+            "qty": qty, "price": price, "octype": octype, "tif": time_in_force,
         })
         return self._broker_id
 

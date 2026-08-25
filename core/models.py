@@ -19,10 +19,11 @@ class Direction(str, Enum):
 
 
 class OrderType(str, Enum):
-    LIMIT = "limit"          # 限價單
-    MARKET = "market"        # 市價單
-    STOP_BUY = "stop_buy"    # 觸價買 (價格到達後以市價買進)
-    STOP_SELL = "stop_sell"  # 觸價賣 (價格到達後以市價賣出)
+    LIMIT = "limit"                  # 限價單
+    MARKET = "market"                # 市價單
+    MARKET_RANGE = "market_range"    # 範圍市價單（券商端 MKP，成交價限制在保護範圍內）
+    STOP_BUY = "stop_buy"            # 觸價買 (價格到達後以市價買進)
+    STOP_SELL = "stop_sell"          # 觸價賣 (價格到達後以市價賣出)
 
 
 class OrderStatus(str, Enum):
@@ -271,6 +272,9 @@ class Condition:
         """回檔進場價（畫面上的「掛單價」）= 極值 ∓ 返點。
 
         壓力空：最高價 − 返點（跌回來才空）；支撐多：最低價 + 返點（彈回來才多）。
+
+        注意這是「價格走到這裡就送進場單」的門檻，不是委託上的限價 ——
+        進場走一定範圍市價（見 ConditionModule._enter_position）。
         """
         base = self.trigger_extreme or self.trigger_price
         return base - self.pullback if self.side == Direction.SELL else base + self.pullback

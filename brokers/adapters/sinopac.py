@@ -137,6 +137,18 @@ def _enum_str(v) -> str:
     return str(getattr(v, "value", v))
 
 
+def _order_type_of(price_type) -> OrderType:
+    """把券商回報的 price_type 還原成內部的委託種類。
+
+    MKP（範圍市價）跟 MKT 一樣不指定價格，但兩者的成交保護不同，
+    畫面上要分得出來，所以不再併成同一種。
+    """
+    return {
+        "MKT": OrderType.MARKET,
+        "MKP": OrderType.MARKET_RANGE,
+    }.get(_enum_str(price_type), OrderType.LIMIT)
+
+
 def _json_safe(v):
     """轉成 JSON 可序列化的型別（enum → 字串、date → ISO 字串）。
 
@@ -1308,8 +1320,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             broker_order_id=broker_id,
             symbol=symbol,
             direction=Direction.BUY if _enum_str(order_dict.get("action")) == "Buy" else Direction.SELL,
-            # MKP（範圍市價）跟 MKT 一樣不指定價格，都歸為市價單
-            order_type=OrderType.MARKET if price_type in ("MKT", "MKP") else OrderType.LIMIT,
+            order_type=_order_type_of(price_type),
             price=float(order_dict.get("price", 0.0) or 0.0),
             qty=qty,
             status=status,
@@ -1395,6 +1406,9 @@ class SinoPacTradeAdapter(TradeAdapter):
         # 真的收到就當市價單處理，避免被誤送成 price=0 的限價單。
         if order_type == OrderType.LIMIT:
             price_type = sj.FuturesPriceType.LMT
+        elif order_type == OrderType.MARKET_RANGE:
+            price_type = sj.FuturesPriceType.MKP
+            price = 0
         else:
             price_type = sj.FuturesPriceType.MKT
             price = 0
@@ -1406,11 +1420,18 @@ class SinoPacTradeAdapter(TradeAdapter):
             "daytrade": sj.FuturesOCType.DayTrade,
         }.get(str(octype).lower(), sj.FuturesOCType.Auto)
 
+        tif = str(time_in_force).upper()
+        # 期交所規定市價與範圍市價只能搭 IOC 或 FOK，ROD 會被直接退件。
+        # 呼叫端不必記這條規則（預設值就是 ROD），這裡幫它換成 IOC：
+        # 出場單寧可成交一部分，也不要因為 TIF 不合法而整張被退。
+        if price_type is not sj.FuturesPriceType.LMT and tif not in ("IOC", "FOK"):
+            tif = "IOC"
+
         tif_enum = {
             "ROD": sj.OrderType.ROD,
             "IOC": sj.OrderType.IOC,
             "FOK": sj.OrderType.FOK,
-        }.get(str(time_in_force).upper(), sj.OrderType.ROD)
+        }.get(tif, sj.OrderType.ROD)
 
         order_lot = sj.FuturesOrder(
             action=sj.Action.Buy if direction == Direction.BUY else sj.Action.Sell,
@@ -1602,7 +1623,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             broker_order_id=broker_id,
             symbol=self._code_to_symbol(code) or code,
             direction=Direction.BUY if _enum_str(getattr(order, "action", "")) == "Buy" else Direction.SELL,
-            order_type=OrderType.MARKET if price_type in ("MKT", "MKP") else OrderType.LIMIT,
+            order_type=_order_type_of(price_type),
             price=float(getattr(order, "price", 0.0) or 0.0),
             qty=qty,
             status=self._resolve_status(getattr(status, "status", None), qty, deal_qty, cancel_qty),

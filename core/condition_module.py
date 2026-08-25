@@ -45,7 +45,7 @@ class ConditionModule:
     職責:
       1. 條件的 CRUD 與持久化（DB 是條件的單一真相，不是瀏覽器）
       2. 每筆 tick 檢查觸發（碰到觸發價）與回檔（極值 ∓ 返點）
-      3. 回檔到價後以限價單進場，追蹤成交結果
+      3. 回檔到價後以一定範圍市價單進場，追蹤成交結果
 
     與 TradeModule 的關係：共用它的 place_order 送單，但各自獨立訂閱 tick。
     現有的觸價單（STOP_BUY/STOP_SELL）是另一套機制，兩者互不干涉。
@@ -79,6 +79,11 @@ class ConditionModule:
         self._entering: set[str] = set()
         self._exiting: set[str] = set()
         self._exit_attempts: dict[str, int] = {}
+        # 條件 id → 已平掉的口數。範圍市價是 IOC，撮不完的部分會被取消，
+        # 重送時要扣掉已經出去的口數，否則第二張單會照原口數送出去變成反手開倉
+        self._exit_filled: dict[str, int] = {}
+        # 正在把掛著的停利限價單換成保護性出場的條件 id（見 _may_send_exit）
+        self._preempting: set[str] = set()
 
         self.bus.on("tick", self._check_conditions)
         self.bus.on("condition_triggered", self._enter_position)
@@ -302,7 +307,9 @@ class ConditionModule:
         c.status = ConditionStatus.CANCELLED
         c.updated_at = datetime.now()
         self._exiting.discard(c.id)
+        self._preempting.discard(c.id)
         self._exit_attempts.pop(c.id, None)
+        self._exit_filled.pop(c.id, None)
         if self._db is not None:
             self._db.delete_condition(c.id)
         await self.bus.emit("condition_update", c, True)
@@ -375,22 +382,44 @@ class ConditionModule:
         )
         self.bus.emit_sync("condition_triggered", c)
 
+    def _may_send_exit(self, c: Condition, reason: str) -> bool:
+        """已經有一張出場單在處理時，這筆出場還能不能送。
+
+        一般情況是不能 —— OCO 只送一張，另一邊自然失效。但停利掛的是 ROD 限價單，
+        「送出去」不等於「出得去」：它可能一直掛著不成交，而價格反向走到停損。
+        這時若照樣擋下來，整筆部位就沒有停損了，完全違背停損的意義。
+        所以保護性出場可以搶：先撤掉那張停利單，再送範圍市價（見 _exit_position）。
+        """
+        if c.id not in self._exiting:
+            return True
+        return (
+            reason in self._PROTECTIVE_EXIT_REASONS
+            and c.exit_reason == "take_profit"
+            and bool(c.exit_order_id)        # 已經掛上去了才需要搶；還在路上的等它回報
+            and c.id not in self._preempting  # 送單是 async 的，別讓每筆 tick 都搶一次
+        )
+
     def _check_exit(self, c: Condition, price: float) -> None:
-        """停利／停損（OCO）。只送一張出場單，另一邊自然失效。
+        """停利／停損（OCO）。只送一張出場單，另一邊失效 —— 例外見 _may_send_exit。
 
         送單前先更新移動停損與成本防線 —— 停損價要用這一筆 tick 之後的值判斷，
         否則新高的那一筆會用舊停損價比對，跟隨永遠慢一拍。
+        這兩件事在出場單掛著的時候也要繼續做：停利單可能一直不成交，
+        期間浮盈到門檻就該啟動保本，之後回到成本價才有東西可以搶下那張停利單。
         """
-        if c.id in self._exiting:
-            return   # 出場單正在送，別再送第二張
-
         stop_before = c.active_stop_price
         self._update_peak(c, price)
         armed = self._arm_cost_guard(c)
 
         hit = c.exit_hit(price)
-        if hit is not None:
+        if hit is not None and self._may_send_exit(c, hit[0]):
             reason, trigger = hit
+            if c.id in self._exiting:
+                self._preempting.add(c.id)
+                logger.warning(
+                    "[ConditionModule] 條件 %s %s：撤掉還沒成交的停利單 %s 改走保護性出場",
+                    c.id, EXIT_REASON_TEXT.get(reason, reason), c.exit_order_id,
+                )
             self._exiting.add(c.id)
             logger.info(
                 "[ConditionModule] 條件 %s %s: 進場 %s → 觸及 %s (市價 %s)",
@@ -438,10 +467,12 @@ class ConditionModule:
     # ── 進場 ─────────────────────────────────────────
 
     async def _enter_position(self, c: Condition) -> None:
-        """回檔到進場價後送出限價單。
+        """回檔到進場價後送出一定範圍市價單（MWP + IOC）。
 
-        掛在 entry_target_price（極值 ∓ 返點）—— 價格剛回檔到這裡，這張單就在盤上。
-        不再往前穿價：返點本身就是「等它回頭」的意思，穿過去等於放棄了回檔確認。
+        「回檔到 entry_target_price（極值 ∓ 返點）」這件事本模塊已經在 tick 上判斷完了，
+        單子送出去的當下價格就在進場價 —— 再掛一張限價單等它成交只是多一次落空的機會。
+        用範圍市價當場吃掉，成交價又被限制在保護範圍內，不會被掃到離譜的價位。
+        IOC：撮不到的部分直接取消，不留一張半死不活的單在盤上。
         """
         if self._conditions.get(c.id) is not c:
             self._entering.discard(c.id)
@@ -454,11 +485,12 @@ class ConditionModule:
         order: Optional[Order] = await self._trade.place_order(
             symbol=c.symbol,
             direction=c.side,
-            order_type=OrderType.LIMIT,
+            order_type=OrderType.MARKET_RANGE,
             qty=c.qty,
-            price=price,
+            price=0.0,             # 範圍市價不指定價格，entry_target_price 只決定「何時送」
             source=f"condition:{c.id}",
             octype="new",          # 條件單的進場一律是新倉
+            time_in_force="IOC",
         )
 
         if order is None or order.status == OrderStatus.REJECTED:
@@ -470,8 +502,8 @@ class ConditionModule:
             c.status = ConditionStatus.SENT
             c.entry_order_id = order.id
             logger.info(
-                "[ConditionModule] 條件 %s 已送出進場單 %s @%s x%s",
-                c.id, order.id, price, c.qty,
+                "[ConditionModule] 條件 %s 已送出進場單 %s 範圍市價 x%s（回檔到 %s）",
+                c.id, order.id, c.qty, price,
             )
 
         self._entering.discard(c.id)
@@ -485,23 +517,48 @@ class ConditionModule:
     # 保證金不足之類的拒絕不會自己好，每個 tick 重打一次就是連續轟炸券商 API。
     MAX_EXIT_ATTEMPTS = 3
 
-    # 保護性出場（停損／成本防線／收盤清倉）一律市價：這幾種都是「一定要出去」，
-    # 掛限價沒成交就等於保護失效。停利則是「有到價才要」，掛限價等它成交沒關係。
-    _MARKET_EXIT_REASONS = ("stop_loss", "cost_guard", "session_close")
+    # 保護性出場：停損／成本防線／收盤清倉。這幾種都是「一定要出去」，
+    # 用一定範圍市價（MWP）+ IOC 當場吃掉；範圍市價又能擋掉流動性瞬間變差時
+    # 被掃到離譜價位的成交。停利不在此列：它是「有到價才要」的被動限價單。
+    _PROTECTIVE_EXIT_REASONS = ("stop_loss", "cost_guard", "session_close")
 
     async def _exit_position(self, c: Condition, reason: str, trigger: float) -> None:
-        """送出平倉單（octype=cover）。"""
+        """送出平倉單（octype=cover）。委託方式依出場目的而定：
+
+        - 停利：**被動限價** LMT + ROD，掛在停利價等它成交。停利是「有到價才要」，
+          等不到就繼續持有，掛著也不吃價差。
+        - 停損／成本防線／收盤清倉：**一定範圍市價** MWP + IOC，見上面的常數說明。
+        """
         if self._conditions.get(c.id) is not c or not c.is_holding:
             self._exiting.discard(c.id)
+            self._preempting.discard(c.id)
             return
 
+        # 停利限價單可能還掛在盤上（見 _may_send_exit）。保護性出場一定要先把它撤掉：
+        # 兩張平倉單同時在盤上，兩張都成交就從平倉變成反向開倉。
+        # 先清 exit_order_id 再撤單，撤單回報才不會被當成「這一輪的出場結果」重複計數。
+        stale_id, c.exit_order_id = c.exit_order_id, ""
+        if stale_id:
+            await self._trade.cancel_order(stale_id)
+            stale = self._trade.get_order(stale_id)
+            # 撤掉之前可能已經吃到幾口，要記進已平量，否則接下來這張照全額送
+            if stale and stale.filled_qty:
+                self._exit_filled[c.id] = self._exit_filled.get(c.id, 0) + stale.filled_qty
+
         # 平倉口數以實際進場成交口數為準，不是原本設定的 qty：
-        # 部分成交時用 qty 會多平出一筆反向部位
-        qty = c.entry_filled_qty or c.qty
-        if reason in self._MARKET_EXIT_REASONS or not trigger:
-            order_type, price = OrderType.MARKET, 0.0
+        # 部分成交時用 qty 會多平出一筆反向部位。前幾張出場單已經平掉的也要扣掉。
+        qty = (c.entry_filled_qty or c.qty) - self._exit_filled.get(c.id, 0)
+        if qty <= 0:
+            # 分批出場已經把部位平完了，只是最後一張單的回報還沒把狀態帶到 exited。
+            # 這時再送一張就不是平倉而是反手開新倉。
+            self._exiting.discard(c.id)
+            self._preempting.discard(c.id)
+            return
+
+        if reason in self._PROTECTIVE_EXIT_REASONS or not trigger:
+            order_type, price, tif = OrderType.MARKET_RANGE, 0.0, "IOC"
         else:
-            order_type, price = OrderType.LIMIT, trigger
+            order_type, price, tif = OrderType.LIMIT, trigger, "ROD"
         order: Optional[Order] = await self._trade.place_order(
             symbol=c.symbol,
             direction=c.exit_direction,
@@ -510,6 +567,7 @@ class ConditionModule:
             price=price,
             source=f"condition:{c.id}:{reason}",
             octype="cover",
+            time_in_force=tif,
         )
 
         if order is None or order.status == OrderStatus.REJECTED:
@@ -517,6 +575,7 @@ class ConditionModule:
             self._exit_attempts[c.id] = attempts
             c.fail_reason = (order.reject_reason if order else "") or "出場單送出失敗"
             self._exiting.discard(c.id)   # 放行，下一筆 tick 再試
+            self._preempting.discard(c.id)
             if attempts >= self.MAX_EXIT_ATTEMPTS:
                 c.status = ConditionStatus.FAILED
                 logger.error(
@@ -531,11 +590,14 @@ class ConditionModule:
         else:
             c.exit_order_id = order.id
             c.exit_reason = reason
+            self._preempting.discard(c.id)   # 搶單完成，exit_reason 已經換人
             # 計數器不在這裡歸零：送單被收下不代表出得去，券商「收下再取消」
             # 的話歸零會讓重試次數永遠回到 1，變成無限重送。等真的成交才清。
             logger.info(
-                "[ConditionModule] 條件 %s 已送出%s單 %s @%s x%s",
-                c.id, EXIT_REASON_TEXT.get(reason, reason), order.id, price, qty,
+                "[ConditionModule] 條件 %s 已送出%s單 %s %s x%s（觸及 %s）",
+                c.id, EXIT_REASON_TEXT.get(reason, reason), order.id,
+                "範圍市價" if order_type is OrderType.MARKET_RANGE else f"限價 {price}",
+                qty, trigger,
             )
 
         c.updated_at = datetime.now()
@@ -630,33 +692,50 @@ class ConditionModule:
         c.entry_filled_qty = order.filled_qty
         c.entry_price = order.avg_fill_price
 
-        if order.status == OrderStatus.FILLED:
+        # 進場走 IOC，撮不完的部分會被取消 —— 「吃到幾口就取消」的回報是
+        # CANCELLED 而不是 FILLED。只要有成交就是真的有部位，一定要進入
+        # filled 開始管出場；當成失敗擱著等於那幾口裸奔，沒有任何停損。
+        settled = order.status in (
+            OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED,
+        )
+        if not settled:
+            # 部分成交但單還活著：留在 sent，等它有結果
+            pass
+        elif order.filled_qty > 0:
             c.status = ConditionStatus.FILLED
             c.peak_price = order.avg_fill_price   # P3 的觸後跟隨從進場價起算
             logger.info(
-                "[ConditionModule] 條件 %s 進場完成: %s口 @%s（停利 %s / 停損 %s）",
+                "[ConditionModule] 條件 %s 進場完成: %s口 @%s（停利 %s / 停損 %s）%s",
                 c.id, c.entry_filled_qty, c.entry_price,
                 c.take_profit_price or "—", c.stop_loss_price or "—",
+                f"—— 只成交 {order.filled_qty}/{order.qty} 口，其餘已取消"
+                if order.filled_qty < order.qty else "",
             )
-        elif order.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
-            # 進場單沒吃到就被取消/退回：停在 failed 等人工處理，不自動改價重送
+        else:
+            # 一口都沒吃到就被取消/退回：停在 failed 等人工處理，不自動改價重送
             # ——重掛迴圈在跳空時會一路追到底（見 ARCHITECTURE.md §7.4）
             c.status = ConditionStatus.FAILED
             c.fail_reason = order.reject_reason or f"進場單{order.status.value}"
             logger.warning("[ConditionModule] 條件 %s 進場單未成交: %s", c.id, c.fail_reason)
-        else:
-            # 部分成交：留在 sent，等全部成交才算進場完成
-            pass
 
         c.updated_at = datetime.now()
         await self._persist(c)
 
     async def _apply_exit_update(self, c: Condition, order: Order) -> None:
-        c.exit_price = order.avg_fill_price
+        # 出場可能分成好幾張單（範圍市價是 IOC，撮不完的部分直接取消），
+        # 出場均價要按口數加權，不能被最後一張單的均價蓋過去
+        done_qty = self._exit_filled.get(c.id, 0)
+        if order.filled_qty:
+            total = done_qty + order.filled_qty
+            c.exit_price = (
+                c.exit_price * done_qty + order.avg_fill_price * order.filled_qty
+            ) / total
         if order.status == OrderStatus.FILLED:
             c.status = ConditionStatus.EXITED
             self._exiting.discard(c.id)
+            self._preempting.discard(c.id)
             self._exit_attempts.pop(c.id, None)   # 真的出場了才算數
+            self._exit_filled.pop(c.id, None)
             logger.info(
                 "[ConditionModule] 條件 %s 已出場（%s）: %s → %s",
                 c.id, c.exit_reason, c.entry_price, c.exit_price,
@@ -664,7 +743,11 @@ class ConditionModule:
         elif order.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
             # 平倉單被券商收下後又取消/退回：部位還在，放行讓下一筆 tick 重新判斷後再送。
             # 這條路徑同樣要計次 —— 券商若每次都收單再取消，不計次就會無限重送。
-            attempts = self._exit_attempts.get(c.id, 0) + 1
+            # IOC 部分成交也走這裡（成交幾口、其餘取消），先把成交的口數記下來。
+            self._exit_filled[c.id] = done_qty + order.filled_qty
+            # 有出掉幾口就是有進展，重試上限是用來擋「怎麼送都出不去」的死循環，
+            # 不該把一口一口慢慢平掉的大單也算成失敗
+            attempts = 0 if order.filled_qty else self._exit_attempts.get(c.id, 0) + 1
             self._exit_attempts[c.id] = attempts
             c.fail_reason = order.reject_reason or f"出場單{order.status.value}"
             c.exit_order_id = ""
@@ -674,6 +757,11 @@ class ConditionModule:
                 logger.error(
                     "[ConditionModule] 條件 %s 出場單連續 %d 次未成交，停止重試 —— "
                     "部位可能還在，請自行處理: %s", c.id, attempts, c.fail_reason,
+                )
+            elif order.filled_qty:
+                logger.warning(
+                    "[ConditionModule] 條件 %s 出場單部分成交 %d 口（累計 %d 口），"
+                    "剩下的等下一筆 tick 再送", c.id, order.filled_qty, self._exit_filled[c.id],
                 )
             else:
                 logger.error(
