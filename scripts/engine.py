@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from config import settings
 from core.event_bus import EventBus
 from core.models import (
     Bar, Direction, IndicatorOutput, OrderType,
@@ -264,9 +265,9 @@ class ScriptEngine:
             ctx.buy(1, reason="MA5 上穿 MA20")
     """
 
-    def __init__(self, scripts_dir: str = "scripts/user"):
+    def __init__(self, scripts_dir: str | Path | None = None):
         self.bus = EventBus()
-        self._scripts_dir = Path(scripts_dir)
+        self._scripts_dir = Path(scripts_dir) if scripts_dir else settings.SCRIPTS_USER_DIR
         self._scripts: dict[str, ScriptMeta] = {}
         self._modules: dict[str, Any] = {}  # 載入的 Python 模組
 

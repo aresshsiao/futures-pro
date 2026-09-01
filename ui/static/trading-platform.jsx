@@ -108,7 +108,13 @@ const COLORS = {
   dangerBg: "rgba(239,68,68,0.12)",
 };
 
-// 漲跌顏色慣例（由 config/settings.py 的 CANDLE_COLOR_SCHEME 設定，經 /api/config 傳入）
+// 商品規格（config/settings.yaml 的 trading.tick_size，經 /api/config 傳入）。
+// 跟下面的漲跌色一樣用模組層級的可變 holder：這兩者都只在啟動時取一次、
+// 之後不會再變，為它們各拉一條 state 再逐層往下傳並不划算。
+const TICK = { table: {}, fallback: 1 };
+const tickSizeOf = (symbol) => TICK.table[symbol] ?? TICK.fallback;
+
+// 漲跌顏色慣例（由 config/settings.yaml 的 ui.candle_color_scheme 設定，經 /api/config 傳入）
 // "green-up"：漲＝綠、跌＝紅（國際慣例）；"red-up"：漲＝紅、跌＝綠（台股慣例）
 const GREEN = { main: "#22c55e", strong: "#16a34a", rgb: "34,197,94" };
 const RED = { main: "#ef4444", strong: "#dc2626", rgb: "239,68,68" };
@@ -1039,7 +1045,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
 
   useEffect(() => { localStorage.setItem("orderPanelMode", orderMode); }, [orderMode]);
 
-  const tickSize = 1;
+  const tickSize = tickSizeOf(activeSymbol);
 
   // 價格階梯上的委託標記直接由真實委託單推導（不再是本地暫存的假單），
   // 同一價位可能有多張單，顯示未成交口數的加總。
@@ -1081,7 +1087,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       rows.push({ price, bidQty, askQty, isBid, isAsk, isCurrent });
     }
     return rows;
-  }, [currentPrice, orderbook]);
+  }, [currentPrice, orderbook, tickSize]);
 
   const maxQty = Math.max(...ladderData.map(r => Math.max(r.bidQty, r.askQty)), 1);
 
@@ -3137,7 +3143,12 @@ export default function TradingPlatform() {
   useEffect(() => {
     fetch("/api/config", { headers: authHeaders() })
       .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
-      .then(cfg => { if (cfg?.candle_color_scheme) setCandleColorScheme(cfg.candle_color_scheme); })
+      .then(cfg => {
+        if (!cfg) return;
+        if (cfg.candle_color_scheme) setCandleColorScheme(cfg.candle_color_scheme);
+        if (cfg.tick_size) TICK.table = cfg.tick_size;
+        if (cfg.tick_size_default) TICK.fallback = cfg.tick_size_default;
+      })
       .catch(() => { });
   }, []);
 

@@ -1,0 +1,111 @@
+# ═══════════════════════════════════════════════════════════
+#  Futures Pro — 全域設定
+#
+#  這是設定的單一真相。config/settings.py 只負責讀這個檔、轉型、
+#  展開路徑，不再自己持有任何預設值 —— 兩邊各寫一份就是遲早會對不起來。
+#  缺鍵會在啟動時直接報錯，不會靜默套用某個猜出來的值。
+# ═══════════════════════════════════════════════════════════
+
+# ── 路徑 ─────────────────────────────────────────────
+# 一律寫成「相對於專案根目錄」的路徑，載入時才展開成絕對路徑。
+# 用相對路徑是為了讓設定檔跟著 repo 走，換一台機器不必逐條改。
+paths:
+  data_dir: data
+  db: data/futures.db
+  raw_taifex_dir: data/raw/taifex
+  scripts_user_dir: scripts/user
+  scripts_builtin_dir: scripts/builtin
+  static_dir: ui/static
+  log_dir: logs
+
+# ── 伺服器 ───────────────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8888
+
+# ── 認證 Auth ────────────────────────────────────────
+# 執行 `python scripts/gen_password_hash.py` 產生 password_hash
+auth:
+  secret_key: "change-this-secret-key-in-production"
+  password_hash: "$2b$12$KbKksoOf0aPH1v8m0IPmZ.aXtOc3w3w8NSkCzKjVccAzHpCCPTrAm"
+  token_expire_hours: 720   # 30 天
+
+# ── 日誌 Logging ─────────────────────────────────────
+# 實際的 handler 設定在 utils/logging_setup.py，這裡只放可調的旋鈕。
+logging:
+  # console 的輸出等級 (DEBUG, INFO, WARNING, ERROR)
+  level: INFO
+  # 個別券商底層 API 的日誌等級（報價跳動頻繁，不想被洗版可改 WARNING）
+  broker_level: INFO
+  # 寫進 logs/ 的等級。可以比 console 詳細——螢幕看不下的細節，出事時翻檔案還在
+  file_level: DEBUG
+  to_console: true
+  to_file: true
+  # 每天保留幾個檔（每個交易日一檔）
+  retention_days: 30
+  # 每日換檔時間。預設 06:00 而非午夜：夜盤跑到隔天 05:00，
+  # 午夜換檔會把同一個交易日的 log 切成兩個檔案
+  rotate_at_hour: 6
+
+# ── Core Service 自動連線 ────────────────────────────
+# server 啟動、event loop ready 後，Core Service 會自動連線券商並訂閱預設商品，
+# 使券商連線的擁有權屬於 Core 而非 browser（見 ARCHITECTURE.md §4.1）。
+core_service:
+  #   null / ""  → 不自動連線，等 UI 手動觸發
+  #   "sinopac"  → 啟動時自動連線永豐金
+  auto_connect_broker: sinopac
+  # 要連哪幾條線：quote（只報價）/ trade（只交易）/ both
+  auto_connect_kind: both
+  # 自動連線成功後自動訂閱的商品（Core 只會向券商訂閱一次，多分頁共用）
+  default_subscribe_symbols: [TX, TAIEX]
+
+# ── 條件單（右邊下單）────────────────────────────────
+condition:
+  # 收盤清倉的時間點（HH:MM，24 小時制，本地時間）。勾選面板上的「收盤清倉」後，
+  # 到點會平掉條件單引擎建立的部位並把交易開關切回暫停。
+  # 預設抓在日盤 13:45 / 夜盤 05:00 收盤前一分鐘 —— 留一分鐘讓平倉單有機會成交，
+  # 壓線送出去碰上收盤前的流動性真空就平不掉了。
+  session_close_times: ["13:44", "04:59"]
+  # 收盤清倉的檢查週期（秒）。只是比對時鐘，不打券商 API。
+  session_check_sec: 20
+
+# ── 交易 ─────────────────────────────────────────────
+trading:
+  default_symbol: TX
+  # 最小跳動點。回測的滑價以「跳」為單位，要靠這張表換算成點數。
+  tick_size:
+    TX: 1
+    MTX: 1
+    TMF: 1
+    TE: 0.05
+    TF: 0.2
+  tick_size_default: 1
+  # 每點價值。倉位浮動損益、成交明細已實現損益、回測損益共用這一份。
+  point_value:
+    TX: 200
+    MTX: 50
+    TMF: 10      # 微型台指
+    TE: 4000
+    TF: 1000
+    TXO: 50      # 台指選擇權
+  point_value_default: 200
+  # 每口手續費（回測用；實單的費用以券商回報為準）
+  commission_per_lot:
+    TX: 60
+    MTX: 15
+    TE: 60
+    TF: 60
+  commission_per_lot_default: 60
+
+# ── 回測 ─────────────────────────────────────────────
+backtest:
+  default_capital: 1000000
+  # 滑價以「跳」計，實際點數 = 跳數 × 該商品的 tick_size
+  default_slippage_ticks: 1
+
+# ── 前端 UI ──────────────────────────────────────────
+ui:
+  # K棒（及連動的漲跌幅、損益等）顏色慣例，前端透過 /api/config 取得：
+  #   "green-up" → 漲＝綠、跌＝紅（國際慣例）
+  #   "red-up"   → 漲＝紅、跌＝綠（台股慣例，預設）
+  candle_color_scheme: red-up

@@ -1,78 +1,128 @@
 """
-config/settings.py — 全域設定
+config/settings.py — 全域設定的載入器
+
+設定值本身在同目錄的 `settings.yaml`，這裡只做三件事：讀檔、缺鍵時報錯、
+把值攤平成模組層級的常數。**這個檔案不持有任何預設值** —— 預設值同時寫在
+YAML 跟 Python 兩邊，就是遲早會對不起來的兩份真相。
+
+之所以留一層 Python 而不是讓各模塊自己讀 YAML：
+  1. 路徑要展開成以專案根目錄為基準的 Path，寫在 YAML 裡只會變成一堆
+     容易打錯、換台機器就失效的絕對路徑。
+  2. 全專案既有的用法是 `from config import settings` + `settings.X`，
+     測試也靠 `monkeypatch.setattr(settings, ...)` 覆寫。攤平成模組屬性
+     就完全不必動這些呼叫端。
+  3. 常數名寫死在這裡，grep 得到、IDE 也跟得到；用 setattr 迴圈動態產生
+     就等於把所有設定項從靜態分析裡藏起來。
 """
 from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+class ConfigError(RuntimeError):
+    """settings.yaml 缺鍵、型別錯誤或根本讀不到。
+
+    這種錯一律在 import 當下就炸掉，不做 fallback：這裡管的是下單參數與
+    路徑，帶著半套設定啟動比啟動失敗危險得多。
+    """
+
+
+BASE_DIR = Path(__file__).parent.parent
+CONFIG_FILE = BASE_DIR / "config" / "settings.yaml"
+
+
+def _load(path: Path) -> dict:
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise ConfigError(f"讀不到設定檔 {path}: {e}") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"設定檔 {path} 格式錯誤: {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigError(f"設定檔 {path} 的最外層必須是 mapping（key: value）")
+    return raw
+
+
+_cfg = _load(CONFIG_FILE)
+
+
+def _get(dotted: str) -> Any:
+    """依 "a.b.c" 取值，缺鍵直接報錯並指出是哪一項。"""
+    node: Any = _cfg
+    for key in dotted.split("."):
+        if not isinstance(node, dict) or key not in node:
+            raise ConfigError(f"{CONFIG_FILE} 缺少設定項 `{dotted}`")
+        node = node[key]
+    return node
+
+
+def _path(dotted: str) -> Path:
+    """設定檔裡的路徑一律相對於專案根目錄，展開成絕對路徑再交出去。
+
+    絕對化不是潔癖：相對路徑的意義取決於行程的工作目錄，從 IDE、排程器或
+    service 啟動時會指到完全不同的地方，DB 於是「憑空多出一個空的」。
+    """
+    return (BASE_DIR / str(_get(dotted))).resolve()
+
+
+def _table(dotted: str, default_dotted: str) -> tuple[dict, float]:
+    """讀一張「商品 → 數值」對照表與它的 fallback。"""
+    table = _get(dotted)
+    if not isinstance(table, dict):
+        raise ConfigError(f"{CONFIG_FILE} 的 `{dotted}` 必須是 mapping")
+    return {str(k): float(v) for k, v in table.items()}, float(_get(default_dotted))
+
 
 # ── 路徑 ─────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent.parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "futures.db"
-RAW_TAIFEX_DIR = DATA_DIR / "raw" / "taifex"
-SCRIPTS_USER_DIR = BASE_DIR / "scripts" / "user"
-SCRIPTS_BUILTIN_DIR = BASE_DIR / "scripts" / "builtin"
-LOG_DIR = BASE_DIR / "logs"
+DATA_DIR = _path("paths.data_dir")
+DB_PATH = _path("paths.db")
+RAW_TAIFEX_DIR = _path("paths.raw_taifex_dir")
+SCRIPTS_USER_DIR = _path("paths.scripts_user_dir")
+SCRIPTS_BUILTIN_DIR = _path("paths.scripts_builtin_dir")
+STATIC_DIR = _path("paths.static_dir")
+LOG_DIR = _path("paths.log_dir")
 
 # ── 伺服器 ───────────────────────────────────────────
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 8888
+SERVER_HOST = str(_get("server.host"))
+SERVER_PORT = int(_get("server.port"))
 
 # ── 認證 Auth ────────────────────────────────────────
-# 執行 `python scripts/gen_password_hash.py` 產生 AUTH_PASSWORD_HASH
-AUTH_SECRET_KEY = "change-this-secret-key-in-production"
-AUTH_PASSWORD_HASH = "$2b$12$KbKksoOf0aPH1v8m0IPmZ.aXtOc3w3w8NSkCzKjVccAzHpCCPTrAm"
-AUTH_TOKEN_EXPIRE_HOURS = 24 * 30  # 30 天
+AUTH_SECRET_KEY = str(_get("auth.secret_key"))
+AUTH_PASSWORD_HASH = str(_get("auth.password_hash"))
+AUTH_TOKEN_EXPIRE_HOURS = int(_get("auth.token_expire_hours"))
+# 這串是「設定檔還沒改過」的判斷依據，server 啟動時會據此發警告
+AUTH_DEFAULT_SECRET_KEY = "change-this-secret-key-in-production"
 
 # ── 日誌 Logging ─────────────────────────────────────
-# 實際的 handler 設定在 utils/logging_setup.py，這裡只放可調的旋鈕。
-# console 的輸出等級 (INFO, DEBUG, WARNING, ERROR)
-LOG_LEVEL = "INFO"
-# 個別券商底層 API 的日誌等級（因報價跳動頻繁，若不想看到洗版可改為 INFO 或 WARNING）
-BROKER_LOG_LEVEL = "INFO"
-# 寫進 logs/ 的等級。可以比 console 詳細——螢幕看不下的細節，出事時翻檔案還在
-LOG_FILE_LEVEL = "DEBUG"
-LOG_TO_CONSOLE = True
-LOG_TO_FILE = True
-# 每天保留幾個檔（每個交易日一檔）
-LOG_RETENTION_DAYS = 30
-# 每日換檔時間。預設 06:00 而非午夜：夜盤跑到隔天 05:00，
-# 午夜換檔會把同一個交易日的 log 切成兩個檔案
-LOG_ROTATE_AT_HOUR = 6
+LOG_LEVEL = str(_get("logging.level"))
+BROKER_LOG_LEVEL = str(_get("logging.broker_level"))
+LOG_FILE_LEVEL = str(_get("logging.file_level"))
+LOG_TO_CONSOLE = bool(_get("logging.to_console"))
+LOG_TO_FILE = bool(_get("logging.to_file"))
+LOG_RETENTION_DAYS = int(_get("logging.retention_days"))
+LOG_ROTATE_AT_HOUR = int(_get("logging.rotate_at_hour"))
 
 # ── Core Service 自動連線 ────────────────────────────
-# server 啟動、event loop ready 後，Core Service 會自動連線券商並訂閱預設商品，
-# 使券商連線的擁有權屬於 Core 而非 browser（見 ARCHITECTURE.md §4.1）。
-#   None / ""  → 不自動連線，等 UI 手動觸發
-#   "sinopac"  → 啟動時自動連線永豐金
-AUTO_CONNECT_BROKER = "sinopac"
-# 自動連線成功後自動訂閱的商品清單（Core 只會向券商訂閱一次，多分頁共用）
-DEFAULT_SUBSCRIBE_SYMBOLS = ["TX", "TAIEX"]
+AUTO_CONNECT_BROKER = _get("core_service.auto_connect_broker") or None
+AUTO_CONNECT_KIND = str(_get("core_service.auto_connect_kind"))
+DEFAULT_SUBSCRIBE_SYMBOLS = list(_get("core_service.default_subscribe_symbols"))
 
 # ── 條件單（右邊下單）────────────────────────────────
-# 收盤清倉的時間點（HH:MM，24 小時制，本地時間）。勾選面板上的「收盤清倉」後，
-# 到點會平掉條件單引擎建立的部位並把交易開關切回暫停。
-# 預設抓在日盤 13:45 / 夜盤 05:00 收盤前一分鐘 —— 留一分鐘讓平倉單有機會成交，
-# 壓線送出去碰上收盤前的流動性真空就平不掉了。
-CONDITION_SESSION_CLOSE_TIMES = ["13:44", "04:59"]
-# 收盤清倉的檢查週期（秒）。只是比對時鐘，不打券商 API。
-CONDITION_SESSION_CHECK_SEC = 20
+CONDITION_SESSION_CLOSE_TIMES = list(_get("condition.session_close_times"))
+CONDITION_SESSION_CHECK_SEC = int(_get("condition.session_check_sec"))
 
 # ── 交易 ─────────────────────────────────────────────
-DEFAULT_SYMBOL = "TX"
-TICK_SIZE = {
-    "TX": 1, "MTX": 1, "TE": 0.05, "TF": 0.2,
-}
-POINT_VALUE = {
-    "TX": 200, "MTX": 50, "TE": 4000, "TF": 1000,
-}
-COMMISSION_PER_LOT = {
-    "TX": 60, "MTX": 15, "TE": 60, "TF": 60,
-}
+DEFAULT_SYMBOL = str(_get("trading.default_symbol"))
+TICK_SIZE, TICK_SIZE_DEFAULT = _table("trading.tick_size", "trading.tick_size_default")
+POINT_VALUE, POINT_VALUE_DEFAULT = _table("trading.point_value", "trading.point_value_default")
+COMMISSION_PER_LOT, COMMISSION_PER_LOT_DEFAULT = _table(
+    "trading.commission_per_lot", "trading.commission_per_lot_default",
+)
 
 # ── 回測 ─────────────────────────────────────────────
-BACKTEST_DEFAULT_CAPITAL = 1_000_000
-BACKTEST_DEFAULT_SLIPPAGE = 1
+BACKTEST_DEFAULT_CAPITAL = float(_get("backtest.default_capital"))
+BACKTEST_DEFAULT_SLIPPAGE_TICKS = int(_get("backtest.default_slippage_ticks"))
 
-# K棒（及連動的漲跌幅、損益等）顏色慣例，前端透過 /api/config 取得：
-#   "green-up" → 漲＝綠、跌＝紅（國際慣例，預設）
-#   "red-up"   → 漲＝紅、跌＝綠（台股慣例）
-CANDLE_COLOR_SCHEME = "red-up"
+# ── 前端 UI ──────────────────────────────────────────
+CANDLE_COLOR_SCHEME = str(_get("ui.candle_color_scheme"))

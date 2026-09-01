@@ -11,7 +11,7 @@ import pandas as pd
 
 from core.models import (
     BacktestConfig, BacktestResult, Bar, Direction, Fill,
-    OrderType, PositionSide, Timeframe,
+    OrderType, PositionSide, Timeframe, commission_per_lot, point_value, tick_size,
 )
 from data.database import Database
 from scripts.engine import ScriptEngine, ScriptContext
@@ -90,10 +90,14 @@ class BacktestEngine:
 
             current_price = df.iloc[i]["close"]
 
+            # 滑價設定是「幾跳」，換算成點數要乘上該商品的最小跳動點。
+            # 直接把跳數當點數加的話，電子期（一跳 0.05 點）的滑價會被灌大 20 倍。
+            slippage = config.slippage_ticks * tick_size(config.symbol)
+            fee_per_lot = self._commission(config)
+
             for signal in ctx._signals:
                 fill_price = current_price + (
-                    config.slippage_ticks if signal.direction == Direction.BUY
-                    else -config.slippage_ticks
+                    slippage if signal.direction == Direction.BUY else -slippage
                 )
 
                 fill = Fill(
@@ -102,7 +106,7 @@ class BacktestEngine:
                     direction=signal.direction,
                     price=fill_price,
                     qty=signal.qty,
-                    fee=config.commission * signal.qty,
+                    fee=fee_per_lot * signal.qty,
                     timestamp=df.iloc[i]["timestamp"],
                 )
                 fills.append(fill)
@@ -209,7 +213,12 @@ class BacktestEngine:
 
     @staticmethod
     def _point_value(symbol: str) -> float:
-        return {"TX": 200, "MTX": 50, "TE": 4000, "TF": 1000}.get(symbol, 200)
+        return point_value(symbol)
+
+    @staticmethod
+    def _commission(config: BacktestConfig) -> float:
+        """每口手續費。config 沒指定（0）就用該商品在 settings.yaml 的預設。"""
+        return config.commission or commission_per_lot(config.symbol)
 
     @staticmethod
     def _empty_result(config: BacktestConfig, duration: float) -> BacktestResult:

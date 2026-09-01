@@ -50,14 +50,13 @@ taifex = TaifexImporter()
 # 自動掃描 scripts/builtin/ 目錄，無需手動維護清單。
 # 新增 script 只需將 .py 放入該目錄，並在 __meta__ 中設定 "enabled": True/False。
 # 參數一律以 script 自己的 __meta__["params"] 為唯一來源，不支援外部覆蓋。
-from pathlib import Path as _Path
 BUILTIN_SCRIPTS = [
-    s for _py in sorted(_Path("scripts/builtin").glob("*.py"))
+    s for _py in sorted(settings.SCRIPTS_BUILTIN_DIR.glob("*.py"))
     if _py.name != "__init__.py" and (s := load_meta_from_file(str(_py), _py.stem)) is not None
 ]
 
 # Script 啟用狀態持久化 — 儲存於 config/script_states.json
-_SCRIPT_STATES_PATH = _Path("config/script_states.json")
+_SCRIPT_STATES_PATH = settings.BASE_DIR / "config" / "script_states.json"
 
 def _load_script_states() -> dict[str, bool]:
     """讀取已儲存的 script 啟用/停用狀態"""
@@ -958,7 +957,7 @@ async def handle_import_taifex(ws, data: dict):
         )
     else:
         symbols = data.get("symbols") or None
-        directory = data.get("directory", "data/raw/taifex")
+        directory = data.get("directory") or str(settings.RAW_TAIFEX_DIR)
         # 用 DB 裡「檔名+檔案大小」已匯入紀錄，跳過這次要匯入的 symbols 都已匯入過的檔案
         target_symbols = symbols or list(taifex.KNOWN_SYMBOLS.keys())
         already_imported = db.get_imported_files(target_symbols)
@@ -1301,7 +1300,7 @@ async def handle_add_script(ws, data: dict):
     if script_type not in ["indicator", "strategy"]:
         return
         
-    user_dir = Path("scripts/user")
+    user_dir = settings.SCRIPTS_USER_DIR
     user_dir.mkdir(parents=True, exist_ok=True)
     
     script_id = name.lower().replace(" ", "_")
@@ -1506,7 +1505,7 @@ def setup():
     import json
     from pathlib import Path
     from core.models import ScriptType
-    user_meta_registry = Path("scripts/user/meta.json")
+    user_meta_registry = settings.SCRIPTS_USER_DIR / "meta.json"
     if user_meta_registry.exists():
         try:
             registry_data = json.loads(user_meta_registry.read_text(encoding="utf-8"))
@@ -1537,7 +1536,7 @@ def setup():
     conditions.load_from_db()
     # 優先從 TWSE 下載完整交易日曆，ZIP 目錄作為補充
     if db.build_calendar_from_twse() == 0:
-        db.build_calendar_from_zip_dir("data/raw/taifex")
+        db.build_calendar_from_zip_dir(str(settings.RAW_TAIFEX_DIR))
 
     logger.info("=" * 60)
     logger.info("  Futures Pro v0.1.0")
@@ -1553,8 +1552,8 @@ def main():
     setup()
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=8888,
+        host=settings.SERVER_HOST,
+        port=settings.SERVER_PORT,
         log_level="info",
         # log_config=None：不讓 uvicorn 套用它自己那份 logging 設定。
         # 它預設會把 uvicorn.* 的 logger 接到自己的 handler 並關掉 propagate，

@@ -8,6 +8,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+from config import settings
+
 
 # ═══════════════════════════════════════════════════════════
 #  列舉型別
@@ -390,17 +392,21 @@ class Condition:
         )
 
 
-# 每點價值 (台指期=200, 小台指=50, 電子期=4000, 金融期=1000)
-POINT_VALUES = {
-    "TX": 200, "MTX": 50, "TE": 4000, "TF": 1000,
-    "TMF": 10,  # 微型台指
-    "TXO": 50,  # 台指選擇權
-}
-
-
+# 商品規格一律走 config/settings.yaml —— 這幾張表以前在 settings、models、
+# backtest/engine 各存一份，三份還互有出入（小台手續費、微型台指每點價值）。
 def point_value(symbol: str) -> float:
     """每點價值。倉位的浮動損益與成交明細的已實現損益共用同一份對照表。"""
-    return POINT_VALUES.get(symbol, 200)
+    return settings.POINT_VALUE.get(symbol, settings.POINT_VALUE_DEFAULT)
+
+
+def tick_size(symbol: str) -> float:
+    """最小跳動點。回測的滑價以「跳」為單位，要靠它換算成點數。"""
+    return settings.TICK_SIZE.get(symbol, settings.TICK_SIZE_DEFAULT)
+
+
+def commission_per_lot(symbol: str) -> float:
+    """每口手續費。回測用；實單的費用以券商回報為準。"""
+    return settings.COMMISSION_PER_LOT.get(symbol, settings.COMMISSION_PER_LOT_DEFAULT)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -465,9 +471,14 @@ class BacktestConfig:
     timeframe: Timeframe
     start_date: datetime
     end_date: datetime
-    initial_capital: float = 1_000_000
-    commission: float = 60.0          # 每口手續費
-    slippage_ticks: int = 1
+    initial_capital: float = field(default_factory=lambda: settings.BACKTEST_DEFAULT_CAPITAL)
+    # 0 = 用該商品的預設手續費（settings.yaml 的 trading.commission_per_lot）。
+    # dataclass 的預設值算不到同一個 dataclass 的 symbol 欄位，所以由引擎在
+    # 真的要算費用時才解析（見 BacktestEngine._commission）。
+    commission: float = 0.0
+    slippage_ticks: int = field(
+        default_factory=lambda: settings.BACKTEST_DEFAULT_SLIPPAGE_TICKS
+    )
     parameters: dict = field(default_factory=dict)
 
 

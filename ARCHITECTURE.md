@@ -74,7 +74,8 @@ futures-pro/
 ├── main.py                  # 程式進入點 — 啟動 Core Service + Gateway
 ├── config/
 │   ├── __init__.py
-│   ├── settings.py          # 全域設定 (ports, paths, 自動連線, 預設商品)
+│   ├── settings.yaml        # 全域設定的單一真相 (paths, ports, 商品規格, 日誌…)
+│   ├── settings.py          # settings.yaml 的載入器 — 讀檔、展開路徑、缺鍵報錯
 │   ├── brokers.yaml         # 券商帳號設定 (gitignore)
 │   └── script_states.json   # Script 啟用/停用狀態持久化 (執行期產生)
 │
@@ -196,7 +197,7 @@ futures-pro/
 - 三個檔案各有分工：`futures.log` 全部、`error.log` 只有 WARNING 以上（出事先看這個）、
   `trade.log` 只有下單/成交/倉位（交易紀錄不該被報價洗掉）。
 - **每日 06:00 換檔**而非午夜：夜盤跑到隔天 05:00，午夜換檔會把同一個交易日切成兩個檔案。
-  保留天數與等級見 `config/settings.py` 的 `LOG_*`。
+  保留天數與等級見 `config/settings.yaml` 的 `logging:`。
 - 檔案等級（預設 DEBUG）可比 console（預設 INFO）詳細 —— 螢幕上看不下的細節，事後翻檔案還在。
 - `sys.excepthook` / `threading.excepthook` 都接進 log：券商 callback 跑在子執行緒，
   沒接的話那裡爆掉只會看到畫面停止更新、log 一片安靜。

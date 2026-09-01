@@ -13,6 +13,7 @@ from typing import Optional
 
 import requests
 
+from config import settings
 from core.models import Bar, Timeframe
 
 logger = logging.getLogger(__name__)
@@ -54,8 +55,8 @@ class TaifexImporter:
         "TMF": "微型臺指期貨",
     }
 
-    def __init__(self, raw_dir: str = "data/raw/taifex"):
-        self._raw_dir = Path(raw_dir)
+    def __init__(self, raw_dir: str | Path | None = None):
+        self._raw_dir = Path(raw_dir) if raw_dir else settings.RAW_TAIFEX_DIR
         self._raw_dir.mkdir(parents=True, exist_ok=True)
 
     def parse_daily_csv(

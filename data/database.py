@@ -9,11 +9,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from config import settings
 from core.models import Bar, Condition, ConditionStatus, Direction
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("data/futures.db")
+# 以前這裡是 Path("data/futures.db") —— 相對路徑的意義取決於行程的工作目錄，
+# 從 IDE 或排程器啟動時會指到別的地方，結果是「憑空多出一個空的 DB」。
+DB_PATH = settings.DB_PATH
 
 # 已知商品清單 (symbol → 中文名)
 KNOWN_PRODUCTS: dict[str, str] = {

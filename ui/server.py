@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from ui.auth import create_token, require_auth, verify_password, ws_require_auth
 
+from config import settings as _settings
 from core.event_bus import EventBus
 from core.models import (
     Bar, Condition, Direction, Fill, IndicatorOutput, Order, OrderBook, OrderType,
@@ -412,10 +413,13 @@ async def health():
 
 @app.get("/api/config", dependencies=[Depends(require_auth)])
 async def get_config():
-    """提供前端可調整的設定，統一從 config/settings.py 讀取。"""
-    from config import settings
+    """提供前端可調整的設定，統一從 config/settings.yaml 讀取。"""
     return {
-        "candle_color_scheme": settings.CANDLE_COLOR_SCHEME,
+        "candle_color_scheme": _settings.CANDLE_COLOR_SCHEME,
+        "default_symbol": _settings.DEFAULT_SYMBOL,
+        # 價格階梯的每一階要用該商品的最小跳動點，前端不該自己寫死 1
+        "tick_size": _settings.TICK_SIZE,
+        "tick_size_default": _settings.TICK_SIZE_DEFAULT,
     }
 
 
@@ -445,7 +449,7 @@ async def get_scripts():
 
 # ── 靜態檔案 (React build) ────────────────────────────
 
-static_dir = Path("ui/static")
+static_dir = _settings.STATIC_DIR
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -458,11 +462,14 @@ if static_dir.exists():
 
 @app.on_event("startup")
 async def startup():
-    from config import settings as _s
-    if not _s.AUTH_PASSWORD_HASH:
-        logger.warning("[Auth] AUTH_PASSWORD_HASH 尚未設定！請執行 `python scripts/gen_password_hash.py` 設定登入密碼。")
-    if _s.AUTH_SECRET_KEY == "change-this-secret-key-in-production":
-        logger.warning("[Auth] AUTH_SECRET_KEY 使用預設值，請在 config/settings.py 更換為隨機字串。")
+    if not _settings.AUTH_PASSWORD_HASH:
+        logger.warning(
+            "[Auth] auth.password_hash 尚未設定！請執行 `python scripts/gen_password_hash.py` 設定登入密碼。"
+        )
+    if _settings.AUTH_SECRET_KEY == _settings.AUTH_DEFAULT_SECRET_KEY:
+        logger.warning(
+            "[Auth] auth.secret_key 仍是預設值，請在 %s 換成隨機字串。", _settings.CONFIG_FILE
+        )
     # 在伺服器真正啟動、event loop 開始運行後才存入主 loop，
     # 確保 EventBus.emit_sync() 從子執行緒（如 Shioaji callback）排程時用的是正確的 loop。
     EventBus().set_main_loop(asyncio.get_running_loop())

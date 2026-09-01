@@ -1,0 +1,101 @@
+"""
+tests/config/test_settings.py — settings.yaml 載入器測試
+
+重點在幾件事：
+  1. 缺鍵要炸，而且要說是哪一鍵 —— 靜默套用猜出來的預設值，等於「設定檔說了不算」，
+     而這裡管的是下單參數。
+  2. 路徑一律以專案根目錄展開成絕對路徑：相對路徑的意義取決於行程的工作目錄，
+     從 IDE 或排程器啟動就會指到別的地方（DB 於是「憑空多出一個空的」）。
+  3. 商品規格只有這一份 —— point_value / tick_size / commission 以前在
+     settings、core.models、backtest.engine 各存一份，三份還互有出入。
+"""
+from pathlib import Path
+
+import pytest
+
+from config import settings
+from core.models import commission_per_lot, point_value, tick_size
+
+
+class TestLoad:
+    def test_rejects_non_mapping(self, tmp_path):
+        bad = tmp_path / "settings.yaml"
+        bad.write_text("- 1\n- 2\n", encoding="utf-8")
+        with pytest.raises(settings.ConfigError, match="mapping"):
+            settings._load(bad)
+
+    def test_reports_missing_file_with_path(self, tmp_path):
+        with pytest.raises(settings.ConfigError, match="讀不到設定檔"):
+            settings._load(tmp_path / "nope.yaml")
+
+    def test_reports_broken_yaml(self, tmp_path):
+        bad = tmp_path / "settings.yaml"
+        bad.write_text("a: [1, 2\n", encoding="utf-8")
+        with pytest.raises(settings.ConfigError, match="格式錯誤"):
+            settings._load(bad)
+
+
+class TestGet:
+    def test_missing_key_names_the_key(self):
+        with pytest.raises(settings.ConfigError, match="trading.no_such_knob"):
+            settings._get("trading.no_such_knob")
+
+    def test_missing_section_names_the_full_path(self):
+        with pytest.raises(settings.ConfigError, match="nope.level"):
+            settings._get("nope.level")
+
+    def test_reads_nested_value(self):
+        assert settings._get("server.port") == settings.SERVER_PORT
+
+
+class TestPaths:
+    """路徑全部是以專案根目錄展開的絕對路徑，跟行程的工作目錄無關。"""
+
+    @pytest.mark.parametrize("name", [
+        "DATA_DIR", "DB_PATH", "RAW_TAIFEX_DIR",
+        "SCRIPTS_USER_DIR", "SCRIPTS_BUILTIN_DIR", "STATIC_DIR", "LOG_DIR",
+    ])
+    def test_is_absolute_and_under_base_dir(self, name):
+        p = getattr(settings, name)
+        assert isinstance(p, Path)
+        assert p.is_absolute()
+        assert settings.BASE_DIR in p.parents or p == settings.BASE_DIR
+
+
+class TestProductSpecs:
+    """core.models 的查表函式是商品規格的唯一入口，全部回到 settings.yaml。"""
+
+    def test_point_value_reads_settings(self):
+        assert point_value("MTX") == settings.POINT_VALUE["MTX"]
+
+    def test_tick_size_reads_settings(self):
+        assert tick_size("TE") == settings.TICK_SIZE["TE"]
+
+    def test_commission_reads_settings(self):
+        assert commission_per_lot("MTX") == settings.COMMISSION_PER_LOT["MTX"]
+
+    @pytest.mark.parametrize("fn,default_attr", [
+        (point_value, "POINT_VALUE_DEFAULT"),
+        (tick_size, "TICK_SIZE_DEFAULT"),
+        (commission_per_lot, "COMMISSION_PER_LOT_DEFAULT"),
+    ])
+    def test_unknown_symbol_falls_back(self, fn, default_attr):
+        assert fn("NOT_A_SYMBOL") == getattr(settings, default_attr)
+
+    def test_electronic_futures_tick_is_not_one(self):
+        """TE 一跳 0.05 點。回測把「跳」當「點」加的話滑價會被灌大 20 倍，
+        這條斷言是那個 bug 的守門員。"""
+        assert tick_size("TE") == 0.05
+        assert tick_size("TX") == 1
+
+
+class TestSingleSourceOfTruth:
+    def test_backtest_engine_shares_the_same_table(self):
+        """backtest 以前自己藏了一份 {TX:200, MTX:50, TE:4000, TF:1000}。"""
+        from backtest.engine import BacktestEngine
+        for symbol in settings.POINT_VALUE:
+            assert BacktestEngine._point_value(symbol) == point_value(symbol)
+
+    def test_database_uses_configured_db_path(self):
+        from data import database
+        assert database.DB_PATH == settings.DB_PATH
