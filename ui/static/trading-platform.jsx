@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 // ─── 語音提示 ────────────────────────────────────────────────────────
-function speakVolumeAlert(text) {
+// 用瀏覽器內建的語音佇列依序播放。佇列不會自己丟東西，所以每個呼叫端都要自己
+// 確保「一件事只念一句」—— 排進去一百句就是念到下一個交易日（見 speakFills）。
+function speak(text) {
   if (!("speechSynthesis" in window)) return;
-  // 用瀏覽器內建的語音佇列依序播放（同一根棒最多 400/1500 兩則，不會堆積太多）
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = "zh-TW";
   utter.rate = 1.1;
@@ -69,6 +70,31 @@ const ORDER_STATUS_LABEL = {
 const OC_LABEL = {
   new: "新倉", cover: "平倉", cover_new: "平反",
 };
+// 唸出來的版本 —— 表格欄位窄才縮成「平反」，語音沒有這個限制
+const OC_SPEECH = {
+  new: "新倉", cover: "平倉", cover_new: "平倉反手",
+};
+
+// ─── 成交語音播報 ────────────────────────────────────────────────────
+// 一張市價單可能分成上百筆成交回報（見 ui/server.py 的 forward_fill）。每筆各念
+// 一次的話，一次進場就是上百句排進語音佇列，而佇列不會自己丟東西 —— 等於整場
+// 都在念剛才那張單。所以先攢一個短窗口，同商品同方向的成交合併成一句再念。
+const FILL_SPEECH_WINDOW_MS = 900;
+
+/** 把窗口內累積的成交合併成一句話。 */
+function fillSpeechText(g) {
+  const side = g.direction === "buy" ? "買進" : "賣出";
+  const kind = OC_SPEECH[g.oc_type] || "";      // 未判定就不念倉別，別瞎猜
+  // 均價：分批成交的每一筆價格都不同，念第一筆會跟成交明細對不起來
+  const avg = g.amount / g.qty;
+  const price = Number.isInteger(avg) ? avg : avg.toFixed(2);
+  const parts = [`${productNameOf(g.symbol)} ${side}${kind} 成交 ${g.qty} 口`, `價位 ${price}`];
+  // 損益是後端 FillLedger 推算的，只有平倉才有；四捨五入到元，念到小數沒有意義
+  if (g.pnl != null) {
+    parts.push(g.pnl >= 0 ? `獲利 ${Math.round(g.pnl)}` : `虧損 ${Math.round(-g.pnl)}`);
+  }
+  return parts.join("，");
+}
 
 const BROKER_LIST = [
   { id: "sinopac", name: "永豐金", status: "connected", type: "both" },
@@ -108,11 +134,15 @@ const COLORS = {
   dangerBg: "rgba(239,68,68,0.12)",
 };
 
-// 商品規格（config/settings.yaml 的 trading.tick_size，經 /api/config 傳入）。
-// 跟下面的漲跌色一樣用模組層級的可變 holder：這兩者都只在啟動時取一次、
+// 商品規格（config/settings.yaml 的 trading.*，經 /api/config 傳入）。
+// 跟下面的漲跌色一樣用模組層級的可變 holder：這些都只在啟動時取一次、
 // 之後不會再變，為它們各拉一條 state 再逐層往下傳並不划算。
 const TICK = { table: {}, fallback: 1 };
 const tickSizeOf = (symbol) => TICK.table[symbol] ?? TICK.fallback;
+
+// 商品中文名。語音念代碼的話 TTS 會把 TX 拆成兩個字母，所以有名字就念名字。
+const PRODUCT_NAME = { table: {} };
+const productNameOf = (symbol) => PRODUCT_NAME.table[symbol] || symbol;
 
 // 漲跌顏色慣例（由 config/settings.yaml 的 ui.candle_color_scheme 設定，經 /api/config 傳入）
 // "green-up"：漲＝綠、跌＝紅（國際慣例）；"red-up"：漲＝紅、跌＝綠（台股慣例）
@@ -3116,6 +3146,15 @@ export default function TradingPlatform() {
   // 各 Script 即時運算結果（由後端 ScriptEngine 算完透過 ws "indicator_output" 廣播），用 name 當 key
   const [indicatorOutputs, setIndicatorOutputs] = useState({});
   const [candleColorScheme, setCandleColorScheme] = useState("green-up");
+  // 成交語音提示。預設開；關掉的狀態要留著，不然每次重整又開始念。
+  // localStorage 是同一個瀏覽器共用的，開多個分頁時每個分頁都會念自己那一份。
+  const [voiceOnFill, setVoiceOnFill] = useState(() => localStorage.getItem("voiceOnFill") !== "0");
+  useEffect(() => {
+    localStorage.setItem("voiceOnFill", voiceOnFill ? "1" : "0");
+    // 關掉的當下要把佇列清掉 —— 不清的話還會把剛才排進去的唸完，
+    // 按下靜音卻繼續講話是最讓人火大的那種 bug
+    if (!voiceOnFill) window.speechSynthesis?.cancel();
+  }, [voiceOnFill]);
 
   function logout() { clearToken(); setAuthed(false); }
 
@@ -3148,6 +3187,7 @@ export default function TradingPlatform() {
         if (cfg.candle_color_scheme) setCandleColorScheme(cfg.candle_color_scheme);
         if (cfg.tick_size) TICK.table = cfg.tick_size;
         if (cfg.tick_size_default) TICK.fallback = cfg.tick_size_default;
+        if (cfg.display_name) PRODUCT_NAME.table = cfg.display_name;
       })
       .catch(() => { });
   }, []);
@@ -3162,10 +3202,48 @@ export default function TradingPlatform() {
     return cleanup;
   }, [addHandler]);
 
+  // 成交語音播報。合併窗口的理由見 fillSpeechText 上方的說明。
+  // 窗口從「第一筆成交」起算固定長度，不隨後續成交往後延：延長窗口的話，
+  // 一串連續不斷的成交回報會讓它永遠等不到結束，反而一句都念不出來。
+  const fillSpeech = useRef({ groups: new Map(), timer: null });
+  useEffect(() => {
+    if (!voiceOnFill) return;
+    const state = fillSpeech.current;
+    const flush = () => {
+      state.timer = null;
+      const groups = [...state.groups.values()];
+      state.groups.clear();
+      groups.forEach(g => speak(fillSpeechText(g)));
+    };
+    const cleanup = addHandler("fill", (msg) => {
+      const qty = Number(msg.qty) || 0;
+      if (qty <= 0) return;
+      // 同商品、同方向、同倉別才合得起來 —— 平倉反手的那一筆同時有兩種身分，
+      // 後端已經分成兩筆送過來，這裡照它的 oc_type 各歸各的
+      const key = `${msg.symbol}|${msg.direction}|${msg.oc_type || ""}`;
+      const g = state.groups.get(key) || {
+        symbol: msg.symbol, direction: msg.direction, oc_type: msg.oc_type || "",
+        qty: 0, amount: 0, pnl: null,
+      };
+      g.qty += qty;
+      g.amount += (Number(msg.price) || 0) * qty;   // 收盤後除以總口數就是均價
+      if (msg.pnl != null) g.pnl = (g.pnl || 0) + msg.pnl;
+      state.groups.set(key, g);
+      if (state.timer == null) state.timer = setTimeout(flush, FILL_SPEECH_WINDOW_MS);
+    });
+    return () => {
+      cleanup();
+      clearTimeout(state.timer);
+      state.timer = null;
+      state.groups.clear();
+    };
+  }, [addHandler, voiceOnFill]);
+
   useEffect(() => {
     const cleanup = addHandler("indicator_output", (msg) => {
-      // Script 自己判斷要播報的文字（ctx.alert()），跟目前圖表看哪個週期無關，一律播放
-      (msg.alerts || []).forEach(text => speakVolumeAlert(text));
+      // Script 自己判斷要播報的文字（ctx.alert()），跟目前圖表看哪個週期無關，一律播放。
+      // 不必合併：同一根棒最多 400/1500 兩則，堆不起來。
+      (msg.alerts || []).forEach(text => speak(text));
 
       if (msg.timeframe && msg.timeframe !== timeframeRef.current) return;
       setIndicatorOutputs(prev => ({ ...prev, [msg.name]: msg }));
@@ -3905,7 +3983,19 @@ export default function TradingPlatform() {
           </span>
           <span>延遲: 3ms</span>
         </div>
-        <div style={{ display: "flex", gap: 16 }}>
+        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          <button
+            onClick={() => setVoiceOnFill(v => !v)}
+            title={voiceOnFill ? "成交語音提示：開（點一下靜音）" : "成交語音提示：關"}
+            style={{
+              display: "flex", alignItems: "center", gap: 4, padding: "0 6px", height: 18,
+              background: "transparent", border: `1px solid ${COLORS.border}`, borderRadius: 4,
+              fontSize: 10, cursor: "pointer",
+              color: voiceOnFill ? COLORS.accent : COLORS.textDim,
+            }}
+          >
+            {voiceOnFill ? "🔊" : "🔇"} 成交語音
+          </button>
           <span>Scripts: {scripts.filter(s => s.enabled).length} 啟用</span>
           <span>DB: 期交所 + 券商API</span>
           <span>v0.1.0-alpha</span>

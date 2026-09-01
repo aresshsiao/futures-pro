@@ -65,13 +65,23 @@ condition:
   # 到點會平掉條件單引擎建立的部位並把交易開關切回暫停。
   # 預設抓在日盤 13:45 / 夜盤 05:00 收盤前一分鐘 —— 留一分鐘讓平倉單有機會成交，
   # 壓線送出去碰上收盤前的流動性真空就平不掉了。
-  session_close_times: ["13:44", "04:59"]
+  session_close_times: ["13:42", "04:57"]
   # 收盤清倉的檢查週期（秒）。只是比對時鐘，不打券商 API。
-  session_check_sec: 20
+  session_check_sec: 3
 
 # ── 交易 ─────────────────────────────────────────────
 trading:
   default_symbol: TX
+  # 商品中文名。成交語音提示念這個 —— 直接念代碼的話 TTS 會把 TX 拆成兩個字母。
+  # 沒列到的商品就念代碼本身。
+  display_name:
+    TX: 台指期
+    MTX: 小台指
+    TMF: 微台指
+    TE: 電子期
+    TF: 金融期
+    TXO: 台指選擇權
+    TAIEX: 加權指數
   # 最小跳動點。回測的滑價以「跳」為單位，要靠這張表換算成點數。
   tick_size:
     TX: 1
@@ -93,9 +103,10 @@ trading:
   commission_per_lot:
     TX: 60
     MTX: 15
+    TMF: 10
     TE: 60
     TF: 60
-  commission_per_lot_default: 60
+  commission_per_lot_default: 30
 
 # ── 回測 ─────────────────────────────────────────────
 backtest:

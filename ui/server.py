@@ -420,6 +420,8 @@ async def get_config():
         # 價格階梯的每一階要用該商品的最小跳動點，前端不該自己寫死 1
         "tick_size": _settings.TICK_SIZE,
         "tick_size_default": _settings.TICK_SIZE_DEFAULT,
+        # 成交語音提示要念的商品名（念代碼的話 TTS 會把 TX 拆成兩個字母）
+        "display_name": _settings.DISPLAY_NAME,
     }
 
 

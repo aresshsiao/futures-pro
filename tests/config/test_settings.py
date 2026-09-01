@@ -82,6 +82,11 @@ class TestProductSpecs:
     def test_unknown_symbol_falls_back(self, fn, default_attr):
         assert fn("NOT_A_SYMBOL") == getattr(settings, default_attr)
 
+    def test_display_names_are_chinese_not_codes(self):
+        """語音提示念這張表。念不到就退回代碼，TTS 會把 TX 拆成兩個字母。"""
+        assert settings.DISPLAY_NAME["TX"] == "台指期"
+        assert all(isinstance(v, str) and v for v in settings.DISPLAY_NAME.values())
+
     def test_electronic_futures_tick_is_not_one(self):
         """TE 一跳 0.05 點。回測把「跳」當「點」加的話滑價會被灌大 20 倍，
         這條斷言是那個 bug 的守門員。"""

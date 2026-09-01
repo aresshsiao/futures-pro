@@ -66,12 +66,19 @@ def _path(dotted: str) -> Path:
     return (BASE_DIR / str(_get(dotted))).resolve()
 
 
-def _table(dotted: str, default_dotted: str) -> tuple[dict, float]:
-    """讀一張「商品 → 數值」對照表與它的 fallback。"""
+def _mapping(dotted: str) -> dict:
     table = _get(dotted)
     if not isinstance(table, dict):
         raise ConfigError(f"{CONFIG_FILE} 的 `{dotted}` 必須是 mapping")
-    return {str(k): float(v) for k, v in table.items()}, float(_get(default_dotted))
+    return table
+
+
+def _table(dotted: str, default_dotted: str) -> tuple[dict, float]:
+    """讀一張「商品 → 數值」對照表與它的 fallback。"""
+    return (
+        {str(k): float(v) for k, v in _mapping(dotted).items()},
+        float(_get(default_dotted)),
+    )
 
 
 # ── 路徑 ─────────────────────────────────────────────
@@ -114,6 +121,7 @@ CONDITION_SESSION_CHECK_SEC = int(_get("condition.session_check_sec"))
 
 # ── 交易 ─────────────────────────────────────────────
 DEFAULT_SYMBOL = str(_get("trading.default_symbol"))
+DISPLAY_NAME = {str(k): str(v) for k, v in _mapping("trading.display_name").items()}
 TICK_SIZE, TICK_SIZE_DEFAULT = _table("trading.tick_size", "trading.tick_size_default")
 POINT_VALUE, POINT_VALUE_DEFAULT = _table("trading.point_value", "trading.point_value_default")
 COMMISSION_PER_LOT, COMMISSION_PER_LOT_DEFAULT = _table(
