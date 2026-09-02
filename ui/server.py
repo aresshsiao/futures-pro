@@ -272,6 +272,9 @@ def setup_event_bridge():
         await manager.broadcast({
             "type": "indicator_output",
             "timeframe": "1",
+            # 每檔訂閱中的商品收完 M1 棒都會送一份同名結果過來，
+            # 前端要靠 symbol 才分得出這份是不是圖上正在看的那一檔
+            "symbol": output.symbol,
             "name": output.name,
             "series": output.series,
             "alerts": output.alerts,

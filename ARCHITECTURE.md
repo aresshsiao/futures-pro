@@ -268,6 +268,13 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
   再用券商結算好的數字覆蓋。留倉單的進場成本不在今日成交裡，那幾口標平倉但損益留空等券商補。
   重播前要先由「券商倉位 − 今日成交淨額」反推開盤前部位，否則平留倉單會被判成新倉，
   之後整天的新倉/平倉全部反過來。
+- **Script 的警示播報**：`ctx.alert()` 的文字由 script 決定，前端照著念。
+  兩個容易踩的假設要記住：**每一檔訂閱中的商品收完 M1 棒都會各跑一次 `calc()`**
+  （`on_bar_complete` 是 per symbol 的），所以跟商品規格有關的門檻一定要看
+  `ctx.symbol`，否則大台的量能門檻會被套到小台與加權指數上；而同一次 `calc()`
+  裡呼叫幾次 `alert()` 就會念幾句，想只念一句得由 script 自己收斂
+  （見 `scripts/builtin/volume_alert.py`：門檻依日夜盤時段挑，跨多條只取最高的）。
+  `IndicatorOutput.symbol` 一起送到前端，圖上的線才不會被別檔的同名結果蓋掉。
 - **成交語音提示**：前端收到 `fill` 就用瀏覽器的 `speechSynthesis` 念一句
   「台指期 買進新倉 成交 3 口，價位 17500，獲利 1200」。商品中文名取自
   `settings.yaml` 的 `trading.display_name`（經 `/api/config` 下來）—— 念代碼的話

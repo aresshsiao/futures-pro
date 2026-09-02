@@ -40,9 +40,10 @@ class ScriptContext:
         ctx.buy_limit(price=17500, qty=1)
     """
 
-    def __init__(self, meta: ScriptMeta, bars: pd.DataFrame):
+    def __init__(self, meta: ScriptMeta, bars: pd.DataFrame, symbol: str = ""):
         self._meta = meta
         self._bars = bars        # DataFrame with columns: open, high, low, close, volume, timestamp
+        self._symbol = symbol    # 這次計算的是哪一檔（見 symbol property）
         self._signals: list[StrategySignal] = []
         
         # 指標繪圖暫存 (dict of IndicatorSeries dict)
@@ -53,6 +54,25 @@ class ScriptContext:
         self._params = dict(meta.parameters)
 
     # ── 資料存取 ──────────────────────────────────────
+
+    @property
+    def symbol(self) -> str:
+        """這次計算的商品代碼。
+
+        **每一檔訂閱中的商品收完 M1 棒都會各跑一次 calc()**（見 main.py
+        on_bar_complete），同一個 script 會被不同商品輪流呼叫。量能門檻、價格
+        區間這類跟商品規格有關的判斷一定要看這個值，否則大台的門檻會被套到
+        小台跟指數上，冒出一堆跟眼前這檔無關的警示。
+        """
+        return self._symbol
+
+    @property
+    def symbol_name(self) -> str:
+        """商品中文名（settings.yaml 的 trading.display_name）。
+
+        播報用 —— 語音直接念代碼的話，TTS 會把 TX 拆成兩個字母。
+        """
+        return settings.DISPLAY_NAME.get(self._symbol, self._symbol)
 
     @property
     def data(self) -> pd.DataFrame:
@@ -150,8 +170,11 @@ class ScriptContext:
 
         由 script 決定「什麼時候該播」跟「要播什麼」，前端完全不需要知道
         這個警示背後的條件（例如量能門檻）是什麼，只負責播放。
-        calc() 只會在每根 M1 棒收完時執行一次（見 main.py on_bar_complete），
-        所以同一根棒不會重複呼叫，不需要額外去重。
+
+        同一根棒的同一檔商品只會執行一次 calc()（見 main.py on_bar_complete），
+        所以不需要對「重複的棒」去重。但**每檔訂閱中的商品都會各跑一次**，
+        而且同一次 calc() 裡多呼叫幾次就會多念幾句 —— 想只念一句的話，
+        兩件事都得由 script 自己把關（見 scripts/builtin/volume_alert.py）。
         """
         self._alerts.append(str(message))
 
@@ -346,21 +369,22 @@ class ScriptEngine:
     # ── 執行 ──────────────────────────────────────────
 
     def run_indicator(
-        self, script_id: str, bars: pd.DataFrame
+        self, script_id: str, bars: pd.DataFrame, symbol: str = ""
     ) -> Optional[IndicatorOutput]:
         """執行指標 Script，回傳繪圖資料"""
         self._check_and_reload(script_id)
-        
+
         meta = self._scripts.get(script_id)
         module = self._modules.get(script_id)
         if not meta or not module or not meta.enabled:
             return None
 
-        ctx = ScriptContext(meta, bars)
+        ctx = ScriptContext(meta, bars, symbol)
         try:
             module.calc(ctx)
             return IndicatorOutput(
                 name=meta.name,
+                symbol=symbol,
                 series=ctx._plots,
                 alerts=ctx._alerts,
             )
@@ -369,17 +393,17 @@ class ScriptEngine:
             return None
 
     def run_strategy(
-        self, script_id: str, bars: pd.DataFrame
+        self, script_id: str, bars: pd.DataFrame, symbol: str = ""
     ) -> list[StrategySignal]:
         """執行策略 Script，回傳交易訊號"""
         self._check_and_reload(script_id)
-        
+
         meta = self._scripts.get(script_id)
         module = self._modules.get(script_id)
         if not meta or not module or not meta.enabled:
             return []
 
-        ctx = ScriptContext(meta, bars)
+        ctx = ScriptContext(meta, bars, symbol)
         try:
             module.on_bar(ctx)
             if ctx._signals:
@@ -394,19 +418,22 @@ class ScriptEngine:
             logger.exception(f"[ScriptEngine] 策略執行錯誤: {meta.name}")
             return []
 
-    def run_all_on_bar(self, bars: pd.DataFrame) -> dict[str, IndicatorOutput]:
+    def run_all_on_bar(self, bars: pd.DataFrame, symbol: str = "") -> dict[str, IndicatorOutput]:
         """
         每收到一根新 Bar 時呼叫。
         執行所有啟用的指標 & 策略。
+
+        symbol 一定要傳：訂閱幾檔商品，這裡就會被輪流呼叫幾次，
+        script 得靠它分辨自己正在算哪一檔（見 ScriptContext.symbol）。
         """
         indicator_results = {}
 
         for meta in self.enabled_indicators:
-            result = self.run_indicator(meta.id, bars)
+            result = self.run_indicator(meta.id, bars, symbol)
             if result:
                 indicator_results[meta.id] = result
 
         for meta in self.enabled_strategies:
-            self.run_strategy(meta.id, bars)
+            self.run_strategy(meta.id, bars, symbol)
 
         return indicator_results

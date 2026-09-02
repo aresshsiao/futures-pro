@@ -273,11 +273,12 @@ async def handle_get_history(ws, data: dict):
             }).dropna().reset_index()
         else:
             df = df_m1
-        indicator_results = script_engine.run_all_on_bar(df)
+        indicator_results = script_engine.run_all_on_bar(df, symbol)
         for script_id, output in indicator_results.items():
             await ws.send_json({
                 "type": "indicator_output",
                 "timeframe": timeframe,
+                "symbol": symbol,
                 "name": output.name,
                 "series": output.series,
                 # 這裡是歷史資料觸發的重算（切商品/週期、重新整理），不是真的有新棒收完，
@@ -1138,7 +1139,7 @@ def on_bar_complete(bar):
     ])
 
     db_ready = _time.perf_counter()
-    indicator_results = script_engine.run_all_on_bar(df)
+    indicator_results = script_engine.run_all_on_bar(df, bar.symbol)
     done = _time.perf_counter()
 
     for script_id, output in indicator_results.items():
@@ -1203,7 +1204,7 @@ async def _script_timer_loop():
 
             for meta in due_metas:
                 last_run[(meta.id, symbol)] = now
-                output = script_engine.run_indicator(meta.id, df)
+                output = script_engine.run_indicator(meta.id, df, symbol)
                 if output:
                     bus.emit_sync("indicator_output", output)
 

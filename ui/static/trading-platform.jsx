@@ -3286,10 +3286,14 @@ export default function TradingPlatform() {
 
   useEffect(() => {
     const cleanup = addHandler("indicator_output", (msg) => {
-      // Script 自己判斷要播報的文字（ctx.alert()），跟目前圖表看哪個週期無關，一律播放。
-      // 不必合併：同一根棒最多 400/1500 兩則，堆不起來。
+      // Script 自己判斷要播報的文字（ctx.alert()），跟圖表現在看哪一檔、哪個週期
+      // 都無關，一律播放 —— 盯著大台不代表不想知道小台爆量。要盯哪幾檔是
+      // script 那邊的設定（volume_alert 的 symbols），不是這裡的顯示狀態。
       (msg.alerts || []).forEach(text => speak(text));
 
+      // 圖上的線就必須挑過：每檔訂閱中的商品都會送一份同名結果過來，
+      // 不比對 symbol 的話，別檔的量能線會直接蓋掉眼前這一檔的。
+      if (msg.symbol && msg.symbol !== chartSymbolRef.current) return;
       if (msg.timeframe && msg.timeframe !== timeframeRef.current) return;
       setIndicatorOutputs(prev => ({ ...prev, [msg.name]: msg }));
     });
