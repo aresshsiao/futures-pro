@@ -68,8 +68,17 @@ class ConditionModule:
         # 全域開關預設「暫停」：server 重啟後不該自己把昨天留下的條件送出去，
         # 一定要使用者按下「啟動交易」才會開始送單
         self._trading_enabled = False
-        self._day_trade = False       # 當沖：進場一律新倉、出場一律平倉，並自動打開收盤清倉
-        self._close_on_end = False    # 收盤清倉
+        # 當沖（進場一律新倉、出場一律平倉）與收盤清倉。這兩個旗標沒有持久化，
+        # 每次重啟都從 settings.yaml 的 condition.defaults 讀 —— 天天手動勾一次
+        # 才是常態的話，那本來就該是設定值。
+        # 走 _apply_options() 而不是直接指派：當沖與收盤清倉互相牽動，
+        # 直接塞欄位就可能生出「當沖但不清倉」這種設定檔看起來合理、實際矛盾的組合。
+        self._day_trade = False
+        self._close_on_end = False
+        self._apply_options(
+            day_trade=getattr(settings, "CONDITION_DEFAULT_DAY_TRADE", False),
+            close_on_end=getattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", False),
+        )
         self._last_price: dict[str, float] = {}   # 收盤清倉要靠它算平倉價
         # 上次檢查收盤清倉的時間。用「區間有沒有跨過收盤時點」判斷，休眠睡過頭也補得回來
         self._last_check_at: Optional[datetime] = None
@@ -214,23 +223,35 @@ class ConditionModule:
         logger.info("[ConditionModule] 條件單交易%s", "啟動" if enabled else "暫停")
         await self._broadcast_settings()
 
-    async def set_options(self, day_trade=None, close_on_end=None) -> None:
-        """當沖 / 收盤清倉。
+    def _apply_options(self, day_trade=None, close_on_end=None) -> None:
+        """當沖 / 收盤清倉的連動規則。__init__ 與 set_options 共用同一份。
 
         當沖會自動把收盤清倉一起打開 —— 當沖部位留倉就不是當沖了，
-        兩者分開設定只會製造「以為在當沖、實際留倉」的意外。
+        兩者分開設定只會製造「以為在當沖、實際留倉」的意外；
+        反過來，關掉收盤清倉就不算當沖，免得兩個旗標互相矛盾。
+
+        先各自算出目標值再解連動，不是逐一套用：逐一套用的話，
+        兩個值同時給（開機從設定檔載入）會互相抵銷 —— day_trade=True 先打開清倉，
+        close_on_end=False 又把清倉連同當沖一起關掉，結果是設定檔寫了當沖卻沒生效。
         """
-        if day_trade is not None:
-            self._day_trade = bool(day_trade)
-            if self._day_trade:
-                self._close_on_end = True
-        if close_on_end is not None:
-            self._close_on_end = bool(close_on_end)
-            if not self._close_on_end:
-                self._day_trade = False   # 不清倉就不算當沖，別讓兩個旗標互相矛盾
+        want_day = self._day_trade if day_trade is None else bool(day_trade)
+        want_close = self._close_on_end if close_on_end is None else bool(close_on_end)
+
+        # 當沖蘊含收盤清倉。只在「這一次真的把當沖打開」時讓它壓過清倉的值，
+        # 否則使用者取消勾選清倉時會被當沖鎖回去，永遠關不掉。
+        if want_day and day_trade:
+            want_close = True
+        elif not want_close:
+            want_day = False
+
+        self._day_trade, self._close_on_end = want_day, want_close
         logger.info(
             "[ConditionModule] 當沖=%s 收盤清倉=%s", self._day_trade, self._close_on_end,
         )
+
+    async def set_options(self, day_trade=None, close_on_end=None) -> None:
+        """當沖 / 收盤清倉（來自 UI）。"""
+        self._apply_options(day_trade=day_trade, close_on_end=close_on_end)
         await self._broadcast_settings()
 
     @property

@@ -422,6 +422,8 @@ async def get_config():
         "tick_size_default": _settings.TICK_SIZE_DEFAULT,
         # 成交語音提示要念的商品名（念代碼的話 TTS 會把 TX 拆成兩個字母）
         "display_name": _settings.DISPLAY_NAME,
+        # 右邊下單面板開新條件時的預設值（壓力價／支撐價不在此列，那是每筆都不同的）
+        "condition_defaults": _settings.CONDITION_DEFAULTS,
     }
 
 

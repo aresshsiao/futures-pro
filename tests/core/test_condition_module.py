@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from config import settings
 from core.condition_module import ConditionModule
 from core.event_bus import EventBus
 from core.models import (
@@ -842,6 +843,34 @@ class TestDayTradeFlag:
 
         s = asyncio.run(scenario())
         assert s["close_on_end"] is False and s["day_trade"] is False
+
+    def test_defaults_come_from_settings_on_startup(self, monkeypatch):
+        """這兩個旗標沒有持久化，每次重啟都從 settings.yaml 讀 ——
+        天天手動勾一次才是常態的話，那本來就該是設定值。"""
+        monkeypatch.setattr(settings, "CONDITION_DEFAULT_DAY_TRADE", True)
+        monkeypatch.setattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", False)
+
+        async def scenario():
+            cm, t, a = await build(trading=False)   # 不碰總開關，看建構子留下什麼
+            return cm.settings
+
+        s = asyncio.run(scenario())
+        # 當沖的連動規則對設定值一樣生效：設定檔只寫 day_trade 也不會留倉
+        assert s["day_trade"] is True and s["close_on_end"] is True
+        # 「啟動交易」不受設定影響，重啟一律回到暫停
+        assert s["trading_enabled"] is False
+
+    def test_settings_cannot_produce_contradictory_flags(self, monkeypatch):
+        """設定成「當沖但不清倉」也要被連動規則修正，不能生出矛盾組合。"""
+        monkeypatch.setattr(settings, "CONDITION_DEFAULT_DAY_TRADE", False)
+        monkeypatch.setattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", True)
+
+        async def scenario():
+            cm, t, a = await build()
+            return cm.settings
+
+        s = asyncio.run(scenario())
+        assert s["close_on_end"] is True and s["day_trade"] is False
 
 
 def position(symbol="TX", side=PositionSide.LONG, qty=1, avg=18000.0):

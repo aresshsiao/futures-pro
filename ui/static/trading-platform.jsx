@@ -1066,7 +1066,7 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 }
 
 // ─── Order Panel (Lightning Order — Price Ladder) ───────────────────
-function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, orders, positions, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback, send, addHandler, connected }) {
+function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, orders, positions, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback, send, addHandler, connected, condDefaults }) {
   const [qty, setQty] = useState(1);
   const [centerOnPrice, setCenterOnPrice] = useState(true); // 成交置中 toggle
   // 分頁：lightning = 價格階梯點價下單；right = 右邊下單（條件單機）
@@ -1183,6 +1183,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
           activeSymbol={activeSymbol} setActiveSymbol={setActiveSymbol}
           positions={positions} placeOrder={placeOrder} feedback={feedback}
           send={send} addHandler={addHandler} connected={connected}
+          condDefaults={condDefaults}
         />
       ) : (<>
 
@@ -1452,14 +1453,44 @@ const STOP_KIND_LABEL = {
 };
 const STOP_KIND_MARK = { cost_guard: "🔒" };
 
-const BLANK_COND_FORM = {
-  resistance: "", support: "", pullback: "10", qty: "1",
-  tp: "30", sl: "-10", costGuard: false, trail: false,
+// 新條件的表單預設值（config/settings.yaml 的 condition.defaults，經 /api/config 傳入）。
+// 壓力價／支撐價永遠留白 —— 那是每筆都不同的東西，給預設只會變成「忘了改就送出去」。
+// 數字欄位存字串：這幾格是 <input type="text">，塞數字進去會讓「清空重打」這個
+// 最常見的操作在中途變成 NaN。
+// 這裡的值只是 /api/config 還沒回來之前的墊檔，真正的預設在 settings.yaml。
+const COND_DEFAULTS = {
+  pullback: "10", qty: "1", tp: "30", sl: "-10", costGuard: false, trail: false,
 };
 
-function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, positions, placeOrder, feedback, send, addHandler, connected }) {
+/** 後端送的是數字與布林，表單要字串。缺欄位就退回墊檔值。 */
+function toCondDefaults(d) {
+  if (!d) return COND_DEFAULTS;
+  const str = (v, fallback) => (v == null ? fallback : String(v));
+  return {
+    pullback: str(d.pullback, COND_DEFAULTS.pullback),
+    qty: str(d.qty, COND_DEFAULTS.qty),
+    tp: str(d.take_profit, COND_DEFAULTS.tp),
+    sl: str(d.stop_loss, COND_DEFAULTS.sl),
+    costGuard: !!d.cost_guard,
+    trail: !!d.trail,
+  };
+}
+
+function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, positions, placeOrder, feedback, send, addHandler, connected, condDefaults }) {
   const [tradingOn, setTradingOn] = useState(false);
-  const [form, setForm] = useState(BLANK_COND_FORM);
+  const [form, setForm] = useState(() => ({ resistance: "", support: "", ...condDefaults }));
+
+  // /api/config 可能比這個面板晚到。使用者還沒動過表單就換成真正的設定值；
+  // 動過了就不覆蓋 —— 打到一半的數字被設定檔蓋掉，比看到墊檔值難接受得多。
+  const seededWith = useRef(condDefaults);
+  useEffect(() => {
+    if (condDefaults === seededWith.current) return;
+    const prev = seededWith.current;
+    seededWith.current = condDefaults;
+    setForm(f => (
+      Object.keys(prev).every(k => f[k] === prev[k]) ? { ...f, ...condDefaults } : f
+    ));
+  }, [condDefaults]);
   const [editingId, setEditingId] = useState(null);
   const [dayTrade, setDayTrade] = useState(false);
   const [closeOnEnd, setCloseOnEnd] = useState(false);
@@ -1756,6 +1787,17 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontFamily: "monospace" }}>
                 <span style={{ color: COLORS.textMuted, fontSize: 9 }}>{i + 1}</span>
+                {/* 清單是所有商品混在一起的（後端送整份，這裡不按商品過濾）——
+                    不標商品的話，很容易把別檔的條件看成目前面板這一檔的。
+                    非當前商品用警示色框起來，一眼就分得出來。 */}
+                <span
+                  title={`追蹤商品：${productNameOf(c.symbol)}${c.symbol === activeSymbol ? "" : "（不是目前面板選的商品）"}`}
+                  style={{
+                    fontSize: 9, padding: "0 3px", borderRadius: 2, whiteSpace: "nowrap",
+                    color: c.symbol === activeSymbol ? COLORS.textDim : COLORS.warn,
+                    border: `1px solid ${c.symbol === activeSymbol ? COLORS.border : COLORS.warn}`,
+                  }}
+                >{c.symbol}</span>
                 <span style={{ color: sideColor, fontWeight: 700 }}>{c.side === "buy" ? "買" : "賣"}</span>
                 <span style={{ color: COLORS.warn, fontWeight: 700 }} title="觸發價">{c.trigger_price}</span>
                 <span style={{ color: COLORS.textMuted }}>→</span>
@@ -3146,6 +3188,8 @@ export default function TradingPlatform() {
   // 各 Script 即時運算結果（由後端 ScriptEngine 算完透過 ws "indicator_output" 廣播），用 name 當 key
   const [indicatorOutputs, setIndicatorOutputs] = useState({});
   const [candleColorScheme, setCandleColorScheme] = useState("green-up");
+  // 右邊下單的新條件預設值。先用墊檔值，/api/config 回來再換成 settings.yaml 的設定
+  const [condDefaults, setCondDefaults] = useState(COND_DEFAULTS);
   // 成交語音提示。預設開；關掉的狀態要留著，不然每次重整又開始念。
   // localStorage 是同一個瀏覽器共用的，開多個分頁時每個分頁都會念自己那一份。
   const [voiceOnFill, setVoiceOnFill] = useState(() => localStorage.getItem("voiceOnFill") !== "0");
@@ -3188,6 +3232,7 @@ export default function TradingPlatform() {
         if (cfg.tick_size) TICK.table = cfg.tick_size;
         if (cfg.tick_size_default) TICK.fallback = cfg.tick_size_default;
         if (cfg.display_name) PRODUCT_NAME.table = cfg.display_name;
+        if (cfg.condition_defaults) setCondDefaults(toCondDefaults(cfg.condition_defaults));
       })
       .catch(() => { });
   }, []);
@@ -3945,6 +3990,7 @@ export default function TradingPlatform() {
                 cancelOrdersAt={cancelOrdersAt}
                 cancelOrdersByKind={cancelOrdersByKind}
                 feedback={orderFeedback}
+                condDefaults={condDefaults}
                 send={send}
                 addHandler={addHandler}
                 connected={connected}

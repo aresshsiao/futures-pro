@@ -94,6 +94,38 @@ class TestProductSpecs:
         assert tick_size("TX") == 1
 
 
+class TestConditionDefaults:
+    """右邊下單面板的新條件預設值。"""
+
+    def test_numeric_fields_are_numbers_not_strings(self):
+        """YAML 打成 "10" 的話要在載入當下就炸，而不是等使用者按下送出、
+        後端才收到一個字串當返點。"""
+        for key in ("pullback", "qty", "take_profit", "stop_loss"):
+            assert isinstance(settings.CONDITION_DEFAULTS[key], int)
+
+    def test_flags_are_real_booleans(self):
+        for key in ("cost_guard", "trail"):
+            assert isinstance(settings.CONDITION_DEFAULTS[key], bool)
+
+    def test_no_default_entry_price(self):
+        """壓力價／支撐價不給預設 —— 那是每筆都不同的東西，
+        給了只會變成「忘了改就照著送出去」。"""
+        assert "resistance" not in settings.CONDITION_DEFAULTS
+        assert "support" not in settings.CONDITION_DEFAULTS
+
+    def test_no_configurable_trading_switch(self):
+        """「啟動交易」不可設定：開機就自動把昨天留下的條件送進市場，
+        是不該存在的選項（見 ARCHITECTURE.md §7.6）。"""
+        assert not hasattr(settings, "CONDITION_DEFAULT_TRADING_ENABLED")
+
+    @pytest.mark.parametrize("value", ["false", "no", 0, None])
+    def test_non_boolean_flag_is_rejected(self, value):
+        """bool("false") 是 True —— 用內建 bool() 收設定，會生出一個永遠打開、
+        而且看設定檔怎麼看都看不出來的成本防線。"""
+        with pytest.raises(ValueError):
+            settings._strict_bool(value)
+
+
 class TestSingleSourceOfTruth:
     def test_backtest_engine_shares_the_same_table(self):
         """backtest 以前自己藏了一份 {TX:200, MTX:50, TE:4000, TF:1000}。"""

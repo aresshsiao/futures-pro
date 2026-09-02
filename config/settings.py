@@ -119,6 +119,41 @@ DEFAULT_SUBSCRIBE_SYMBOLS = list(_get("core_service.default_subscribe_symbols"))
 CONDITION_SESSION_CLOSE_TIMES = list(_get("condition.session_close_times"))
 CONDITION_SESSION_CHECK_SEC = int(_get("condition.session_check_sec"))
 
+# 右邊下單面板的新條件預設值。逐欄轉型而不是整包丟出去：YAML 打成字串時
+# 要在載入當下就炸，而不是等使用者按下送出、後端才收到一個 "10" 的返點。
+_cond_defaults = _mapping("condition.defaults")
+
+
+def _strict_bool(v):
+    """只收真正的布林。用內建 bool() 的話 `cost_guard: "false"` 會變成 True ——
+    一個永遠打開、而且看設定檔怎麼看都看不出來的成本防線。"""
+    if not isinstance(v, bool):
+        raise ValueError(f"必須是 true / false，不是 {v!r}")
+    return v
+
+
+def _cond_default(key: str, cast):
+    if key not in _cond_defaults:
+        raise ConfigError(f"{CONFIG_FILE} 缺少設定項 `condition.defaults.{key}`")
+    try:
+        return cast(_cond_defaults[key])
+    except (TypeError, ValueError) as e:
+        raise ConfigError(
+            f"{CONFIG_FILE} 的 `condition.defaults.{key}` 型別錯誤: {e}"
+        ) from e
+
+
+CONDITION_DEFAULTS = {
+    "pullback": _cond_default("pullback", int),
+    "qty": _cond_default("qty", int),
+    "take_profit": _cond_default("take_profit", int),
+    "stop_loss": _cond_default("stop_loss", int),
+    "cost_guard": _cond_default("cost_guard", _strict_bool),
+    "trail": _cond_default("trail", _strict_bool),
+}
+CONDITION_DEFAULT_DAY_TRADE = _cond_default("day_trade", _strict_bool)
+CONDITION_DEFAULT_CLOSE_ON_END = _cond_default("close_on_end", _strict_bool)
+
 # ── 交易 ─────────────────────────────────────────────
 DEFAULT_SYMBOL = str(_get("trading.default_symbol"))
 DISPLAY_NAME = {str(k): str(v) for k, v in _mapping("trading.display_name").items()}
