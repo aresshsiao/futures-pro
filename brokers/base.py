@@ -267,6 +267,13 @@ class TradeAdapter(ABC):
         """是否為模擬（測試）帳號。前端用來提示「目前是模擬交易」。"""
         return False
 
+    @property
+    def is_ca_activated(self) -> bool:
+        """憑證是否已啟用。正式環境沒啟用就送不出委託 —— 報價、查詢、庫存
+        全部正常，直到真的送出第一張單才被券商退回，所以要能在畫面上看到。
+        不需要憑證機制的券商回 True（不阻擋）。"""
+        return True
+
     async def list_accounts(self) -> list[dict]:
         """列出登入帳號下的所有交易帳戶。
 

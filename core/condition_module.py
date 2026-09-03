@@ -51,7 +51,8 @@ class ConditionModule:
     現有的觸價單（STOP_BUY/STOP_SELL）是另一套機制，兩者互不干涉。
     """
 
-    def __init__(self, trade: TradeModule, db=None, close_times=None, check_interval=None):
+    def __init__(self, trade: TradeModule, db=None, close_times=None, check_interval=None,
+                 day_trade=None, close_on_end=None):
         self.bus = EventBus()
         self._trade = trade
         self._db = db
@@ -70,14 +71,21 @@ class ConditionModule:
         self._trading_enabled = False
         # 當沖（進場一律新倉、出場一律平倉）與收盤清倉。這兩個旗標沒有持久化，
         # 每次重啟都從 settings.yaml 的 condition.defaults 讀 —— 天天手動勾一次
-        # 才是常態的話，那本來就該是設定值。
+        # 才是常態的話，那本來就該是設定值。跟 close_times 一樣，None = 取設定值，
+        # 測試直接指定（否則使用者改了 settings.yaml 就會弄壞測試）。
         # 走 _apply_options() 而不是直接指派：當沖與收盤清倉互相牽動，
         # 直接塞欄位就可能生出「當沖但不清倉」這種設定檔看起來合理、實際矛盾的組合。
         self._day_trade = False
         self._close_on_end = False
         self._apply_options(
-            day_trade=getattr(settings, "CONDITION_DEFAULT_DAY_TRADE", False),
-            close_on_end=getattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", False),
+            day_trade=(
+                day_trade if day_trade is not None
+                else getattr(settings, "CONDITION_DEFAULT_DAY_TRADE", False)
+            ),
+            close_on_end=(
+                close_on_end if close_on_end is not None
+                else getattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", False)
+            ),
         )
         self._last_price: dict[str, float] = {}   # 收盤清倉要靠它算平倉價
         # 上次檢查收盤清倉的時間。用「區間有沒有跨過收盤時點」判斷，休眠睡過頭也補得回來

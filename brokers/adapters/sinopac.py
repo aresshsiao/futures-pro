@@ -12,8 +12,10 @@ import math
 import threading
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Callable, Optional
 
+from config import settings
 from core.models import (
     Bar, Direction, Fill, Order, OrderBook, OrderBookLevel,
     OrderStatus, OrderType, Position, PositionSide, Tick, Timeframe,
@@ -25,6 +27,9 @@ logger = logging.getLogger(__name__)
 _SHARED_API = None
 _SHARED_CONNECTED = False
 _SHARED_SIMULATION = False
+# 憑證是否已啟用。沒啟用時報價、查詢、庫存全都正常，只有「送出委託」會被
+# 券商擋下來 —— 所以這個狀態一定要留著給上層顯示，不能只寫在 log 裡。
+_SHARED_CA_OK = False
 
 # login() 的 contracts_cb 會依 SecurityType（"Index"/"Stock"/"Future"/"Option"）逐一回呼，
 # 對應該分類的 Contracts 下載完成。這是目前這版 shioaji（1.5.x, Rust 重寫版）唯一
@@ -56,13 +61,13 @@ def _get_shared_api(credentials):
 
     credentials["simulation"]=True 時走永豐金的模擬環境：帳號、下單、回報、
     庫存查詢全部照跑，但成交只發生在券商的測試主機上，不會動到真實資金，
-    適合用來驗證整條下單鏈路。模擬環境沒有憑證機制，activate_ca 會失敗，
-    所以這裡直接跳過。
+    適合用來驗證整條下單鏈路。模擬環境沒有憑證機制，憑證啟用會被跳過
+    （見 _activate_ca）。
 
     simulation 是 Shioaji() 的建構子參數，無法在既有 instance 上切換，
     因此模式改變時必須先登出、丟掉舊 instance 再重建。
     """
-    global _SHARED_API, _SHARED_CONNECTED, _SHARED_SIMULATION
+    global _SHARED_API, _SHARED_CONNECTED, _SHARED_SIMULATION, _SHARED_CA_OK
     import shioaji as sj
 
     simulation = bool(credentials.get("simulation", False))
@@ -95,14 +100,83 @@ def _get_shared_api(credentials):
             "模擬" if simulation else "正式",
             len(accounts) if accounts else 0,
         )
-        if credentials.get("cert_path") and not simulation:
-            _SHARED_API.activate_ca(
-                ca_path=credentials["cert_path"],
-                ca_passwd=credentials.get("cert_password", ""),
-                person_id=credentials.get("person_id", ""),
-            )
+        _SHARED_CA_OK = _activate_ca(_SHARED_API, credentials, simulation)
         _SHARED_CONNECTED = True
     return _SHARED_API
+
+
+def _resolve_cert_path(raw: str) -> Path:
+    """憑證路徑允許寫相對於專案根目錄的形式（例如 config/Sinopac.pfx）。
+
+    相對路徑的意義取決於行程的工作目錄，從 IDE 或排程器啟動就會找不到檔案，
+    而那時的錯誤訊息只會說「憑證啟用失敗」，看不出是路徑問題。
+    """
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else (settings.BASE_DIR / p)
+
+
+def _activate_ca(api, credentials: dict, simulation: bool) -> bool:
+    """啟用憑證，回傳是否成功。
+
+    **不能默默跳過**：沒有憑證的正式連線登入照樣成功、報價照樣進來，一切看起來
+    都很正常，直到真的送出第一張單才被券商退回，而那時的錯誤訊息完全不會提到憑證。
+    所以缺設定、檔案不存在、activate_ca 回 False 這三種情況都要在連線當下就講清楚。
+    """
+    if simulation:
+        # 模擬環境沒有憑證機制，帶了 cert 也不該送（activate_ca 會失敗）
+        logger.info("[SinoPac] 模擬環境，略過憑證啟用")
+        return False
+
+    raw_path = str(credentials.get("cert_path") or "").strip()
+    if not raw_path:
+        logger.error(
+            "[SinoPac] 正式環境未設定憑證（config/brokers.yaml 的 cert_path）—— "
+            "報價與查詢可以用，但送出委託會被券商拒絕"
+        )
+        return False
+
+    cert = _resolve_cert_path(raw_path)
+    if not cert.is_file():
+        logger.error("[SinoPac] 找不到憑證檔 %s —— 送出委託會被券商拒絕", cert)
+        return False
+
+    missing = [
+        key for key in ("cert_password", "person_id")
+        if not str(credentials.get(key) or "").strip()
+    ]
+    if missing:
+        logger.error(
+            "[SinoPac] 憑證設定不完整，config/brokers.yaml 缺少 %s —— "
+            "送出委託會被券商拒絕", " / ".join(missing),
+        )
+        return False
+
+    try:
+        # activate_ca 失敗時回 False 而不是擲例外（密碼錯、憑證過期、
+        # person_id 與憑證不符都是這條路）——回傳值丟掉就等於沒檢查
+        ok = bool(api.activate_ca(
+            ca_path=str(cert),
+            ca_passwd=credentials["cert_password"],
+            person_id=credentials["person_id"],
+        ))
+    except Exception as e:
+        logger.error("[SinoPac] 憑證啟用擲出例外: %s —— 送出委託會被券商拒絕", e)
+        logger.debug("[SinoPac] 憑證啟用原始錯誤", exc_info=True)
+        return False
+
+    if ok:
+        logger.info("[SinoPac] 憑證已啟用: %s", cert.name)
+    else:
+        logger.error(
+            "[SinoPac] 憑證啟用失敗（%s）—— 請確認 cert_password 與 person_id "
+            "是否與憑證相符、憑證是否已過期。送出委託會被券商拒絕", cert.name,
+        )
+    return ok
+
+
+def is_ca_activated() -> bool:
+    """憑證是否已啟用（正式環境沒啟用就送不出委託）。"""
+    return _SHARED_CA_OK
 
 
 def _is_simulation() -> bool:
@@ -213,13 +287,16 @@ async def _wait_contracts_ready(security_types=("Future", "Index"), timeout: flo
 
 
 def _logout_shared_api():
-    global _SHARED_API, _SHARED_CONNECTED
+    global _SHARED_API, _SHARED_CONNECTED, _SHARED_CA_OK
     if _SHARED_API is not None and _SHARED_CONNECTED:
         try:
             _SHARED_API.logout()
         except Exception:
             pass
         _SHARED_CONNECTED = False
+        # 斷線後憑證狀態一併清掉：不清的話 is_ca_activated() 會在斷線期間
+        # 還顯示「上次連線」的啟用結果，讓人以為現在也能下單
+        _SHARED_CA_OK = False
 
 
 # ── 選擇權理論價 (Black-76) ─────────────────────────────
@@ -1171,6 +1248,10 @@ class SinoPacTradeAdapter(TradeAdapter):
     @property
     def is_simulation(self) -> bool:
         return _is_simulation()
+
+    @property
+    def is_ca_activated(self) -> bool:
+        return is_ca_activated()
 
     def _account(self):
         """目前使用的期貨/選擇權帳戶（登入後由 Shioaji 自動指定預設帳戶）。"""

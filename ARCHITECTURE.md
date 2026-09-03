@@ -448,6 +448,10 @@ IOC 撮不完的部分會被取消，出場因此可能分成好幾張單：
 
 - **啟動交易／暫停交易**：暫停時**不觸發新的進場**（條件留在 `waiting`），
   但**已進場部位的停利停損照常運作**。暫停不能連出場保護一起關掉，否則按下暫停等於裸倉。
+- **可切換的商品與預設商品**在 `settings.yaml` 的 `trading.symbols` /
+  `trading.default_symbol`（圖表下拉選單、下單面板的商品按鈕、開啟畫面時看哪一檔都讀它）。
+  預設商品不在清單裡會在啟動時直接報錯 —— 選不到的預設等於沒設，而畫面上只會表現成
+  「圖表沒資料」，完全看不出是設定檔的問題。
 - **新條件的預設值**（返點／口數／利點／損點／成本防線／觸後跟隨）在
   `settings.yaml` 的 `condition.defaults`，經 `/api/config` 給前端。
   壓力價／支撐價**不給預設** —— 那是每筆都不同的東西，給了只會變成「忘了改就送出去」。
@@ -541,5 +545,16 @@ tick (EventBus)
   `_is_deal_report()` 除了忽略大小寫，還會用訊息結構兜底（委託是巢狀 order/status，成交是平坦 trade_id/ordno）。
 - **Shioaji `subscribe_trade`**：登入時預設會訂閱委託回報頻道；若帳號無 FOP 完整權限會回 406，
   可在 `brokers.yaml` 設 `subscribe_trade: false` 避開（代價：收不到即時委託回報）。
+- **正式環境下單要啟用憑證**：`brokers.yaml` 的 `cert_path` / `cert_password` / `person_id`
+  （`simulation: true` 時不需要，模擬環境沒有憑證機制）。這是最容易被忽略的設定缺口——
+  沒設也照樣登入成功、報價與查倉位都正常，只有真的送出委託才會被券商拒絕，而那時的
+  錯誤訊息完全不會提到憑證。`_get_shared_api()` 因此在連線當下就把憑證狀態講清楚：
+  缺設定、找不到檔案、`activate_ca()` 回 `False`（密碼錯/憑證過期/`person_id` 不符）
+  都會記成 log 並讓 `TradeAdapter.is_ca_activated` 回 `False`，一路透傳到
+  `TradeModule.is_ca_activated` → `broker_config_result` / `broker_status` /
+  `broker_status_update`，前端在狀態列與券商設定彈窗都會顯示「憑證未啟用」的警示
+  （跟連線失敗分開的第三種狀態：連線成功，但下單會被拒絕）。
+  `cert_path` 可以寫成相對於專案根目錄的路徑（例如 `config/Sinopac.pfx`），
+  不必寫絕對路徑；`*.pfx` 已加進 `.gitignore`，避免私鑰憑證被誤 commit。
 - **單 process 架構**：目前 Core Service 與 Gateway 在同一 Python process、共用 event loop。
   分離為獨立 process（跨機器 / 跨語言）是未來可選的演進方向，屆時 EventBus 需換成跨 process 的訊息佇列。

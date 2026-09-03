@@ -72,7 +72,10 @@ class TradeModule:
             # 同步今日成交明細（含新倉/平倉與已實現損益的推算）
             self._fills = self._replay_fills(await adapter.get_fills_today())
             self._broadcast_positions()
-            await self.bus.emit("trade_connected", adapter.name)
+            # 憑證狀態跟著連線事件一起帶出去：沒啟用的話報價/查倉位都正常，
+            # 只有送出委託會被拒絕，前端要能在連線當下就顯示這件事，
+            # 不能等到真的下單失敗才讓使用者發現。
+            await self.bus.emit("trade_connected", adapter.name, self.is_ca_activated)
         return ok
 
     async def disconnect(self) -> None:
@@ -488,6 +491,13 @@ class TradeModule:
     def is_simulation(self) -> bool:
         """目前的交易連線是否為模擬帳號"""
         return bool(self._adapter and self._adapter.is_simulation)
+
+    @property
+    def is_ca_activated(self) -> bool:
+        """憑證是否已啟用。正式環境沒啟用就送不出委託，前端要能提示這件事——
+        不然使用者只會在真的送單被拒的那一刻才發現。未連線視為 True（不阻擋顯示，
+        連線時的錯誤 log 已經講得夠清楚）。"""
+        return self._adapter is None or self._adapter.is_ca_activated
 
     async def refresh_from_broker(self) -> None:
         """重新跟券商同步倉位與今日成交（連線中途重整、或想確認模擬單有無成交時用）"""

@@ -305,8 +305,11 @@ def setup_event_bridge():
         await manager.broadcast({"type": "broker_status_update", "kind": "quote", "connected": True, "name": name})
     async def forward_quote_dis(name):
         await manager.broadcast({"type": "broker_status_update", "kind": "quote", "connected": False, "name": name})
-    async def forward_trade_con(name):
-        await manager.broadcast({"type": "broker_status_update", "kind": "trade", "connected": True, "name": name})
+    async def forward_trade_con(name, ca_activated=True):
+        await manager.broadcast({
+            "type": "broker_status_update", "kind": "trade",
+            "connected": True, "name": name, "ca_activated": ca_activated,
+        })
     async def forward_trade_dis(name):
         await manager.broadcast({"type": "broker_status_update", "kind": "trade", "connected": False, "name": name})
 
@@ -419,6 +422,8 @@ async def get_config():
     """提供前端可調整的設定，統一從 config/settings.yaml 讀取。"""
     return {
         "candle_color_scheme": _settings.CANDLE_COLOR_SCHEME,
+        # 畫面上可切換的商品與開啟時預設看哪一檔
+        "symbols": _settings.SYMBOLS,
         "default_symbol": _settings.DEFAULT_SYMBOL,
         # 價格階梯的每一階要用該商品的最小跳動點，前端不該自己寫死 1
         "tick_size": _settings.TICK_SIZE,

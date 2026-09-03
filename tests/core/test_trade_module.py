@@ -28,6 +28,7 @@ class FakeAdapter:
 
     name = "測試券商"
     is_simulation = False
+    is_ca_activated = True
 
     def __init__(self, connected=True, positions=None, broker_id="B001", last_error=""):
         self._connected = connected

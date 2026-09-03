@@ -155,7 +155,17 @@ CONDITION_DEFAULT_DAY_TRADE = _cond_default("day_trade", _strict_bool)
 CONDITION_DEFAULT_CLOSE_ON_END = _cond_default("close_on_end", _strict_bool)
 
 # ── 交易 ─────────────────────────────────────────────
+SYMBOLS = [str(s) for s in _get("trading.symbols")]
 DEFAULT_SYMBOL = str(_get("trading.default_symbol"))
+if not SYMBOLS:
+    raise ConfigError(f"{CONFIG_FILE} 的 `trading.symbols` 不能是空清單")
+if DEFAULT_SYMBOL not in SYMBOLS:
+    # 選不到的預設商品等於沒設 —— 畫面會停在一個空的下拉選單，
+    # 而使用者只會看到「圖表沒資料」，完全猜不到是設定檔的問題
+    raise ConfigError(
+        f"{CONFIG_FILE} 的 `trading.default_symbol` = {DEFAULT_SYMBOL!r} "
+        f"不在 `trading.symbols` {SYMBOLS} 之中"
+    )
 DISPLAY_NAME = {str(k): str(v) for k, v in _mapping("trading.display_name").items()}
 TICK_SIZE, TICK_SIZE_DEFAULT = _table("trading.tick_size", "trading.tick_size_default")
 POINT_VALUE, POINT_VALUE_DEFAULT = _table("trading.point_value", "trading.point_value_default")

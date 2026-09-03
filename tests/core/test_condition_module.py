@@ -40,12 +40,17 @@ def tick(symbol="TX", price=18000.0):
     return Tick(symbol=symbol, price=price, volume=1, timestamp=datetime.now())
 
 
-async def build(trading=True, **adapter_kw):
-    """建好一組 TradeModule + ConditionModule，並讓 emit_sync 找得到目前的 loop。"""
+async def build(trading=True, day_trade=False, close_on_end=False, **adapter_kw):
+    """建好一組 TradeModule + ConditionModule，並讓 emit_sync 找得到目前的 loop。
+
+    當沖／收盤清倉一律明確指定，不讓它們去讀 settings.yaml —— 那是使用者天天
+    在改的檔案，測試跟著它變的話，改個設定就會有一批測試莫名其妙紅掉。
+    要驗「設定值有沒有被吃進去」的測試自己傳 None 落到設定那條路。
+    """
     EventBus().set_main_loop(asyncio.get_running_loop())
     t, a = TradeModule(), FakeAdapter(**adapter_kw)
     assert await t.set_adapter(a) is True
-    cm = ConditionModule(t, db=None)
+    cm = ConditionModule(t, db=None, day_trade=day_trade, close_on_end=close_on_end)
     if trading:
         await cm.set_trading(True)
     return cm, t, a
@@ -851,7 +856,8 @@ class TestDayTradeFlag:
         monkeypatch.setattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", False)
 
         async def scenario():
-            cm, t, a = await build(trading=False)   # 不碰總開關，看建構子留下什麼
+            # 不碰總開關，兩個旗標都傳 None 才會落到設定那條路
+            cm, t, a = await build(trading=False, day_trade=None, close_on_end=None)
             return cm.settings
 
         s = asyncio.run(scenario())
@@ -866,7 +872,7 @@ class TestDayTradeFlag:
         monkeypatch.setattr(settings, "CONDITION_DEFAULT_CLOSE_ON_END", True)
 
         async def scenario():
-            cm, t, a = await build()
+            cm, t, a = await build(day_trade=None, close_on_end=None)
             return cm.settings
 
         s = asyncio.run(scenario())

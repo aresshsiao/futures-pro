@@ -59,3 +59,4 @@ data/*.db-wal
 config.json
 keys.json
 brokers.yaml
+*.pfx

@@ -1066,7 +1066,7 @@ function TimelineNavigator({ data, visibleCount, setVisibleCount, offset, setOff
 }
 
 // ─── Order Panel (Lightning Order — Price Ladder) ───────────────────
-function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, orderbook, orders, positions, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback, send, addHandler, connected, condDefaults }) {
+function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiveSymbol, symbols, orderbook, orders, positions, placeOrder, cancelOrdersAt, cancelOrdersByKind, feedback, send, addHandler, connected, condDefaults }) {
   const [qty, setQty] = useState(1);
   const [centerOnPrice, setCenterOnPrice] = useState(true); // 成交置中 toggle
   // 分頁：lightning = 價格階梯點價下單；right = 右邊下單（條件單機）
@@ -1180,7 +1180,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
       {isRightMode ? (
         <RightSideOrderPanel
           currentPrice={currentPrice}
-          activeSymbol={activeSymbol} setActiveSymbol={setActiveSymbol}
+          activeSymbol={activeSymbol} setActiveSymbol={setActiveSymbol} symbols={symbols}
           positions={positions} placeOrder={placeOrder} feedback={feedback}
           send={send} addHandler={addHandler} connected={connected}
           condDefaults={condDefaults}
@@ -1193,7 +1193,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
         borderBottom: `1px solid ${COLORS.border}`, flexShrink: 0
       }}>
         <div style={{ display: "flex", gap: 2 }}>
-          {["TX", "MTX", "TMF"].map(s => (
+          {symbols.map(s => (
             <button key={s} onClick={() => setActiveSymbol(s)} style={{
               padding: "3px 8px", fontSize: 10, fontWeight: activeSymbol === s ? 700 : 400,
               background: activeSymbol === s ? "rgba(59,130,246,0.15)" : "transparent",
@@ -1457,6 +1457,10 @@ const STOP_KIND_MARK = { cost_guard: "🔒" };
 // 壓力價／支撐價永遠留白 —— 那是每筆都不同的東西，給預設只會變成「忘了改就送出去」。
 // 數字欄位存字串：這幾格是 <input type="text">，塞數字進去會讓「清空重打」這個
 // 最常見的操作在中途變成 NaN。
+// /api/config 還沒回來之前的墊檔。真正的清單與預設在 settings.yaml 的 trading.*
+const FALLBACK_SYMBOLS = ["TX", "MTX", "TMF"];
+const FALLBACK_SYMBOL = "TX";
+
 // 這裡的值只是 /api/config 還沒回來之前的墊檔，真正的預設在 settings.yaml。
 const COND_DEFAULTS = {
   pullback: "10", qty: "1", tp: "30", sl: "-10", costGuard: false, trail: false,
@@ -1476,7 +1480,7 @@ function toCondDefaults(d) {
   };
 }
 
-function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, positions, placeOrder, feedback, send, addHandler, connected, condDefaults }) {
+function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, symbols, positions, placeOrder, feedback, send, addHandler, connected, condDefaults }) {
   const [tradingOn, setTradingOn] = useState(false);
   const [form, setForm] = useState(() => ({ resistance: "", support: "", ...condDefaults }));
 
@@ -1662,7 +1666,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, posi
             color: tradingOn ? COLORS.success : COLORS.textDim,
           }}>{tradingOn ? "● 啟動中" : "❚❚ 已暫停"}</button>
         <div style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
-          {["TX", "MTX", "TMF"].map(s => (
+          {symbols.map(s => (
             <button key={s} onClick={() => setActiveSymbol(s)} style={{
               padding: "3px 7px", fontSize: 10, fontWeight: activeSymbol === s ? 700 : 400,
               background: activeSymbol === s ? "rgba(59,130,246,0.15)" : "transparent",
@@ -2193,7 +2197,11 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
   useEffect(() => {
     const cleanup = addHandler("broker_config_result", (msg) => {
       setPending(null);
-      setMessage({ text: msg.message, ok: msg.success });
+      // 連線成功但憑證未啟用是第三種狀態，不是單純的成功或失敗：
+      // 報價、查倉位都能用，但送出委託會被券商拒絕——用警示色跟「連線成功」
+      // 的綠色分開，免得使用者以為一切正常，直到真的下單才發現。
+      const warn = msg.success && msg.ca_activated === false;
+      setMessage({ text: msg.message, ok: msg.success, warn });
     });
     return cleanup;
   }, [addHandler]);
@@ -2270,9 +2278,9 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
         {message && (
           <div style={{
             marginBottom: 16, padding: "8px 12px", borderRadius: 6, fontSize: 11,
-            background: message.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-            border: `1px solid ${message.ok ? COLORS.success : COLORS.danger}`,
-            color: message.ok ? COLORS.success : COLORS.danger,
+            background: message.warn ? "rgba(245,158,11,0.1)" : message.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+            border: `1px solid ${message.warn ? COLORS.warn : message.ok ? COLORS.success : COLORS.danger}`,
+            color: message.warn ? COLORS.warn : message.ok ? COLORS.success : COLORS.danger,
           }}>{message.text}</div>
         )}
 
@@ -3171,8 +3179,11 @@ export default function TradingPlatform() {
   const [authed, setAuthed] = useState(!!getToken());
   const [page, setPage] = useState("trading");
   const [klineData, setKlineData] = useState([]);
-  const [chartSymbol, setChartSymbol] = useState("TX");
-  const [orderSymbol, setOrderSymbol] = useState("TX");
+  // 可切換的商品與預設商品都來自 settings.yaml 的 trading.*（經 /api/config）。
+  // 這裡先用墊檔值開場，設定回來再換 —— 見下面 applyDefaultSymbol 的說明。
+  const [symbols, setSymbols] = useState(FALLBACK_SYMBOLS);
+  const [chartSymbol, setChartSymbol] = useState(FALLBACK_SYMBOL);
+  const [orderSymbol, setOrderSymbol] = useState(FALLBACK_SYMBOL);
   const [latestPrices, setLatestPrices] = useState({});
   const [orderbooks, setOrderbooks] = useState({});
   const [scripts, setScripts] = useState([]);
@@ -3183,7 +3194,9 @@ export default function TradingPlatform() {
   const [showTQuote, setShowTQuote] = useState(true);
   const [brokerConfig, setBrokerConfig] = useState({
     quote: { name: "未連線", connected: false },
-    trade: { name: "未連線", connected: false }
+    // caActivated 預設 true（不阻擋顯示）：未連線時没有「憑證沒啟用」這件事可言，
+    // 真正的狀態在 broker_status / broker_config_result 回來後才知道
+    trade: { name: "未連線", connected: false, caActivated: true }
   });
   // 各 Script 即時運算結果（由後端 ScriptEngine 算完透過 ws "indicator_output" 廣播），用 name 當 key
   const [indicatorOutputs, setIndicatorOutputs] = useState({});
@@ -3223,6 +3236,18 @@ export default function TradingPlatform() {
       .catch(() => { });
   }, []);
 
+  // 設定裡的預設商品只在「使用者還沒自己切過」時套用，而且只套一次。
+  // /api/config 是先送出的 HTTP 請求、WebSocket 稍後才接上，所以正常情況下
+  // 這件事會發生在第一次抓歷史／訂閱之前，不會多打一輪；真的慢了也不要緊，
+  // 換過商品就以使用者選的為準 —— 設定檔搶走使用者剛切的商品才是災難。
+  const defaultSymbolApplied = useRef(false);
+  const applyDefaultSymbol = useCallback((symbol) => {
+    if (!symbol || defaultSymbolApplied.current) return;
+    defaultSymbolApplied.current = true;
+    setChartSymbol(s => (s === FALLBACK_SYMBOL ? symbol : s));
+    setOrderSymbol(s => (s === FALLBACK_SYMBOL ? symbol : s));
+  }, []);
+
   useEffect(() => {
     fetch("/api/config", { headers: authHeaders() })
       .then(r => { if (r.status === 401) { logout(); return null; } return r.json(); })
@@ -3233,6 +3258,8 @@ export default function TradingPlatform() {
         if (cfg.tick_size_default) TICK.fallback = cfg.tick_size_default;
         if (cfg.display_name) PRODUCT_NAME.table = cfg.display_name;
         if (cfg.condition_defaults) setCondDefaults(toCondDefaults(cfg.condition_defaults));
+        if (Array.isArray(cfg.symbols) && cfg.symbols.length) setSymbols(cfg.symbols);
+        applyDefaultSymbol(cfg.default_symbol);
       })
       .catch(() => { });
   }, []);
@@ -3310,7 +3337,10 @@ export default function TradingPlatform() {
     const handle1 = addHandler("broker_status", (msg) => {
       setBrokerConfig({
         quote: { name: msg.quote?.name || "未連線", connected: msg.quote?.connected || false },
-        trade: { name: msg.trade?.name || "未連線", connected: msg.trade?.connected || false },
+        trade: {
+          name: msg.trade?.name || "未連線", connected: msg.trade?.connected || false,
+          caActivated: msg.trade?.ca_activated !== false,
+        },
       });
       // 確認後端尚未連線才自動連線（避免多個 tab 重複觸發 connect 砍掉現有連線）
       if (!msg.quote?.connected && !msg.trade?.connected) {
@@ -3324,7 +3354,10 @@ export default function TradingPlatform() {
       if (msg.kind === "quote" || msg.kind === "trade") {
         setBrokerConfig(prev => ({
           ...prev,
-          [msg.kind]: { name: msg.name, connected: msg.connected }
+          [msg.kind]: {
+            name: msg.name, connected: msg.connected,
+            ...(msg.kind === "trade" ? { caActivated: msg.ca_activated !== false } : {}),
+          }
         }));
       }
     });
@@ -3795,6 +3828,19 @@ export default function TradingPlatform() {
             <span style={{ color: COLORS.textDim }}>交易:</span>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: brokerConfig.trade.connected ? COLORS.success : COLORS.danger }} title={brokerConfig.trade.connected ? "已連線" : "未連線"} />
             <span style={{ color: brokerConfig.trade.connected ? COLORS.text : COLORS.warn, fontWeight: 600 }}>{brokerConfig.trade.name}</span>
+            {/* 憑證沒啟用是最容易被忽略的狀態：報價、查倉位都正常，只有送出
+                委託才會被拒絕。彈窗關掉之後這個提示還要留在畫面上，不然使用者
+                只會在真的下單失敗的那一刻才想起來查是不是憑證的問題。 */}
+            {brokerConfig.trade.connected && brokerConfig.trade.caActivated === false && (
+              <span
+                onClick={() => setShowBrokerConfig(true)}
+                title="憑證未啟用：報價與查倉位正常，送出委託會被券商拒絕，點此查看券商設定"
+                style={{
+                  color: COLORS.warn, fontWeight: 700, cursor: "pointer",
+                  padding: "0 5px", borderRadius: 3, border: `1px solid ${COLORS.warn}`,
+                }}
+              >⚠ 憑證未啟用</span>
+            )}
           </div>
           <button onClick={() => setShowBrokerConfig(true)} style={{
             padding: "4px 12px", background: "rgba(59,130,246,0.1)", border: `1px solid ${COLORS.accentDim}`,
@@ -3890,9 +3936,7 @@ export default function TradingPlatform() {
                   background: COLORS.bgCard, border: `1px solid ${COLORS.border}`, borderRadius: 4,
                   color: COLORS.text, fontSize: 14, fontWeight: 700, padding: "2px 4px", outline: "none", cursor: "pointer"
                 }}>
-                  <option value="TX">TX</option>
-                  <option value="MTX">MTX</option>
-                  <option value="TMF">TMF</option>
+                  {symbols.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
                 <span style={{ color: COLORS.text, fontWeight: 700, fontFamily: "monospace", fontSize: 16 }}>
                   {latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? "--"}
@@ -3988,6 +4032,7 @@ export default function TradingPlatform() {
                 currentPrice={latestPrices[orderSymbol] ?? 17535}
                 orderbook={orderbooks[orderSymbol]}
                 activeSymbol={orderSymbol} setActiveSymbol={setOrderSymbol}
+                symbols={symbols}
                 orders={orders}
                 positions={positions}
                 placeOrder={placeOrder}

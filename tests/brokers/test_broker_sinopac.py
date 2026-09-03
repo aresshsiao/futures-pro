@@ -20,6 +20,7 @@ tests/brokers/test_broker_sinopac.py — 永豐金 Adapter 測試
 """
 import asyncio
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,10 +53,22 @@ def reset_shared_api():
     sinopac._SHARED_API = None
     sinopac._SHARED_CONNECTED = False
     sinopac._SHARED_SIMULATION = False
+    sinopac._SHARED_CA_OK = False
     yield
     sinopac._SHARED_API = None
     sinopac._SHARED_CONNECTED = False
     sinopac._SHARED_SIMULATION = False
+    sinopac._SHARED_CA_OK = False
+
+
+@pytest.fixture
+def cert_file(tmp_path):
+    """一份真實存在的假憑證檔——憑證啟用前會先檢查檔案存不存在，
+    用 "/path/cert.pfx" 這種假路徑的舊測試在加了這條檢查後就會被擋在
+    activate_ca 之前，所以測試要給一個真的能通過 is_file() 的路徑。"""
+    p = tmp_path / "cert.pfx"
+    p.write_bytes(b"fake cert")
+    return str(p)
 
 
 def _make_mock_shioaji():
@@ -160,22 +173,106 @@ class TestSimulationMode:
         sj_mod.Shioaji.assert_called_once_with(simulation=True)
         assert adapter.is_simulation is True
 
-    def test_simulation_skips_activate_ca(self):
+    def test_simulation_skips_activate_ca(self, cert_file):
         """模擬環境沒有憑證機制，帶了 cert 也要跳過 activate_ca。"""
         adapter = SinoPacTradeAdapter()
         sj_mod, api, _ = _make_mock_shioaji()
         with patch.dict(sys.modules, {"shioaji": sj_mod}):
             run(adapter.connect(
                 api_key="K", secret_key="S", simulation=True,
-                cert_path="/path/cert.pfx", cert_password="pw", person_id="A123456789",
+                cert_path=cert_file, cert_password="pw", person_id="A123456789",
             ))
         api.activate_ca.assert_not_called()
+        assert adapter.is_ca_activated is False
 
-    def test_production_with_cert_calls_activate_ca(self):
+    def test_production_with_cert_calls_activate_ca(self, cert_file):
         adapter, api, _, _ = _connected_trade(
-            cert_path="/path/cert.pfx", cert_password="pw", person_id="A123456789",
+            cert_path=cert_file, cert_password="pw", person_id="A123456789",
         )
-        api.activate_ca.assert_called_once()
+        kwargs = api.activate_ca.call_args.kwargs
+        assert Path(kwargs["ca_path"]) == Path(cert_file)
+        assert kwargs["ca_passwd"] == "pw"
+        assert kwargs["person_id"] == "A123456789"
+        assert adapter.is_ca_activated is True
+
+    def test_production_without_cert_does_not_call_activate_ca(self):
+        """沒設定憑證是最危險的靜默失敗：登入成功、報價正常，直到真的送出
+        第一張單才被券商拒絕。所以缺 cert_path 時不該去呼叫 activate_ca，
+        is_ca_activated 要如實反映「還沒啟用」。"""
+        adapter, api, _, _ = _connected_trade()   # 沒帶任何 cert_* 參數
+        api.activate_ca.assert_not_called()
+        assert adapter.is_ca_activated is False
+
+    def test_missing_cert_file_does_not_call_activate_ca(self, tmp_path):
+        """cert_path 指到一個不存在的檔案，一樣要在啟用前擋下來，
+        不能把找不到的路徑丟給券商 API 才發現。"""
+        adapter, api, _, _ = _connected_trade(
+            cert_path=str(tmp_path / "nope.pfx"), cert_password="pw", person_id="A1",
+        )
+        api.activate_ca.assert_not_called()
+        assert adapter.is_ca_activated is False
+
+    @pytest.mark.parametrize("missing", ["cert_password", "person_id"])
+    def test_incomplete_cert_credentials_does_not_call_activate_ca(self, cert_file, missing):
+        """憑證檔案存在，但密碼或身分證字號沒填，一樣不該送出去 —— 送了也只是
+        用空字串去撞 API，錯誤訊息只會更難懂。"""
+        creds = {"cert_path": cert_file, "cert_password": "pw", "person_id": "A1"}
+        creds[missing] = ""
+        adapter, api, _, _ = _connected_trade(**creds)
+        api.activate_ca.assert_not_called()
+        assert adapter.is_ca_activated is False
+
+    def test_relative_cert_path_resolves_against_project_root(self, tmp_path, monkeypatch):
+        """cert_path 允許寫成相對路徑（例如 config/Sinopac.pfx）。相對路徑的意義
+        取決於行程的工作目錄，所以一定要相對於專案根目錄展開，不能相對於
+        目前不確定是哪裡的 cwd。"""
+        from config import settings
+        cert = tmp_path / "Sinopac.pfx"
+        cert.write_bytes(b"fake cert")
+        monkeypatch.setattr(settings, "BASE_DIR", tmp_path, raising=False)
+
+        adapter, api, _, _ = _connected_trade(
+            cert_path="Sinopac.pfx", cert_password="pw", person_id="A1",
+        )
+        assert Path(api.activate_ca.call_args.kwargs["ca_path"]) == cert
+        assert adapter.is_ca_activated is True
+
+    def test_activate_ca_returning_false_is_reported_as_not_activated(self, cert_file):
+        """密碼錯、憑證過期、person_id 對不上，Shioaji 是回傳 False 不是丟例外——
+        回傳值被忽略的話，這幾種情況會被當成啟用成功。"""
+        adapter = SinoPacTradeAdapter()
+        sj_mod, api, _ = _make_mock_shioaji()
+        api.activate_ca.return_value = False
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(adapter.connect(
+                api_key="K", secret_key="S",
+                cert_path=cert_file, cert_password="wrong", person_id="A1",
+            ))
+        assert adapter.is_ca_activated is False
+
+    def test_activate_ca_exception_does_not_crash_connect(self, cert_file):
+        """activate_ca 擲例外不該讓整個 connect() 炸掉——報價與查詢還是能用，
+        只是不能下單，這個區別要保留給使用者。"""
+        adapter = SinoPacTradeAdapter()
+        sj_mod, api, _ = _make_mock_shioaji()
+        api.activate_ca.side_effect = RuntimeError("憑證格式錯誤")
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            ok = run(adapter.connect(
+                api_key="K", secret_key="S",
+                cert_path=cert_file, cert_password="pw", person_id="A1",
+            ))
+        assert ok is True
+        assert adapter.is_ca_activated is False
+
+    def test_disconnect_clears_ca_activated(self, cert_file):
+        """斷線後憑證狀態要一併清掉，不然畫面會在斷線期間還顯示「上次連線」
+        的啟用結果，讓人誤以為現在也能下單。"""
+        adapter, api, _, _ = _connected_trade(
+            cert_path=cert_file, cert_password="pw", person_id="A1",
+        )
+        assert adapter.is_ca_activated is True
+        run(adapter.disconnect())
+        assert adapter.is_ca_activated is False
 
     def test_switching_mode_rebuilds_instance(self):
         """simulation 是建構子參數，切換模式必須登出重建，不能沿用舊 instance。"""

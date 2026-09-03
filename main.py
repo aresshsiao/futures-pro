@@ -757,6 +757,9 @@ async def handle_broker_status(ws, data: dict):
             "connected": trade.is_connected,
             # 模擬帳號：下單走券商測試主機，不會動到真實資金
             "simulation": trade.is_simulation,
+            # 正式環境沒啟用憑證就送不出委託——報價、查詢、庫存都正常，
+            # 直到真的送單才被券商拒絕，所以前端要能在連線當下就看到這個狀態
+            "ca_activated": trade.is_ca_activated,
         }
     })
 
@@ -809,7 +812,14 @@ async def _connect_broker(broker_id: str, kind: str = "both") -> tuple[bool, str
         ok_trade = await trade.set_adapter(t_adapter, **credentials)
 
     ok = ok_quote and ok_trade
-    return ok, ("連線成功" if ok else "連線失敗，請確認 API Key 是否正確")
+    if not ok:
+        return False, "連線失敗，請確認 API Key 是否正確"
+    if kind in ("trade", "both") and not credentials.get("simulation") and not trade.is_ca_activated:
+        # 連線本身會成功、報價查詢都正常——沒憑證這件事只有送出委託那一刻才會爆出來，
+        # 而那時前端只看得到一句「下單失敗」，完全聯想不到是憑證沒設好。
+        # 連線當下就把話講白，訊息帶回去讓 UI 能顯示成警告而不是「連線成功」。
+        return True, "連線成功，但憑證未啟用 —— 可以看報價/查倉位，送出委託會被券商拒絕，請檢查 config/brokers.yaml"
+    return True, "連線成功"
 
 
 async def startup_core():
@@ -930,6 +940,7 @@ async def handle_broker_config(ws, data: dict):
         "broker_id": broker_id,
         "kind": kind,
         "simulation": trade.is_simulation,
+        "ca_activated": trade.is_ca_activated,
         "message": message,
     })
 
