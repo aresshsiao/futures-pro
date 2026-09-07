@@ -901,6 +901,8 @@ class TestTradeAdapterCallbacks:
             "contract": {"code": "TXFH6"},
         })
         assert orders[0].status is OrderStatus.REJECTED
+        # 券商講的原因要帶上來，前端才顯示得出「為什麼被拒」
+        assert orders[0].reject_reason == "價格超出漲跌停"
 
     def test_status_mapping(self):
         _, handler, orders, _ = self._adapter_with_callbacks()

@@ -1389,11 +1389,13 @@ class SinoPacTradeAdapter(TradeAdapter):
 
         # op_code "00" 才是成功；其餘代表委託/刪改單被券商退回，op_msg 有原因
         op_code = str(operation.get("op_code", "") or "")
+        reject_reason = ""
         if op_code and op_code != "00":
             status = OrderStatus.REJECTED
+            reject_reason = str(operation.get("op_msg", "") or "").strip()
             logger.warning(
                 "[SinoPac Trade] 委託遭拒 %s (%s): %s",
-                broker_id, op_code, operation.get("op_msg", ""),
+                broker_id, op_code, reject_reason,
             )
 
         o = Order(
@@ -1407,6 +1409,9 @@ class SinoPacTradeAdapter(TradeAdapter):
             status=status,
         )
         o.filled_qty = deal_qty
+        # 券商回的原因（保證金不足、超出漲跌停、未簽署…）比一句「委託遭拒」有用太多，
+        # 帶給上層讓前端能顯示成警示訊息
+        o.reject_reason = reject_reason
         logger.info(
             "[SinoPac Trade] 委託回報 %s %s %s x%s 狀態=%s 已成交=%s",
             broker_id or "(無序號)", symbol, o.direction.value, qty, status.value, deal_qty,

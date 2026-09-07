@@ -256,6 +256,10 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
 ```
 - 拿不到委託序號 = 券商沒收下這張單 → `REJECTED`，**不進委託簿**（否則畫面會有一張刪不掉的幽靈單），
   拒絕原因由 adapter 的 `last_error` 帶到前端顯示。
+- **委託失敗一律有警示**：同步拒絕走 `order_result`、券商「先收單再回絕」的非同步拒絕走 `order_update`
+  （`reject_reason` 從券商回報的 `op_msg` 帶上來）、條件單引擎的進出場被拒走 `condition_update` 的
+  `fail_reason`。前端三條路都會跳紅字提示並播一句語音（"委託失敗"），語音不受成交語音開關影響 ——
+  失敗很少見，漏看的代價（尤其出場失敗，部位裸著）比偶爾多念一句大得多。
 - 倉位不能只信本地推算：成交回報漏接時畫面會停在舊數字，使用者反覆按平倉等於反覆送真實市價單。
   因此下單／成交後都會排一次 `refresh_from_broker()`（同一時間只留一個待辦），
   券商端的庫存整份覆蓋本地；UI 的倉位面板也有「⟳ 同步」可手動觸發。

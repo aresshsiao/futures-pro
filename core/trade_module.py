@@ -292,6 +292,10 @@ class TradeModule:
                 order.status = broker_order.status
                 order.filled_qty = broker_order.filled_qty
                 order.avg_fill_price = broker_order.avg_fill_price
+                # 券商「先收單、之後才回絕」時原因在這筆回報裡，沒接過來的話
+                # 前端只會看到單子憑空消失，完全不知道被拒
+                if broker_order.reject_reason:
+                    order.reject_reason = broker_order.reject_reason
                 self.bus.emit_sync("order_update", order)
                 break
 

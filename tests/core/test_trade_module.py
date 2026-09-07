@@ -301,6 +301,30 @@ class TestOrders:
         # 不能進委託簿：券商端沒有這張單，留著只會變成刪不掉的幽靈單
         assert trade.active_orders == []
 
+    def test_async_rejection_carries_reason_to_frontend(self):
+        """券商「先收單、之後 callback 才回絕」：原因在那筆回報裡，要接到本地委託上，
+        不然前端只看到單子從列表消失，不知道被拒、更看不到原因。"""
+        async def scenario():
+            updates = []
+            EventBus().on("order_update", lambda o: updates.append(o))
+            t, a = TradeModule(), FakeAdapter()
+            t.POSITION_SYNC_DELAY = 0
+            await connect(t, a)
+            order = await t.place_order("TX", Direction.BUY, OrderType.MARKET, 1)
+            a.on_order(Order(
+                id="B001", broker_order_id="B001", symbol="TX",
+                direction=Direction.BUY, order_type=OrderType.MARKET,
+                price=0.0, qty=1, status=OrderStatus.REJECTED,
+                reject_reason="保證金不足",
+            ))
+            await asyncio.sleep(0)
+            return order, updates
+
+        order, updates = asyncio.run(scenario())
+        assert order.status is OrderStatus.REJECTED
+        assert order.reject_reason == "保證金不足"
+        assert updates and updates[-1].reject_reason == "保證金不足"
+
     def test_rejected_order_is_not_broadcast_as_placed(self):
         async def scenario():
             EventBus().set_main_loop(asyncio.get_running_loop())

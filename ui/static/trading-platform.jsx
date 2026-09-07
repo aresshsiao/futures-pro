@@ -3478,13 +3478,43 @@ export default function TradingPlatform() {
     feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), ok ? 4000 : 12000);
   }, []);
 
+  // 委託失敗：紅字提示 + 語音。紅字可能在使用者視線外（正在看圖或別的分頁），
+  // 語音確保會被注意到。失敗很少見，不像成交會灌爆語音佇列，這裡直接念。
+  const warnOrderFail = useCallback((text) => {
+    showFeedback(false, text);
+    speak("委託失敗");
+  }, [showFeedback]);
+
   useEffect(() => addHandler("order_result", (msg) => {
-    showFeedback(msg.success !== false, msg.message || (msg.success === false ? "下單失敗" : "委託送出"));
-  }), [addHandler, showFeedback]);
+    if (msg.success === false) warnOrderFail(msg.message || "下單失敗");
+    else showFeedback(true, msg.message || "委託送出");
+  }), [addHandler, showFeedback, warnOrderFail]);
 
   useEffect(() => addHandler("cancel_result", (msg) => {
-    if (!msg.success) showFeedback(false, "刪單失敗");
-  }), [addHandler, showFeedback]);
+    if (!msg.success) warnOrderFail("刪單失敗");
+  }), [addHandler, warnOrderFail]);
+
+  // 券商「先收單、之後才回絕」的非同步拒絕：只走 order_update，不會再送 order_result。
+  // 沒有這段的話單子只會從委託列表靜靜消失，使用者不知道被拒、更看不到原因。
+  useEffect(() => addHandler("order_update", (msg) => {
+    if (msg.status === "rejected") warnOrderFail(msg.reject_reason || "委託遭券商拒絕");
+  }), [addHandler, warnOrderFail]);
+
+  // 條件單（右邊下單）引擎的進場／出場被拒：後端把 fail_reason 帶在 condition_update 裡。
+  // 出場失敗尤其嚴重（部位裸著），一定要跳到使用者面前，不能只靠列表那一列變色。
+  const condFailRef = useRef({});
+  useEffect(() => addHandler("condition_update", (msg) => {
+    const c = msg.data;
+    if (!c || msg.removed) { if (c) delete condFailRef.current[c.id]; return; }
+    const reason = c.fail_reason || "";
+    // 用「狀態＋原因」當指紋：出場重試中連續同因失敗不重複吵，但真的放棄
+    // （status 轉 failed）即使原因相同也要再提醒一次
+    const mark = reason && `${c.status}|${reason}`;
+    if (mark && condFailRef.current[c.id] !== mark) {
+      warnOrderFail(`條件單${c.status === "failed" ? "已放棄" : "（將重試）"}：${reason}`);
+    }
+    condFailRef.current[c.id] = mark;
+  }), [addHandler, warnOrderFail]);
 
   const totalPositionPnl = useMemo(
     () => positions.reduce((s, p) => s + positionPnl(p, latestPrices[p.symbol]), 0),
