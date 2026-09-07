@@ -8,6 +8,9 @@ tests/gateway/test_fills_payload.py — 成交明細送給前端前的損益比�
   1. 對得到券商紀錄就用券商的數字，並且標明不再是推算值。
   2. 對不到就保留本地推算，畫面不能空著。
   3. 新倉不參與比對 —— 同一個價位可能同時有進場與出場成交。
+  4. `pnl` 是點位 × 點值的毛損益，`net_pnl` 才是扣完手續費／交易稅的最終損益，
+     而且只有對到券商結算數字才算得出來 —— 本地推算沒有真正的費用資料，
+     硬扣只會用假數字冒充精確值。
 """
 from datetime import datetime, timedelta
 
@@ -46,12 +49,15 @@ class TestLocalEstimate:
         )
         assert rows[1]["pnl"] == 50 * 200
         assert rows[1]["pnl_estimated"] is True
+        # 本地推算沒有真正的手續費/交易稅資料，net_pnl 不該用假數字冒充
+        assert rows[1]["net_pnl"] is None
 
     def test_open_fill_has_no_pnl(self):
         rows = ledger_rows([fill(Direction.BUY, 18000.0, 1)], [])
         assert rows[0]["oc_type"] == "new"
         assert rows[0]["pnl"] is None
         assert rows[0]["pnl_estimated"] is False
+        assert rows[0]["net_pnl"] is None
 
     def test_row_carries_oc_type_and_closed_qty(self):
         rows = ledger_rows(
@@ -75,6 +81,8 @@ class TestBrokerOverride:
         assert rows[1]["pnl_estimated"] is False
         assert rows[1]["realized_fee"] == 100
         assert rows[1]["realized_tax"] == 20
+        # 最終損益 = 點位換算的毛損益 − 手續費 − 交易稅
+        assert rows[1]["net_pnl"] == 9880.0 - 100 - 20
 
     def test_open_fill_at_same_price_does_not_steal_pnl(self):
         """同價位的進場單若也去比對，出場的損益會被掛到進場那一列上。"""
@@ -98,6 +106,9 @@ class TestBrokerOverride:
         )
         assert rows[1]["pnl"] == 10000.0
         assert rows[2]["pnl"] == 10000.0
+        # 手續費/交易稅按口數比例分攤，兩筆各半也各分一半的費用
+        assert rows[1]["net_pnl"] == 10000.0 - 50 - 10
+        assert rows[2]["net_pnl"] == 10000.0 - 50 - 10
 
     def test_fill_spanning_multiple_records(self):
         """一筆成交平掉兩批部位時，兩筆損益紀錄都要算進來。"""
@@ -110,6 +121,10 @@ class TestBrokerOverride:
         )
         assert rows[2]["pnl"] == 18000.0
         assert rows[2]["pnl_estimated"] is False
+        # 兩筆紀錄的手續費/交易稅都要合計進同一列的 net_pnl
+        assert rows[2]["realized_fee"] == 200
+        assert rows[2]["realized_tax"] == 40
+        assert rows[2]["net_pnl"] == 18000.0 - 200 - 40
 
     def test_other_symbol_record_ignored(self):
         rows = ledger_rows(
@@ -119,6 +134,7 @@ class TestBrokerOverride:
         )
         assert rows[1]["pnl"] == 50 * 200        # 沒對到，維持本地推算
         assert rows[1]["pnl_estimated"] is True
+        assert rows[1]["net_pnl"] is None
 
 
 class TestOvernightCover:
@@ -132,8 +148,12 @@ class TestOvernightCover:
         assert rows[0]["oc_type"] == "cover"
         assert rows[0]["pnl"] == 15000.0
         assert rows[0]["pnl_estimated"] is False
+        # 留倉單的進場成本本地無從算起，但費用/稅金是券商給的真實數字，
+        # net_pnl 一樣算得出來
+        assert rows[0]["net_pnl"] == 15000.0 - 100 - 20
 
     def test_stays_empty_until_broker_settles(self):
         rows = ledger_rows([fill(Direction.SELL, 18050.0, 1)], [], opening={"TX": 1})
         assert rows[0]["oc_type"] == "cover"
         assert rows[0]["pnl"] is None
+        assert rows[0]["net_pnl"] is None

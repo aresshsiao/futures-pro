@@ -2082,8 +2082,14 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
       closedQty: f.closed_qty || 0,
       price: f.price,
       qty: f.qty,
-      // pnl 只有平倉成交才會有值；平留倉單時本地算不出成本，要等券商結算才有數字
+      // pnl 是點位 × 點值的毛損益，只有平倉成交才會有值；平留倉單時本地算不出成本，
+      // 要等券商結算才有數字
       pnl: f.pnl ?? null,
+      // net_pnl 是扣完手續費與交易稅的最終損益，只有對到券商結算數字才算得出來——
+      // 本地推算沒有真正的費用資料，此時仍是 null，畫面要退回顯示毛損益並標星號
+      netPnl: f.net_pnl ?? null,
+      fee: f.realized_fee ?? null,
+      tax: f.realized_tax ?? null,
       // 本地推算的損益還沒經券商結算（不含手續費/交易稅），標示出來免得被當成最終數字
       estimated: !!f.pnl_estimated,
     };
@@ -2110,11 +2116,16 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
     return addHandler("fill", (msg) => setTrades(prev => [toRow(msg), ...prev]));
   }, [addHandler, toRow]);
 
+  // 顯示用損益：結算完就是扣完手續費/交易稅的最終數字，還沒結算就退回毛損益
+  // （在呼叫端各自標記「估計值」，不能讓兩種數字混在一起卻看不出差別）。
+  const displayPnl = (t) => t.netPnl ?? t.pnl;
+
   // 今日已實現損益合計。還在等券商結算的那幾筆（pnl 為 null）不算進來，
-  // 數字會偏保守，但不會拿 0 當成「這筆沒賺沒賠」灌進總和裡。
+  // 數字會偏保守，但不會拿 0 當成「這筆沒賺沒賠」灌進總和裡。加總跟每一列
+  // 顯示的數字一致：結算了就用淨損益、沒結算就用毛損益，不能兩邊各算各的。
   const totalPnl = useMemo(() => {
     const closed = trades.filter(t => t.pnl != null);
-    return closed.length ? closed.reduce((s, t) => s + t.pnl, 0) : null;
+    return closed.length ? closed.reduce((s, t) => s + displayPnl(t), 0) : null;
   }, [trades]);
 
   return (
@@ -2150,7 +2161,14 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
                   今日尚無成交
                 </td>
               </tr>
-            ) : trades.map(t => (
+            ) : trades.map(t => {
+              const shown = displayPnl(t);
+              const tip = t.estimated
+                ? "本地推算（未扣手續費與交易稅），券商結算後會更新"
+                : t.netPnl != null
+                  ? `毛損益 ${t.pnl.toLocaleString()} − 手續費 ${t.fee ?? 0} − 交易稅 ${t.tax ?? 0} = 淨損益 ${t.netPnl.toLocaleString()}`
+                  : undefined;
+              return (
               <tr key={t.id} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
                 <td style={{ padding: "4px 6px", textAlign: "left", color: COLORS.textDim, fontFamily: "monospace", fontSize: 9 }}>{t.time}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontWeight: 600 }}>{t.symbol}</td>
@@ -2169,18 +2187,21 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{t.price}</td>
                 <td style={{ padding: "4px 6px", textAlign: "right", color: COLORS.text, fontFamily: "monospace" }}>{t.qty}</td>
                 <td
-                  title={t.estimated ? "本地推算（未扣手續費與交易稅），券商結算後會更新" : undefined}
+                  title={tip}
                   style={{
                     padding: "4px 6px", textAlign: "right", fontFamily: "monospace",
-                    color: t.pnl == null ? COLORS.textDim : t.pnl >= 0 ? COLORS.up : COLORS.down
+                    color: shown == null ? COLORS.textDim : shown >= 0 ? COLORS.up : COLORS.down
                   }}
                 >
-                  {t.pnl == null
+                  {shown == null
                     ? (t.oc === "新倉" ? "-" : "…")
-                    : `${t.pnl >= 0 ? "+" : ""}${t.pnl.toLocaleString()}${t.estimated ? "*" : ""}`}
+                    // 還沒結算（netPnl 為 null）顯示的是未扣費用的毛損益，用星號跟
+                    // 已結算的淨損益分開，別讓使用者以為兩種數字是同一件事
+                    : `${shown >= 0 ? "+" : ""}${shown.toLocaleString()}${t.netPnl == null && t.estimated ? "*" : ""}`}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

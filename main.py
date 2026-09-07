@@ -480,6 +480,11 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
     可分攤的損益紀錄，依口數佔比分攤 pnl/fee/tax。
 
     fills 需照時間排序（舊→新）：分攤是先到先得，順序反了會把損益配到錯的那一筆。
+
+    `pnl` 維持「點位 × 點值」的毛損益（歷史上一路的意義都是這樣，FillLedger 也是這樣
+    記的），`net_pnl` 才是扣完手續費與交易稅的最終損益。net_pnl 只在對到券商結算數字
+    後才算得出來——本地推算階段沒有真正的手續費/交易稅資料（成交回報的 fee 恆為 0，
+    見 sinopac.py），硬要扣的話只會用假數字冒充精確值，比留白更誤導人。
     """
     remaining = [dict(r, remaining_qty=r["quantity"]) for r in pnl_records]
     rows = []
@@ -498,6 +503,7 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
             "pnl_estimated": f.pnl is not None,   # True = 本地推算，尚未經券商結算
             "realized_fee": None,
             "realized_tax": None,
+            "net_pnl": None,   # 扣完手續費與交易稅的最終損益，見上方說明
         }
         # 判定得出是新倉的就不必比對：同一個價位可能既有進場也有出場成交，
         # 拿新倉去比會把出場的損益掛到進場那一列上。
@@ -526,6 +532,7 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
             unmatched -= take
         if matched:
             row["pnl_estimated"] = False
+            row["net_pnl"] = round(row["pnl"] - row["realized_fee"] - row["realized_tax"], 2)
         rows.append(row)
     return rows
 
@@ -625,18 +632,23 @@ async def handle_set_condition_options(ws, data: dict):
 # ── 帳務 / 券商端查詢 ─────────────────────────────────
 
 async def handle_get_account(ws, data: dict):
-    """前端: 查詢帳戶總覽（保證金、餘額、帳戶清單）
+    """前端: 查詢帳戶總覽（保證金、帳戶清單）
 
     模擬環境一樣查得到，是確認模擬單有沒有真的成交最直接的地方。
     """
     # 券商回來的保證金/餘額物件裡可能夾帶 SDK 自訂型別（shioaji 的 FetchStatus
     # 就不是 Enum，json.dumps 認不得），送出去前一律轉成 JSON 安全的值
+    #
+    # 不查 get_account_balance()：那支查的是「證券交割戶」餘額（見該方法
+    # docstring），不是期貨保證金，只開期貨/選擇權戶（沒有對應證券戶或未簽署）
+    # 的帳號每次呼叫都會被券商退 406 Account Not Acceptable。前端從來沒有讀過
+    # 這個欄位（只用 margin），保留呼叫等於每次開帳戶總覽都固定噴一次例外洗 log，
+    # 卻沒有任何畫面在用它的結果。
     await ws.send_json(json_safe({
         "type": "account_info",
         "simulation": trade.is_simulation,
         "connected": trade.is_connected,
         "margin": await trade.get_margin(),
-        "balance": await trade.get_account_balance(),
         "accounts": await trade.list_accounts(),
     }))
 

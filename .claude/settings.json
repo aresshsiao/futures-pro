@@ -7,7 +7,9 @@
       "Bash(python -c ':*)",
       "Bash(ls data/*.zip)",
       "Bash(python -c \"import shioaji; print\\(shioaji.__file__\\); print\\(shioaji.__version__ if hasattr\\(shioaji,'__version__'\\) else '?'\\)\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "WebFetch(domain:sinotrade.github.io)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
     ]
   }
 }

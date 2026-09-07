@@ -1845,6 +1845,12 @@ class SinoPacTradeAdapter(TradeAdapter):
             logger.exception("[SinoPac Trade] 查詢已實現損益失敗 %s~%s", begin, end)
             return []
 
+        # 成交明細的損益要靠這批紀錄才能從「本地估計」變成「券商結算的最終數字」
+        # （見 main._merge_fills_with_pnl）。回傳空清單不會拋例外，之前完全沒留
+        # log，沒辦法分辨是「真的還沒結算」還是「查詢邏輯本身有問題」。
+        if not records:
+            logger.info("[SinoPac Trade] 查詢已實現損益 %s~%s：0 筆（可能是盤中還沒結算，收盤後再查）", begin, end)
+
         result = []
         for r in records or []:
             code = str(getattr(r, "code", "") or "")
@@ -1861,6 +1867,8 @@ class SinoPacTradeAdapter(TradeAdapter):
                 "fee": getattr(r, "fee", 0) or 0,
                 "tax": getattr(r, "tax", 0) or 0,
             })
+        if result:
+            logger.info("[SinoPac Trade] 查詢已實現損益 %s~%s：%d 筆", begin, end, len(result))
         return result
 
     async def get_profit_loss_today(self) -> list[dict]:

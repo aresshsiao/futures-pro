@@ -116,10 +116,10 @@ trading:
   point_value:
     TX: 200
     MTX: 50
-    TMF: 10      # 微型台指
+    TMF: 10
     TE: 4000
     TF: 1000
-    TXO: 50      # 台指選擇權
+    TXO: 50
   point_value_default: 200
   # 每口手續費（回測用；實單的費用以券商回報為準）
   commission_per_lot:
