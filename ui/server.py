@@ -175,6 +175,9 @@ def setup_event_bridge():
             "price": tick.price,
             "volume": tick.volume,
             "timestamp": tick.timestamp.isoformat(),
+            # 相對前一交易日結算價的漲跌，前端拿來顯示「當日漲跌」
+            "change": tick.change,
+            "change_pct": tick.change_pct,
         })
 
     async def forward_bar(bar: Bar):

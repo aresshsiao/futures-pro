@@ -94,8 +94,8 @@ class Tick:
     timestamp: datetime
     buy_price: float = 0.0   # 最佳買價
     sell_price: float = 0.0  # 最佳賣價
-    change: float = 0.0      # 漲跌金額（指數用）
-    change_pct: float = 0.0  # 漲跌幅 %（指數用）
+    change: float = 0.0      # 相對前一交易日結算價的漲跌點數（券商 price_chg）
+    change_pct: float = 0.0  # 相對前一交易日結算價的漲跌幅 %（券商 pct_chg）
 
 
 @dataclass

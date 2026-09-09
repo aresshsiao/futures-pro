@@ -1,5 +1,5 @@
 __meta__ = {
-    "name": "Price_Ticker",
+    "name": "Price Ticker",
     "description": "每 10 秒報價（語音播報目前價位）",
     "type": "indicator",
     "enabled": True,

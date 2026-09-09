@@ -1,5 +1,5 @@
 __meta__ = {
-    "name": "Support & Pressure Line",
+    "name": "S&P Line",
     "description": "支撐/壓力水平線",
     "type": "indicator",
     "enabled": True,

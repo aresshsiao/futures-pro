@@ -3206,6 +3206,10 @@ export default function TradingPlatform() {
   const [chartSymbol, setChartSymbol] = useState(FALLBACK_SYMBOL);
   const [orderSymbol, setOrderSymbol] = useState(FALLBACK_SYMBOL);
   const [latestPrices, setLatestPrices] = useState({});
+  // 各商品的參考價（前一交易日結算價）。券商 tick 的 price_chg 已經是「相對結算價的
+  // 漲跌」，這裡回推 ref = 現價 − 漲跌，之後畫面就能一律用「現價 − ref」算當日漲跌，
+  // 不管價格是從 tick 還是 K 棒更新來的都對得起來。
+  const [refPrices, setRefPrices] = useState({});
   const [orderbooks, setOrderbooks] = useState({});
   const [scripts, setScripts] = useState([]);
   const wsUrl = authed ? `ws://${window.location.host}/ws?token=${getToken()}` : null;
@@ -3621,12 +3625,36 @@ export default function TradingPlatform() {
     send("get_history", { symbol: orderSymbol, timeframe: "1", count: 1 });
   }, [connected, orderSymbol, chartSymbol]);
 
+  // 只為了拿「前一交易日收盤」當漲跌參考價的墊檔（見 history_bars handler）。
+  // purpose:"ref" 讓回應不會被當成要畫上圖的主資料 —— 否則這份 count=2 的日K
+  // 會把 klineData 整個換成 2 根，技術線圖就縮成一小條。
+  useEffect(() => {
+    if (!connected) return;
+    send("get_history", { symbol: chartSymbol, timeframe: "日", count: 2, purpose: "ref" });
+  }, [connected, chartSymbol]);
+
   // 後端回傳歷史資料
   useEffect(() => {
     return addHandler("history_bars", (msg) => {
+      // 漲跌參考價專用的請求（purpose:"ref"）：只取前一根日K收盤當墊檔，
+      // 絕對不能碰 klineData / rawM1 / 訂閱，否則圖表會被這份 count=2 換掉。
+      if (msg.purpose === "ref") {
+        if (msg.timeframe === "日" && msg.bars && msg.bars.length >= 2) {
+          const prevClose = msg.bars[msg.bars.length - 2].close;
+          setRefPrices(prev => (prev[msg.symbol] != null ? prev : { ...prev, [msg.symbol]: prevClose }));
+        }
+        return;
+      }
+
       if (msg.bars && msg.bars.length > 0) {
         const lastClose = msg.bars[msg.bars.length - 1].close;
         setLatestPrices(prev => ({ ...prev, [msg.symbol]: lastClose }));
+
+        // 日K時圖表本身會請求日K，順便也拿來墊參考價（tick 一到就用券商正式數字蓋掉）
+        if (msg.timeframe === "日" && msg.bars.length >= 2) {
+          const prevClose = msg.bars[msg.bars.length - 2].close;
+          setRefPrices(prev => (prev[msg.symbol] != null ? prev : { ...prev, [msg.symbol]: prevClose }));
+        }
 
         if (msg.symbol === chartSymbol) {
           if (["日", "周", "月"].includes(msg.timeframe)) {
@@ -3656,6 +3684,11 @@ export default function TradingPlatform() {
   useEffect(() => {
     return addHandler("tick", (msg) => {
       setLatestPrices(prev => ({ ...prev, [msg.symbol]: msg.price }));
+      // price_chg 是券商算好的「相對前一交易日結算價」的漲跌，回推出結算價當基準。
+      // change 可能真的是 0（平盤），只要 price 有效就更新。
+      if (typeof msg.change === "number" && msg.price > 0) {
+        setRefPrices(prev => ({ ...prev, [msg.symbol]: msg.price - msg.change }));
+      }
     });
   }, [addHandler]);
 
@@ -3992,13 +4025,25 @@ export default function TradingPlatform() {
                 <span style={{ color: COLORS.text, fontWeight: 700, fontFamily: "monospace", fontSize: 16 }}>
                   {latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close ?? "--"}
                 </span>
-                <span style={{
-                  color: klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? COLORS.up : COLORS.down,
-                  fontSize: 11, fontWeight: 600
-                }}>
-                  {klineData[klineData.length - 1]?.close >= klineData[klineData.length - 2]?.close ? "▲" : "▼"}
-                  {Math.abs(klineData[klineData.length - 1]?.close - klineData[klineData.length - 2]?.close).toFixed(0)}
-                </span>
+                {(() => {
+                  // 當日漲跌 = 現價 − 前一交易日結算價（券商 price_chg 回推的 ref）。
+                  // 之前用「最後兩根 K 棒的收盤差」，那是「上一根到現在」不是「今日」。
+                  const shown = latestPrices[chartSymbol] ?? klineData[klineData.length - 1]?.close;
+                  const ref = refPrices[chartSymbol];
+                  if (shown == null || ref == null) return null;
+                  const chg = shown - ref;
+                  const up = chg >= 0;
+                  const color = up ? COLORS.up : COLORS.down;
+                  return (
+                    <span style={{ color, fontSize: 11, fontWeight: 600 }}
+                      title="相對前一交易日結算價">
+                      {up ? "▲" : "▼"}{Math.abs(chg).toFixed(0)}
+                      <span style={{ marginLeft: 4 }}>
+                        {ref ? (Math.abs(chg / ref) * 100).toFixed(2) : "0.00"}%
+                      </span>
+                    </span>
+                  );
+                })()}
               </div>
             </div>
 

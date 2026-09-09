@@ -198,6 +198,7 @@ async def handle_get_history(ws, data: dict):
     symbol    = data["symbol"]
     timeframe = data.get("timeframe", "1")  # "1","3","15","60","日","周","月"
     count     = data.get("count", 300)
+    purpose   = data.get("purpose", "")     # 原樣帶回，前端用來分辨這份是不是要畫上圖的主資料
 
     # 換到一個本次程式啟動期間還沒補過歷史的商品（例如從 TX 切到 MTX）時，
     # 要先補齊 DB，才能做下面的「DB 資料夠不夠」判斷——否則 DB 裡舊資料只要
@@ -250,6 +251,7 @@ async def handle_get_history(ws, data: dict):
         "symbol": symbol,
         "timeframe": timeframe,
         "bars": bars_out,
+        "purpose": purpose,
     })
 
     if len(bars_out) >= 5:

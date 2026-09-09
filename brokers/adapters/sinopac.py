@@ -437,6 +437,10 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                     timestamp=tick.datetime,   # 已是 datetime 物件
                     buy_price=float(tick.close),
                     sell_price=float(tick.close),
+                    # price_chg / pct_chg 是券商算好的「相對前一交易日結算價」的漲跌，
+                    # 前端拿來顯示當日漲跌（跟加權指數 tick 同一套欄位）
+                    change=float(getattr(tick, "price_chg", 0.0) or 0.0),
+                    change_pct=float(getattr(tick, "pct_chg", 0.0) or 0.0),
                 )
                 cb(t)
 
