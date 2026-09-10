@@ -3200,8 +3200,9 @@ export default function TradingPlatform() {
   const [authed, setAuthed] = useState(!!getToken());
   const [page, setPage] = useState("trading");
   const [klineData, setKlineData] = useState([]);
-  // 可切換的商品與預設商品都來自 settings.yaml 的 trading.*（經 /api/config）。
-  // 這裡先用墊檔值開場，設定回來再換 —— 見下面 applyDefaultSymbol 的說明。
+  // 可切換的商品來自 settings.yaml 的 trading.symbols；技術線圖與下單面板的預設商品
+  // 分別來自 core_service.default_symbol / trading.default_symbol（都經 /api/config）。
+  // 這裡先用墊檔值開場，設定回來再換 —— 見下面 applyDefaultSymbols 的說明。
   const [symbols, setSymbols] = useState(FALLBACK_SYMBOLS);
   const [chartSymbol, setChartSymbol] = useState(FALLBACK_SYMBOL);
   const [orderSymbol, setOrderSymbol] = useState(FALLBACK_SYMBOL);
@@ -3265,12 +3266,14 @@ export default function TradingPlatform() {
   // /api/config 是先送出的 HTTP 請求、WebSocket 稍後才接上，所以正常情況下
   // 這件事會發生在第一次抓歷史／訂閱之前，不會多打一輪；真的慢了也不要緊，
   // 換過商品就以使用者選的為準 —— 設定檔搶走使用者剛切的商品才是災難。
+  // 技術線圖與下單面板各有自己的預設商品（core_service.default_symbol /
+  // trading.default_symbol），可以是不同檔。
   const defaultSymbolApplied = useRef(false);
-  const applyDefaultSymbol = useCallback((symbol) => {
-    if (!symbol || defaultSymbolApplied.current) return;
+  const applyDefaultSymbols = useCallback((chartSym, orderSym) => {
+    if (defaultSymbolApplied.current) return;
     defaultSymbolApplied.current = true;
-    setChartSymbol(s => (s === FALLBACK_SYMBOL ? symbol : s));
-    setOrderSymbol(s => (s === FALLBACK_SYMBOL ? symbol : s));
+    if (chartSym) setChartSymbol(s => (s === FALLBACK_SYMBOL ? chartSym : s));
+    if (orderSym) setOrderSymbol(s => (s === FALLBACK_SYMBOL ? orderSym : s));
   }, []);
 
   useEffect(() => {
@@ -3284,7 +3287,7 @@ export default function TradingPlatform() {
         if (cfg.display_name) PRODUCT_NAME.table = cfg.display_name;
         if (cfg.condition_defaults) setCondDefaults(toCondDefaults(cfg.condition_defaults));
         if (Array.isArray(cfg.symbols) && cfg.symbols.length) setSymbols(cfg.symbols);
-        applyDefaultSymbol(cfg.default_symbol);
+        applyDefaultSymbols(cfg.chart_default_symbol, cfg.order_default_symbol);
       })
       .catch(() => { });
   }, []);

@@ -114,6 +114,9 @@ LOG_ROTATE_AT_HOUR = int(_get("logging.rotate_at_hour"))
 AUTO_CONNECT_BROKER = _get("core_service.auto_connect_broker") or None
 AUTO_CONNECT_KIND = str(_get("core_service.auto_connect_kind"))
 DEFAULT_SUBSCRIBE_SYMBOLS = list(_get("core_service.default_subscribe_symbols"))
+# 技術線圖的預設商品（下單面板的預設另設在 trading.default_symbol）。
+# 「在 trading.symbols 裡」的檢查跟 ORDER_DEFAULT_SYMBOL 一起做，見下方交易區塊。
+CHART_DEFAULT_SYMBOL = str(_get("core_service.default_symbol"))
 
 # ── 條件單（右邊下單）────────────────────────────────
 CONDITION_SESSION_CLOSE_TIMES = list(_get("condition.session_close_times"))
@@ -156,16 +159,21 @@ CONDITION_DEFAULT_CLOSE_ON_END = _cond_default("close_on_end", _strict_bool)
 
 # ── 交易 ─────────────────────────────────────────────
 SYMBOLS = [str(s) for s in _get("trading.symbols")]
-DEFAULT_SYMBOL = str(_get("trading.default_symbol"))
+# 下單面板（閃電下單 / 右邊下單）的預設商品
+ORDER_DEFAULT_SYMBOL = str(_get("trading.default_symbol"))
 if not SYMBOLS:
     raise ConfigError(f"{CONFIG_FILE} 的 `trading.symbols` 不能是空清單")
-if DEFAULT_SYMBOL not in SYMBOLS:
-    # 選不到的預設商品等於沒設 —— 畫面會停在一個空的下拉選單，
-    # 而使用者只會看到「圖表沒資料」，完全猜不到是設定檔的問題
-    raise ConfigError(
-        f"{CONFIG_FILE} 的 `trading.default_symbol` = {DEFAULT_SYMBOL!r} "
-        f"不在 `trading.symbols` {SYMBOLS} 之中"
-    )
+# 選不到的預設商品等於沒設 —— 畫面會停在一個空的下拉選單，而使用者只會看到
+# 「圖表沒資料」，完全猜不到是設定檔的問題。所以兩個預設商品都在載入當下就檢查。
+def _require_selectable(key: str, value: str) -> None:
+    if value not in SYMBOLS:
+        raise ConfigError(
+            f"{CONFIG_FILE} 的 `{key}` = {value!r} 不在 `trading.symbols` {SYMBOLS} 之中"
+        )
+
+
+_require_selectable("core_service.default_symbol", CHART_DEFAULT_SYMBOL)
+_require_selectable("trading.default_symbol", ORDER_DEFAULT_SYMBOL)
 DISPLAY_NAME = {str(k): str(v) for k, v in _mapping("trading.display_name").items()}
 TICK_SIZE, TICK_SIZE_DEFAULT = _table("trading.tick_size", "trading.tick_size_default")
 POINT_VALUE, POINT_VALUE_DEFAULT = _table("trading.point_value", "trading.point_value_default")

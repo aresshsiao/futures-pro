@@ -58,14 +58,19 @@ core_service:
   auto_connect_kind: both
   # 自動連線成功後自動訂閱的商品（Core 只會向券商訂閱一次，多分頁共用）
   default_subscribe_symbols: [TX, TAIEX]
+  # 開啟畫面時「技術線圖」預設看哪一檔。必須是 trading.symbols 裡的其中一個。
+  # 放在 core_service 是因為這關乎「Core 開機盯哪一檔」，最好也列進上面的
+  # default_subscribe_symbols，開圖才有現成資料。下單面板的預設商品另設在 trading。
+  default_symbol: TX
 
 # ── 交易 ─────────────────────────────────────────────
 trading:
   # 畫面上可切換的商品（圖表的下拉選單、下單面板的商品按鈕都讀這張清單）
   symbols: [TX, MTX, TMF]
-  # 開啟畫面時預設看哪一檔。必須是上面 symbols 裡的其中一個，
-  # 否則啟動時直接報錯 —— 選不到的預設商品等於沒設。
-  default_symbol: TX
+  # 開啟畫面時「下單面板」（閃電下單 / 右邊下單）預設選哪一檔。必須是上面 symbols
+  # 裡的其中一個，否則啟動時直接報錯 —— 選不到的預設商品等於沒設。
+  # 技術線圖的預設商品另設在 core_service.default_symbol。
+  default_symbol: TMF
   # 商品中文名。成交語音提示念這個 —— 直接念代碼的話 TTS 會把 TX 拆成兩個字母。
   # 沒列到的商品就念代碼本身。
   display_name:

@@ -425,9 +425,10 @@ async def get_config():
     """提供前端可調整的設定，統一從 config/settings.yaml 讀取。"""
     return {
         "candle_color_scheme": _settings.CANDLE_COLOR_SCHEME,
-        # 畫面上可切換的商品與開啟時預設看哪一檔
+        # 畫面上可切換的商品，以及開啟畫面時技術線圖／下單面板各自預設看哪一檔
         "symbols": _settings.SYMBOLS,
-        "default_symbol": _settings.DEFAULT_SYMBOL,
+        "chart_default_symbol": _settings.CHART_DEFAULT_SYMBOL,
+        "order_default_symbol": _settings.ORDER_DEFAULT_SYMBOL,
         # 價格階梯的每一階要用該商品的最小跳動點，前端不該自己寫死 1
         "tick_size": _settings.TICK_SIZE,
         "tick_size_default": _settings.TICK_SIZE_DEFAULT,

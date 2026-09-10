@@ -95,11 +95,13 @@ class TestProductSpecs:
 
 
 class TestTradingSymbols:
-    def test_default_symbol_is_selectable(self):
+    def test_default_symbols_are_selectable(self):
         """選不到的預設商品等於沒設 —— 畫面會停在一個空的下拉選單，
         而使用者只看得到「圖表沒資料」，完全猜不到是設定檔的問題。
-        所以這條在載入當下就檢查，不是等到畫面出不來才發現。"""
-        assert settings.DEFAULT_SYMBOL in settings.SYMBOLS
+        所以這條在載入當下就檢查，不是等到畫面出不來才發現。
+        技術線圖與下單面板各有預設，兩個都要在清單裡。"""
+        assert settings.CHART_DEFAULT_SYMBOL in settings.SYMBOLS
+        assert settings.ORDER_DEFAULT_SYMBOL in settings.SYMBOLS
 
     def test_symbols_is_a_non_empty_list_of_str(self):
         assert settings.SYMBOLS
