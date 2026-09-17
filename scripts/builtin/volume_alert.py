@@ -1,5 +1,5 @@
 __meta__ = {
-    "name": "Volume Alert",
+    "name": "爆大量",
     "description": "成交量爆量水平線",
     "type": "indicator",
     "enabled": True,

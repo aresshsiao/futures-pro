@@ -1,5 +1,5 @@
 __meta__ = {
-    "name": "Window Price",
+    "name": "區間高低",
     "description": "Window最高/最低水平線",
     "type": "indicator",
     "params": {
