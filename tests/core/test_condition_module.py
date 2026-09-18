@@ -623,49 +623,49 @@ class TestExit:
 
 class TestCostGuard:
     def test_arms_when_profit_reaches_stop_loss_distance(self):
-        """浮盈 ≥ 損點 → 停損移到進場價，狀態轉 guarded。"""
+        """浮盈 ≥ 損點 → 停損移到進場價 ± save_value（settings.yaml 設 10），狀態轉 guarded。"""
         async def scenario():
             cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-20,
                               take_profit=50, cost_guard=True)
-            cm._check_conditions(tick("TX", 18009))   # 浮盈 9 < 10，還不夠
+            cm._check_conditions(tick("TX", 18019))   # 浮盈 19 < 20，還不夠
             await settle()
             before = (c.status, c.active_stop_price)
-            cm._check_conditions(tick("TX", 18010))   # 浮盈 10 → 啟動
+            cm._check_conditions(tick("TX", 18020))   # 浮盈 20 → 啟動
             await settle()
             return before, c
 
         (status_before, stop_before), c = asyncio.run(scenario())
         assert status_before is ConditionStatus.FILLED
-        assert stop_before == 17990.0                 # 還是原始停損
+        assert stop_before == 17980.0                 # 還是原始停損
         assert c.status is ConditionStatus.GUARDED
-        assert c.active_stop_price == 18000.0         # 守在進場價
+        assert c.active_stop_price == 18010.0         # 進場價 + save_value(10)
 
     def test_stays_armed_after_price_falls_back(self):
         """保本是棘輪：價格回落不該讓它失效。"""
         async def scenario():
             cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-20,
                               take_profit=50, cost_guard=True)
-            cm._check_conditions(tick("TX", 18010))
+            cm._check_conditions(tick("TX", 18020))
             await settle()
-            cm._check_conditions(tick("TX", 18002))   # 回落但還沒碰到保本價
+            cm._check_conditions(tick("TX", 18012))   # 回落但還沒碰到保本價(18010)
             await settle()
             return c
 
         c = asyncio.run(scenario())
         assert c.status is ConditionStatus.GUARDED
-        assert c.active_stop_price == 18000.0
+        assert c.active_stop_price == 18010.0
 
-    def test_guarded_position_exits_at_entry_price(self):
+    def test_guarded_position_exits_at_cost_guard_price(self):
         async def scenario():
             cm, t, a = await build()
-            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-10,
+            c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-20,
                               take_profit=50, cost_guard=True)
-            cm._check_conditions(tick("TX", 18010))   # 啟動保本
+            cm._check_conditions(tick("TX", 18020))   # 啟動保本
             await settle()
             a.placed.clear()
-            cm._check_conditions(tick("TX", 18000))   # 回到成本 → 出場
+            cm._check_conditions(tick("TX", 18010))   # 回到保本價（進場價+save_value）→ 出場
             await settle()
             return c, a
 

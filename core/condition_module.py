@@ -476,7 +476,7 @@ class ConditionModule:
             c.peak_price = price
 
     def _arm_cost_guard(self, c: Condition) -> bool:
-        """浮盈達門檻就把停損移到進場價（保本），狀態轉 guarded。
+        """浮盈達門檻就把停損移到進場價 ± save_value（保本並留一點利潤），狀態轉 guarded。
 
         用 peak_price（看過的最大浮盈）判斷而不是現價：價格回落不該讓保本失效，
         保本是棘輪，只進不退。回傳是否在這一筆 tick 啟動。
@@ -488,8 +488,8 @@ class ConditionModule:
             return False
         c.status = ConditionStatus.GUARDED
         logger.info(
-            "[ConditionModule] 條件 %s 成本防線啟動: 浮盈 %.1f ≥ %.1f，停損移到進場價 %s",
-            c.id, c.best_profit(), threshold, c.entry_price,
+            "[ConditionModule] 條件 %s 成本防線啟動: 浮盈 %.1f ≥ %.1f，停損移到 %s（進場價 %s）",
+            c.id, c.best_profit(), threshold, c.cost_guard_price, c.entry_price,
         )
         return True
 

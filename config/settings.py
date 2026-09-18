@@ -121,6 +121,9 @@ CHART_DEFAULT_SYMBOL = str(_get("core_service.default_symbol"))
 # ── 條件單（右邊下單）────────────────────────────────
 CONDITION_SESSION_CLOSE_TIMES = list(_get("condition.session_close_times"))
 CONDITION_SESSION_CHECK_SEC = int(_get("condition.session_check_sec"))
+# 成本防線啟動後，停損不是打平在進場價，而是往有利方向多留這麼多點緩衝
+# （多單 entry+save_value／空單 entry-save_value），順帶鎖住一點利潤。
+CONDITION_SAVE_VALUE = int(_get("condition.save_value"))
 
 # 右邊下單面板的新條件預設值。逐欄轉型而不是整包丟出去：YAML 打成字串時
 # 要在載入當下就炸，而不是等使用者按下送出、後端才收到一個 "10" 的返點。

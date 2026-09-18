@@ -349,7 +349,7 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
                                                                   │
                                             浮盈 ≥ |損點| 時插入   ▼
                                                               guarded 已守成本
-                                                          （停損移到進場價，續走出場）
+                                                     （停損移到進場價 ± save_value，續走出場）
 
 支線
   使用者刪除（任何階段） → cancelled

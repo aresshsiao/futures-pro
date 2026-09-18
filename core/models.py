@@ -322,6 +322,18 @@ class Condition:
         )
 
     @property
+    def cost_guard_price(self) -> float:
+        """成本防線啟動後的停損價 —— 進場價 ± save_value，不是單純打平在進場價。
+
+        留這點緩衝（settings.yaml 的 condition.save_value）是為了守住之餘還能
+        鎖一點利潤；多單守在進場價上方、空單守在進場價下方。
+        """
+        if self.status != ConditionStatus.GUARDED or not self.entry_price:
+            return 0.0
+        save = getattr(settings, "CONDITION_SAVE_VALUE", 0)
+        return self.entry_price + save if self.side == Direction.BUY else self.entry_price - save
+
+    @property
     def active_stop_price(self) -> float:
         """實際生效的停損價 —— 固定停損與保本取「最保護」的那一個。
 
@@ -330,9 +342,8 @@ class Condition:
         candidates = []
         if self.stop_loss_price:
             candidates.append(self.stop_loss_price)
-        # 成本防線一旦啟動（狀態進 guarded）就固定守在進場價
-        if self.status == ConditionStatus.GUARDED and self.entry_price:
-            candidates.append(self.entry_price)
+        if self.cost_guard_price:
+            candidates.append(self.cost_guard_price)
         if not candidates:
             return 0.0
         return max(candidates) if self.side == Direction.BUY else min(candidates)
@@ -348,7 +359,7 @@ class Condition:
         stop = self.active_stop_price
         if not stop:
             return ""
-        if self.status == ConditionStatus.GUARDED and stop == self.entry_price:
+        if self.status == ConditionStatus.GUARDED and stop == self.cost_guard_price:
             return "cost_guard"
         return "stop_loss"
 

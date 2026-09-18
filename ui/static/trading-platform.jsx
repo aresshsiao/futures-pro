@@ -1449,7 +1449,7 @@ const COND_LEGEND = ["waiting", "triggered", "sent", "filled", "guarded", "exite
 
 // 生效中的停損是哪一種（成本防線 / 觸後跟隨會把停損價推離原始設定）
 const STOP_KIND_LABEL = {
-  stop_loss: "固定停損", cost_guard: "成本防線（守在進場價）",
+  stop_loss: "固定停損", cost_guard: "成本防線（守在進場價 ± 緩衝）",
 };
 const STOP_KIND_MARK = { cost_guard: "🔒" };
 
@@ -1722,7 +1722,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, symb
             {numField("口數", "qty")}
             {numField("利點", "tp")}
             {numField("損點", "sl")}
-            {switchField("成本", "costGuard", "成本防線：浮盈達損點時把停損移到進場價")}
+            {switchField("成本", "costGuard", "成本防線：浮盈達損點時把停損移到進場價 ± 緩衝點（設定值 save_value）")}
             {switchField("跟隨", "trail", "觸後跟隨：觸發後繼續追極值，進場價跟著「最高/最低 ∓ 返點」走")}
           </div>
           <div style={{ display: "flex", gap: 4 }}>
