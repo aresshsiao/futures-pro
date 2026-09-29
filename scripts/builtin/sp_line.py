@@ -1,10 +1,10 @@
 __meta__ = {
-    "name": "S&P Line",
+    "name": "撐壓線",
     "description": "支撐/壓力水平線",
     "type": "indicator",
     "enabled": True,
     "params": {
-        "lines": [46500, 46200, 45900, 45600, 45300],
+        "lines": [48650, 48350, 48050, 47750, 47450],
     },
 }
 
