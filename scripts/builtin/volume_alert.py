@@ -12,8 +12,8 @@ __meta__ = {
         # 這個欄位不能省成「用 label 猜」：日夜盤的量能差一個數量級，
         # 夜盤那根 1500 口的棒會同時跨過兩條門檻，於是同一根棒念兩次。
         "levels": [
-            {"level": 1500, "label": "日盤大量", "session": "day"},
-            {"level": 400, "label": "夜盤大量", "session": "night"},
+            {"level": 1000, "label": "日盤大量", "session": "day"},
+            {"level": 300, "label": "夜盤大量", "session": "night"},
         ]
     },
 }
