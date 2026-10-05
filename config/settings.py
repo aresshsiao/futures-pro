@@ -183,6 +183,10 @@ POINT_VALUE, POINT_VALUE_DEFAULT = _table("trading.point_value", "trading.point_
 COMMISSION_PER_LOT, COMMISSION_PER_LOT_DEFAULT = _table(
     "trading.commission_per_lot", "trading.commission_per_lot_default",
 )
+# 期交稅稅率（法定稅率，不分券商）：期貨 vs. 選擇權兩種，不是「商品 → 數值」對照表，
+# 不走 _table()。
+TAX_RATE_FUTURES = float(_get("trading.tax_rate_futures"))
+TAX_RATE_OPTION = float(_get("trading.tax_rate_option"))
 
 # ── 回測 ─────────────────────────────────────────────
 BACKTEST_DEFAULT_CAPITAL = float(_get("backtest.default_capital"))

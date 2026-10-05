@@ -484,9 +484,11 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
     fills 需照時間排序（舊→新）：分攤是先到先得，順序反了會把損益配到錯的那一筆。
 
     `pnl` 維持「點位 × 點值」的毛損益（歷史上一路的意義都是這樣，FillLedger 也是這樣
-    記的），`net_pnl` 才是扣完手續費與交易稅的最終損益。net_pnl 只在對到券商結算數字
-    後才算得出來——本地推算階段沒有真正的手續費/交易稅資料（成交回報的 fee 恆為 0，
-    見 sinopac.py），硬要扣的話只會用假數字冒充精確值，比留白更誤導人。
+    記的），`net_pnl` 才是扣完手續費與交易稅的最終損益。手續費/交易稅是法定稅率
+    或 settings.yaml 設定值，成交當下 FillLedger 就能本地估出 net_pnl（見
+    core/fill_ledger.py），不用等券商結算；但帳戶若有折讓費率，估計值會跟真正
+    扣款有落差，所以對到 list_profit_loss 之後一律改用券商結算的權威數字覆蓋。
+    `pnl_estimated` 標記的就是「目前這個數字是不是還沒被券商數字覆蓋」。
     """
     remaining = [dict(r, remaining_qty=r["quantity"]) for r in pnl_records]
     rows = []
@@ -505,7 +507,7 @@ def _merge_fills_with_pnl(fills: list, pnl_records: list[dict]) -> list[dict]:
             "pnl_estimated": f.pnl is not None,   # True = 本地推算，尚未經券商結算
             "realized_fee": None,
             "realized_tax": None,
-            "net_pnl": None,   # 扣完手續費與交易稅的最終損益，見上方說明
+            "net_pnl": f.net_pnl,   # 本地估計值，對到券商數字後會在下面被覆蓋，見上方說明
         }
         # 判定得出是新倉的就不必比對：同一個價位可能既有進場也有出場成交，
         # 拿新倉去比會把出場的損益掛到進場那一列上。

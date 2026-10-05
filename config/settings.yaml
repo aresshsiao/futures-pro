@@ -98,14 +98,22 @@ trading:
     TF: 1000
     TXO: 50
   point_value_default: 200
-  # 每口手續費（回測用；實單的費用以券商回報為準）
+  # 每口手續費。實單成交當下就靠這張表本地估出 net_pnl（見 core/fill_ledger.py），
+  # 券商結算後才會用 list_profit_loss 的實際費率覆蓋——帳戶若有折讓/優惠費率，
+  # 這裡填的只是估計值，以券商回報為準。
   commission_per_lot:
     TX: 64
     MTX: 32
     TMF: 18
     TE: 60
     TF: 60
+    TXO: 30
   commission_per_lot_default: 30
+  # 期交稅稅率 —— 依「期貨交易稅條例」法定稅率，所有券商都一樣，可以直接本地算：
+  #   股價指數期貨：成交金額（價格 × 點值 × 口數）× 十萬分之2
+  #   股價指數選擇權：權利金金額（價格 × 點值 × 口數）× 千分之1
+  tax_rate_futures: 0.00002
+  tax_rate_option: 0.001
 
 # ── 條件單（右邊下單）────────────────────────────────
 condition:

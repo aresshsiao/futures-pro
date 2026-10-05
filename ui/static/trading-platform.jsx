@@ -2085,12 +2085,14 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
       // pnl 是點位 × 點值的毛損益，只有平倉成交才會有值；平留倉單時本地算不出成本，
       // 要等券商結算才有數字
       pnl: f.pnl ?? null,
-      // net_pnl 是扣完手續費與交易稅的最終損益，只有對到券商結算數字才算得出來——
-      // 本地推算沒有真正的費用資料，此時仍是 null，畫面要退回顯示毛損益並標星號
+      // net_pnl 是扣完手續費與交易稅的最終損益。成交當下後端就用法定稅率/
+      // settings.yaml 費率本地估出來了，不用等券商結算；對到 list_profit_loss
+      // 之後才會換成券商權威數字（帳戶若有折讓費率，估計值會跟實際扣款有落差）
       netPnl: f.net_pnl ?? null,
       fee: f.realized_fee ?? null,
       tax: f.realized_tax ?? null,
-      // 本地推算的損益還沒經券商結算（不含手續費/交易稅），標示出來免得被當成最終數字
+      // 這筆損益是不是還沒被券商數字覆蓋——不代表沒扣手續費/交易稅，只是扣的
+      // 是本地估計值，不是券商結算的權威數字
       estimated: !!f.pnl_estimated,
     };
   }, []);
@@ -2163,11 +2165,14 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
               </tr>
             ) : trades.map(t => {
               const shown = displayPnl(t);
-              const tip = t.estimated
-                ? "本地推算（未扣手續費與交易稅），券商結算後會更新"
-                : t.netPnl != null
-                  ? `毛損益 ${t.pnl.toLocaleString()} − 手續費 ${t.fee ?? 0} − 交易稅 ${t.tax ?? 0} = 淨損益 ${t.netPnl.toLocaleString()}`
-                  : undefined;
+              // netPnl 為 null：平的是留倉單，本地算不出進場成本，連估計值都沒有
+              const tip = t.netPnl == null
+                ? undefined
+                : t.estimated
+                  // 手續費/交易稅是法定稅率或 settings.yaml 費率估出來的，不是券商結算的
+                  // 權威數字，兩項合併顯示、不細分，避免看起來比實際上精確
+                  ? `毛損益 ${t.pnl.toLocaleString()} − 手續費+交易稅(估計) ${(t.pnl - t.netPnl).toLocaleString()} = 淨損益(估計) ${t.netPnl.toLocaleString()}，券商結算後會更新`
+                  : `毛損益 ${t.pnl.toLocaleString()} − 手續費 ${t.fee ?? 0} − 交易稅 ${t.tax ?? 0} = 淨損益 ${t.netPnl.toLocaleString()}`;
               return (
               <tr key={t.id} style={{ borderBottom: `1px solid ${COLORS.border}08` }}>
                 <td style={{ padding: "4px 6px", textAlign: "left", color: COLORS.textDim, fontFamily: "monospace", fontSize: 9 }}>{t.time}</td>
@@ -2195,9 +2200,9 @@ function TradeHistoryPanel({ send, addHandler, connected }) {
                 >
                   {shown == null
                     ? (t.oc === "新倉" ? "-" : "…")
-                    // 還沒結算（netPnl 為 null）顯示的是未扣費用的毛損益，用星號跟
-                    // 已結算的淨損益分開，別讓使用者以為兩種數字是同一件事
-                    : `${shown >= 0 ? "+" : ""}${shown.toLocaleString()}${t.netPnl == null && t.estimated ? "*" : ""}`}
+                    // estimated：手續費/交易稅（甚至整個 netPnl）還是本地估計值，不是
+                    // 券商結算的權威數字，用星號跟已結算的數字分開，別讓使用者誤認兩者同義
+                    : `${shown >= 0 ? "+" : ""}${shown.toLocaleString()}${t.estimated ? "*" : ""}`}
                 </td>
               </tr>
               );

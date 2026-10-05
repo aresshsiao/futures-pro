@@ -178,11 +178,16 @@ class Fill:
     fee: float
     timestamp: datetime
     broker_fill_id: str = ""
-    # 以下三欄不是券商給的，是 FillLedger 依成交順序推算出來的（見 core/fill_ledger.py）。
-    # 券商的成交回報只有「買/賣」，看不出這一筆是進場還是出場，更沒有損益。
+    # 以下欄位不是券商給的，是 FillLedger 依成交順序推算出來的（見 core/fill_ledger.py）。
+    # 券商的成交回報只有「買/賣」，看不出這一筆是進場還是出場，更沒有損益/費用。
     oc_type: str = ""       # "" 未判定 / "new" 新倉 / "cover" 平倉 / "cover_new" 平倉反手
     closed_qty: int = 0     # 這筆成交裡平掉的口數（新倉為 0）
-    pnl: Optional[float] = None   # 平倉的已實現損益（未扣手續費）；None = 新倉或成本不明
+    pnl: Optional[float] = None   # 平倉的已實現損益（未扣手續費/交易稅）；None = 新倉或成本不明
+    # fee/tax 會被 FillLedger.apply() 覆蓋成本地估計值（券商回報的 fee 恆為 0，見 sinopac.py）：
+    # 手續費只在平倉那筆收一次（新倉免收），交易稅是進場+出場兩筆合計後無條件進位的整元數，
+    # 兩者在「new」那筆都是 0，數字都掛在平倉那筆成交上，不能拆開看單筆成交本身的稅費。
+    tax: float = 0.0
+    net_pnl: Optional[float] = None  # 平倉損益扣完手續費與交易稅（本地估計）；None = 新倉或成本不明
 
 
 @dataclass
@@ -407,17 +412,21 @@ class Condition:
 # backtest/engine 各存一份，三份還互有出入（小台手續費、微型台指每點價值）。
 
 # 選擇權成交明細保留完整合約代碼（如 "TX148500J6"）方便看出履約價，不像期貨
-# 存根代碼 "TX"，所以不會直接命中 POINT_VALUE 表。開頭對到這些週選/月選代碼
-# 前綴（見 brokers/adapters/sinopac.py 的 _PROD_SORT_SUFFIX）就當 TXO 選擇權算，
-# 不然會掉進期貨的預設乘數，賠賺算出來變成 4 倍（200 / 50）。
+# 存根代碼 "TX"，所以不會直接命中「商品 → 數值」這幾張表。開頭對到這些週選/
+# 月選代碼前綴（見 brokers/adapters/sinopac.py 的 _PROD_SORT_SUFFIX）就當 TXO
+# 選擇權算，不然會掉進期貨的預設值（例如點值算成 4 倍：200 / 50）。
 _TXO_CODE_PREFIXES = ("TXO", "TX1", "TX2", "TX4", "TX5", "TXU", "TXV", "TXX", "TXY", "TXZ")
+
+
+def _is_option_symbol(symbol: str) -> bool:
+    return symbol.startswith(_TXO_CODE_PREFIXES)
 
 
 def point_value(symbol: str) -> float:
     """每點價值。倉位的浮動損益與成交明細的已實現損益共用同一份對照表。"""
     if symbol in settings.POINT_VALUE:
         return settings.POINT_VALUE[symbol]
-    if symbol.startswith(_TXO_CODE_PREFIXES):
+    if _is_option_symbol(symbol):
         return settings.POINT_VALUE.get("TXO", settings.POINT_VALUE_DEFAULT)
     return settings.POINT_VALUE_DEFAULT
 
@@ -428,8 +437,23 @@ def tick_size(symbol: str) -> float:
 
 
 def commission_per_lot(symbol: str) -> float:
-    """每口手續費。回測用；實單的費用以券商回報為準。"""
-    return settings.COMMISSION_PER_LOT.get(symbol, settings.COMMISSION_PER_LOT_DEFAULT)
+    """每口手續費（估計值，實單以券商回報的 realized_fee 為準，見 main._merge_fills_with_pnl）。"""
+    if symbol in settings.COMMISSION_PER_LOT:
+        return settings.COMMISSION_PER_LOT[symbol]
+    if _is_option_symbol(symbol):
+        return settings.COMMISSION_PER_LOT.get("TXO", settings.COMMISSION_PER_LOT_DEFAULT)
+    return settings.COMMISSION_PER_LOT_DEFAULT
+
+
+def transaction_tax(symbol: str, price: float, qty: int) -> float:
+    """期交稅（估計值，實單以券商回報的 realized_tax 為準）。
+
+    法定稅率、不分券商：股價指數期貨課成交金額十萬分之2，股價指數選擇權課權利金
+    金額千分之1——這裡只按「是不是 TXO 系列」兩種稅率，不分期貨商品，因為這個
+    系統目前交易的期貨（TX/MTX/TMF/TE/TF）全部是股價指數期貨，稅率一樣。
+    """
+    rate = settings.TAX_RATE_OPTION if _is_option_symbol(symbol) else settings.TAX_RATE_FUTURES
+    return round(price * point_value(symbol) * qty * rate, 2)
 
 
 # ═══════════════════════════════════════════════════════════

@@ -1,21 +1,22 @@
 """
 tests/gateway/test_fills_payload.py — 成交明細送給前端前的損益比對
 
-本地推算的損益（FillLedger）馬上就有，但沒扣手續費、也不知道留倉單的進場成本；
-券商的 list_profit_loss 是結算後的權威數字，只是它按「已平倉部位」彙總，
-對不回單筆成交。這裡守住兩者合併時的規矩：
+本地推算的損益（FillLedger）馬上就有，手續費/交易稅也靠法定稅率與
+settings.yaml 費率本地估出 net_pnl，不用等券商結算；但帳戶若有折讓費率，
+估計值會跟實際扣款有落差，所以對到 list_profit_loss 之後一律改用券商結算的
+權威數字。這裡守住兩者合併時的規矩：
 
   1. 對得到券商紀錄就用券商的數字，並且標明不再是推算值。
-  2. 對不到就保留本地推算，畫面不能空著。
+  2. 對不到就保留本地推算（含本地估計的 net_pnl），畫面不能空著。
   3. 新倉不參與比對 —— 同一個價位可能同時有進場與出場成交。
-  4. `pnl` 是點位 × 點值的毛損益，`net_pnl` 才是扣完手續費／交易稅的最終損益，
-     而且只有對到券商結算數字才算得出來 —— 本地推算沒有真正的費用資料，
-     硬扣只會用假數字冒充精確值。
+  4. `pnl` 是點位 × 點值的毛損益，`net_pnl` 才是扣完手續費／交易稅的最終損益；
+     留倉單進場成本本地無從得知時，連 `pnl` 都算不出來，`net_pnl` 自然也是空的。
 """
+import math
 from datetime import datetime, timedelta
 
 from core.fill_ledger import FillLedger
-from core.models import Direction, Fill
+from core.models import Direction, Fill, commission_per_lot, transaction_tax
 
 from main import _merge_fills_with_pnl
 
@@ -26,6 +27,15 @@ BASE = datetime(2026, 8, 12, 9, 0, 0)
 def fill(direction=Direction.BUY, price=18000.0, qty=1, symbol="TX", minute=0):
     return Fill(order_id="B001", symbol=symbol, direction=direction, price=price,
                 qty=qty, fee=0.0, timestamp=BASE + timedelta(minutes=minute))
+
+
+def local_net_pnl(pnl, symbol, entry_price, exit_price, qty):
+    """手續費只在平倉收一次（新倉免收）；交易稅是進場+出場合計後無條件進位到整元
+    （見 core/fill_ledger.py 的 apply()），跟 pnl_record() 那種券商按口數比例分攤
+    費用的算法不是同一回事，兩邊的期待值要分開算。"""
+    fee = commission_per_lot(symbol) * qty
+    tax = math.ceil(transaction_tax(symbol, entry_price, qty) + transaction_tax(symbol, exit_price, qty))
+    return round(pnl - fee - tax, 2)
 
 
 def pnl_record(symbol="TX", cover_price=18050.0, quantity=1, pnl=10000.0, fee=100, tax=20):
@@ -49,8 +59,8 @@ class TestLocalEstimate:
         )
         assert rows[1]["pnl"] == 50 * 200
         assert rows[1]["pnl_estimated"] is True
-        # 本地推算沒有真正的手續費/交易稅資料，net_pnl 不該用假數字冒充
-        assert rows[1]["net_pnl"] is None
+        # net_pnl 不用等券商結算，手續費/交易稅本地就估得出來
+        assert rows[1]["net_pnl"] == local_net_pnl(rows[1]["pnl"], "TX", 18000.0, 18050.0, 1)
 
     def test_open_fill_has_no_pnl(self):
         rows = ledger_rows([fill(Direction.BUY, 18000.0, 1)], [])
@@ -134,7 +144,8 @@ class TestBrokerOverride:
         )
         assert rows[1]["pnl"] == 50 * 200        # 沒對到，維持本地推算
         assert rows[1]["pnl_estimated"] is True
-        assert rows[1]["net_pnl"] is None
+        # 沒對到券商紀錄，net_pnl 維持本地估計值（不是 None）
+        assert rows[1]["net_pnl"] == local_net_pnl(rows[1]["pnl"], "TX", 18000.0, 18050.0, 1)
 
 
 class TestOvernightCover:
