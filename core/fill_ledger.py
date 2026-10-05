@@ -22,9 +22,9 @@ OC_TEXT = {"new": "新倉", "cover": "平倉", "cover_new": "平倉反手"}
 class _Lot:
     """某商品目前的部位：正數=多單，負數=空單。avg=None 代表成本不明。
 
-    tax_avg 是進場那幾口「每口」繳的交易稅（加權平均、未進位的原始金額），平倉時
-    按平掉的口數比例分攤回來，跟這筆平倉自己的稅合計後才一次無條件進位——法定
-    稅額是「這次交易」（進場+出場）合計後才進位到整元，不是兩筆各自捨入再相加。
+    tax_avg 是進場那幾口「每口」繳的交易稅（加權平均、未捨入的原始金額），平倉時
+    按平掉的口數比例分攤回來，跟這筆平倉自己的稅合計後才一次四捨五入——法定
+    稅額是「這次交易」（進場+出場）合計後才捨入到整元，不是兩筆各自捨入再相加。
     跟 avg 一樣，成本不明（留倉單）時是 None，不能拿別筆的稅基冒充。
 
     手續費不进这里算：券商只在平倉收一次（新倉免收），不用像價格、稅額一樣
@@ -122,12 +122,12 @@ class FillLedger:
             side = 1 if lot.qty > 0 else -1
             fill.pnl = round(side * (fill.price - lot.avg) * closed * point_value(fill.symbol), 2)
             # 手續費只在這裡收一次（平掉幾口收幾口的錢）；稅則是進場+出場合計後
-            # 才無條件進位到整元——法定稅額是「這次交易」整筆算的，不是兩筆各自
+            # 才四捨五入到整元——法定稅額是「這次交易」整筆算的，不是兩筆各自
             # 捨入再相加，兩種算法在邊界值上會差 1 元。
             fill.fee = round(commission_per_lot(fill.symbol) * closed, 2)
             entry_tax = (lot.tax_avg or 0.0) * closed
             exit_tax = unit_tax * closed
-            fill.tax = math.ceil(entry_tax + exit_tax)
+            fill.tax = math.floor(entry_tax + exit_tax + 0.5)   # 四捨五入；稅額恆為正數
             fill.net_pnl = round(fill.pnl - fill.fee - fill.tax, 2)
 
         remaining = fill.qty - closed

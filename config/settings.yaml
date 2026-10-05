@@ -102,9 +102,9 @@ trading:
   # 券商結算後才會用 list_profit_loss 的實際費率覆蓋——帳戶若有折讓/優惠費率，
   # 這裡填的只是估計值，以券商回報為準。
   commission_per_lot:
-    TX: 64
-    MTX: 32
-    TMF: 18
+    TX: 90
+    MTX: 60
+    TMF: 30
     TE: 60
     TF: 60
     TXO: 30

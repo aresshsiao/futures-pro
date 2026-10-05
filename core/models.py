@@ -184,7 +184,7 @@ class Fill:
     closed_qty: int = 0     # 這筆成交裡平掉的口數（新倉為 0）
     pnl: Optional[float] = None   # 平倉的已實現損益（未扣手續費/交易稅）；None = 新倉或成本不明
     # fee/tax 會被 FillLedger.apply() 覆蓋成本地估計值（券商回報的 fee 恆為 0，見 sinopac.py）：
-    # 手續費只在平倉那筆收一次（新倉免收），交易稅是進場+出場兩筆合計後無條件進位的整元數，
+    # 手續費只在平倉那筆收一次（新倉免收），交易稅是進場+出場兩筆合計後四捨五入的整元數，
     # 兩者在「new」那筆都是 0，數字都掛在平倉那筆成交上，不能拆開看單筆成交本身的稅費。
     tax: float = 0.0
     net_pnl: Optional[float] = None  # 平倉損益扣完手續費與交易稅（本地估計）；None = 新倉或成本不明

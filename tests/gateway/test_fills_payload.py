@@ -30,11 +30,11 @@ def fill(direction=Direction.BUY, price=18000.0, qty=1, symbol="TX", minute=0):
 
 
 def local_net_pnl(pnl, symbol, entry_price, exit_price, qty):
-    """手續費只在平倉收一次（新倉免收）；交易稅是進場+出場合計後無條件進位到整元
+    """手續費只在平倉收一次（新倉免收）；交易稅是進場+出場合計後四捨五入到整元
     （見 core/fill_ledger.py 的 apply()），跟 pnl_record() 那種券商按口數比例分攤
     費用的算法不是同一回事，兩邊的期待值要分開算。"""
     fee = commission_per_lot(symbol) * qty
-    tax = math.ceil(transaction_tax(symbol, entry_price, qty) + transaction_tax(symbol, exit_price, qty))
+    tax = math.floor(transaction_tax(symbol, entry_price, qty) + transaction_tax(symbol, exit_price, qty) + 0.5)
     return round(pnl - fee - tax, 2)
 
 
