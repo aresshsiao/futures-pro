@@ -405,9 +405,21 @@ class Condition:
 
 # 商品規格一律走 config/settings.yaml —— 這幾張表以前在 settings、models、
 # backtest/engine 各存一份，三份還互有出入（小台手續費、微型台指每點價值）。
+
+# 選擇權成交明細保留完整合約代碼（如 "TX148500J6"）方便看出履約價，不像期貨
+# 存根代碼 "TX"，所以不會直接命中 POINT_VALUE 表。開頭對到這些週選/月選代碼
+# 前綴（見 brokers/adapters/sinopac.py 的 _PROD_SORT_SUFFIX）就當 TXO 選擇權算，
+# 不然會掉進期貨的預設乘數，賠賺算出來變成 4 倍（200 / 50）。
+_TXO_CODE_PREFIXES = ("TXO", "TX1", "TX2", "TX4", "TX5", "TXU", "TXV", "TXX", "TXY", "TXZ")
+
+
 def point_value(symbol: str) -> float:
     """每點價值。倉位的浮動損益與成交明細的已實現損益共用同一份對照表。"""
-    return settings.POINT_VALUE.get(symbol, settings.POINT_VALUE_DEFAULT)
+    if symbol in settings.POINT_VALUE:
+        return settings.POINT_VALUE[symbol]
+    if symbol.startswith(_TXO_CODE_PREFIXES):
+        return settings.POINT_VALUE.get("TXO", settings.POINT_VALUE_DEFAULT)
+    return settings.POINT_VALUE_DEFAULT
 
 
 def tick_size(symbol: str) -> float:
