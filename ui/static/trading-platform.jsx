@@ -1148,7 +1148,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
   };
 
   const ROW_H = 22;
-  const GRID_COLS = "28px 1.1fr 38px 54px 38px 1.1fr 28px";
+  const GRID_COLS = "repeat(7, 1fr)";
   const isRightMode = orderMode === "right";
 
   const modeTab = (id, label) => (
@@ -1248,7 +1248,9 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
           {["觸買", "買進", "委買", "價格", "委賣", "賣出", "觸賣"].map((h, i) => (
             <div key={i} style={{
               fontSize: 9, textAlign: "center", fontWeight: 600, padding: "0 2px",
-              color: (i === 0 || i === 6) ? COLORS.warn : COLORS.textMuted
+              color: (i === 0 || i === 6) ? COLORS.warn : COLORS.textMuted,
+              // 跟下面每一列的直欄分隔線對齊，標題才看得出「這欄到哪裡」
+              borderLeft: i > 0 ? `1px solid ${COLORS.border}50` : "none",
             }}>{h}</div>
           ))}
         </div>
@@ -1271,16 +1273,20 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
             background: bgColor, padding: "0 3px", borderRadius: 2, lineHeight: "16px"
           });
 
+          // 直欄分隔線：每欄跟左邊欄位畫一條線，使用者才看得出按鈕的點擊範圍
+          // 剛好落在哪一欄、哪一列，不會覺得「這個按鈕好像偏掉了」
+          const colLine = `1px solid ${COLORS.border}50`;
+
           return (
             <div key={row.price} style={{
               display: "grid", gridTemplateColumns: GRID_COLS,
               height: ROW_H, alignItems: "center",
-              borderBottom: `1px solid ${COLORS.border}10`,
+              borderBottom: `1px solid ${COLORS.border}50`,
               background: row.isCurrent ? "rgba(250,204,21,0.12)"
                 : isAskZone ? downAlpha(0.04) : isBidZone ? upAlpha(0.04) : "transparent",
             }}>
               {/* 觸買 */}
-              <div style={cellBase}
+              <div className="ladder-cell" style={cellBase}
                 onClick={e => handleCell("stop_buy", row.price, e)}
                 onContextMenu={e => handleCell("stop_buy", row.price, e)}
                 title="左鍵:觸價買 / 右鍵:刪除">
@@ -1288,8 +1294,8 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
               </div>
 
               {/* 買進 */}
-              <div style={{
-                ...cellBase, justifyContent: "flex-end", paddingRight: 4,
+              <div className="ladder-cell" style={{
+                ...cellBase, justifyContent: "flex-end", paddingRight: 4, borderLeft: colLine,
                 background: isBidZone ? `linear-gradient(to right, transparent ${100 - (row.bidQty / maxQty) * 100}%, rgba(239,147,147,0.2) 100%)` : "transparent",
               }}
                 onClick={e => handleCell("buy", row.price, e)}
@@ -1301,7 +1307,8 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
               {/* 委買 */}
               <div style={{
                 textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 600,
-                color: row.bidQty > 0 ? COLORS.text : "transparent"
+                color: row.bidQty > 0 ? COLORS.text : "transparent", borderLeft: colLine, height: "100%",
+                display: "flex", alignItems: "center", justifyContent: "center",
               }}>{row.bidQty > 0 ? row.bidQty : ""}</div>
 
               {/* 價格 */}
@@ -1309,18 +1316,20 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
                 textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 700,
                 color: row.isCurrent ? "#facc15" : COLORS.text,
                 background: row.isCurrent ? "rgba(250,204,21,0.15)" : "transparent",
-                borderRadius: 2, padding: "1px 0"
+                borderLeft: colLine, height: "100%",
+                display: "flex", alignItems: "center", justifyContent: "center",
               }}>{row.price}</div>
 
               {/* 委賣 */}
               <div style={{
                 textAlign: "center", fontSize: 11, fontFamily: "monospace", fontWeight: 600,
-                color: row.askQty > 0 ? COLORS.text : "transparent"
+                color: row.askQty > 0 ? COLORS.text : "transparent", borderLeft: colLine, height: "100%",
+                display: "flex", alignItems: "center", justifyContent: "center",
               }}>{row.askQty > 0 ? row.askQty : ""}</div>
 
               {/* 賣出 */}
-              <div style={{
-                ...cellBase, justifyContent: "flex-start", paddingLeft: 4,
+              <div className="ladder-cell" style={{
+                ...cellBase, justifyContent: "flex-start", paddingLeft: 4, borderLeft: colLine,
                 background: isAskZone ? `linear-gradient(to left, transparent ${100 - (row.askQty / maxQty) * 100}%, rgba(147,176,239,0.2) 100%)` : "transparent",
               }}
                 onClick={e => handleCell("sell", row.price, e)}
@@ -1330,7 +1339,7 @@ function OrderPanel({ brokerConfig, currentPrice = 17535, activeSymbol, setActiv
               </div>
 
               {/* 觸賣 */}
-              <div style={cellBase}
+              <div className="ladder-cell" style={{ ...cellBase, borderLeft: colLine }}
                 onClick={e => handleCell("stop_sell", row.price, e)}
                 onContextMenu={e => handleCell("stop_sell", row.price, e)}
                 title="左鍵:觸價賣 / 右鍵:刪除">

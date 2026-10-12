@@ -9,6 +9,9 @@
     body { background: #0d0d0d; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
     #root { width: 100vw; height: 100vh; }
     #loading { display: flex; align-items: center; justify-content: center; height: 100vh; font-size: 14px; color: #888; }
+    /* 閃電下單價格階梯：hover 時用 outline 框出這一格實際會點到的範圍（買/賣/觸買/觸賣），
+       用 outline 而不是 background，才不會蓋掉原本表示委買委賣量的漸層底色。 */
+    .ladder-cell:hover { outline: 1px solid rgba(96,165,250,0.7); outline-offset: -1px; }
   </style>
 </head>
 <body>
