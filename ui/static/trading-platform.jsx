@@ -2251,6 +2251,16 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
     }
   };
 
+  // 畫面顯示「已連線」不保證底層真的還活著——筆電闔蓋休眠醒來後常常報價/
+  // 下單都死了但狀態燈還是綠的，這時候只按「斷線」再「連線」不一定救得回來
+  // （見後端 _force_reconnect_broker 的說明）。這顆按鈕繞過前端的連線判斷，
+  // 直接請後端把底層券商連線整個丟掉重建。
+  const forceReconnect = (id, kind) => {
+    setPending(`${kind}-${id}`);
+    setMessage(null);
+    send("broker_config", { action: "reconnect", kind, broker_id: id });
+  };
+
   const renderColumn = (kind, label) => {
     return (
       <div style={{ flex: 1 }}>
@@ -2273,19 +2283,37 @@ function BrokerConfigPanel({ brokerConfig, setBrokerConfig, onClose, send, addHa
                 }} />
                 <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 600 }}>{b.name}</span>
               </div>
-              <button
-                onClick={() => toggleConnect(b.id, kind, isConnected ? "connected" : "disconnected")}
-                disabled={isLoading || (pending !== null && pending !== `${kind}-${b.id}`)}
-                style={{
-                  padding: "4px 14px",
-                  border: `1px solid ${isConnected ? COLORS.danger : COLORS.success}`,
-                  background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
-                  color: isConnected ? COLORS.danger : COLORS.success,
-                  opacity: (pending !== null && pending !== `${kind}-${b.id}`) ? 0.4 : 1,
-                }}
-              >
-                {isLoading ? "處理中..." : isConnected ? "斷線" : "連線"}
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {isConnected && (
+                  <button
+                    onClick={() => forceReconnect(b.id, kind)}
+                    disabled={isLoading || (pending !== null && pending !== `${kind}-${b.id}`)}
+                    title="畫面顯示已連線，但報價/下單沒反應時用——把底層連線整個丟掉重建（休眠醒來後常需要這個，單純斷線/連線不一定救得回來）"
+                    style={{
+                      padding: "4px 10px",
+                      border: `1px solid ${COLORS.textMuted}`,
+                      background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
+                      color: COLORS.textMuted,
+                      opacity: (pending !== null && pending !== `${kind}-${b.id}`) ? 0.4 : 1,
+                    }}
+                  >
+                    ⟳ 重新連線
+                  </button>
+                )}
+                <button
+                  onClick={() => toggleConnect(b.id, kind, isConnected ? "connected" : "disconnected")}
+                  disabled={isLoading || (pending !== null && pending !== `${kind}-${b.id}`)}
+                  style={{
+                    padding: "4px 14px",
+                    border: `1px solid ${isConnected ? COLORS.danger : COLORS.success}`,
+                    background: "transparent", borderRadius: 4, cursor: isLoading ? "wait" : "pointer", fontSize: 11,
+                    color: isConnected ? COLORS.danger : COLORS.success,
+                    opacity: (pending !== null && pending !== `${kind}-${b.id}`) ? 0.4 : 1,
+                  }}
+                >
+                  {isLoading ? "處理中..." : isConnected ? "斷線" : "連線"}
+                </button>
+              </div>
             </div>
           );
         })}

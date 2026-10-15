@@ -57,11 +57,11 @@ core_service:
   # 要連哪幾條線：quote（只報價）/ trade（只交易）/ both
   auto_connect_kind: both
   # 自動連線成功後自動訂閱的商品（Core 只會向券商訂閱一次，多分頁共用）
-  default_subscribe_symbols: [TX, TAIEX]
+  default_subscribe_symbols: [MTX, TAIEX]
   # 開啟畫面時「技術線圖」預設看哪一檔。必須是 trading.symbols 裡的其中一個。
   # 放在 core_service 是因為這關乎「Core 開機盯哪一檔」，最好也列進上面的
   # default_subscribe_symbols，開圖才有現成資料。下單面板的預設商品另設在 trading。
-  default_symbol: TX
+  default_symbol: MTX
 
 # ── 交易 ─────────────────────────────────────────────
 trading:

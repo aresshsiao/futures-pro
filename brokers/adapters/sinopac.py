@@ -287,16 +287,24 @@ async def _wait_contracts_ready(security_types=("Future", "Index"), timeout: flo
 
 
 def _logout_shared_api():
+    """登出並**丟棄** Shioaji instance，逼下一次 `_get_shared_api()` 重建全新物件。
+
+    只 `logout()` 不夠：筆電闔蓋休眠一段時間後，底層 session 的 socket 常常已經
+    死掉，但同一個 Python 物件重新 `login()` 不保證救得回來（這也是過去「只有
+    整個重啟 Python 才會恢復正常」的根本原因）。丟棄物件讓下次連線等同於乾淨
+    重啟一次 Shioaji client，不用真的重啟整個行程。
+    """
     global _SHARED_API, _SHARED_CONNECTED, _SHARED_CA_OK
     if _SHARED_API is not None and _SHARED_CONNECTED:
         try:
             _SHARED_API.logout()
         except Exception:
             pass
-        _SHARED_CONNECTED = False
-        # 斷線後憑證狀態一併清掉：不清的話 is_ca_activated() 會在斷線期間
-        # 還顯示「上次連線」的啟用結果，讓人以為現在也能下單
-        _SHARED_CA_OK = False
+    _SHARED_API = None
+    _SHARED_CONNECTED = False
+    # 斷線後憑證狀態一併清掉：不清的話 is_ca_activated() 會在斷線期間
+    # 還顯示「上次連線」的啟用結果，讓人以為現在也能下單
+    _SHARED_CA_OK = False
 
 
 # ── 選擇權理論價 (Black-76) ─────────────────────────────

@@ -838,6 +838,42 @@ async def _connect_broker(broker_id: str, kind: str = "both") -> tuple[bool, str
     return True, "連線成功"
 
 
+async def _force_reconnect_broker(kind: str = "both") -> tuple[bool, str]:
+    """強制重新連線：不是單純斷線再連線，是連同底層券商 session 一起丟棄重建。
+
+    筆電闔蓋休眠一段時間後，`is_connected` 這個旗標仍然是 True，但底層的券商
+    session 可能早就死了——報價不再更新、下單也送不出去，過去只有整個重啟
+    Python 行程才會恢復正常。原因是 `_connect_broker()` 看到「已連線」就直接
+    回傳、不會重新走連線流程（這個 guard 是故意的，見該函式說明，避免自動連線
+    或其他分頁誤觸重連把正常連線踢掉）；这里就是特地繞過那個 guard的入口。
+
+    呼叫端：手動「重新連線」按鈕，以及 `_loop_lag_monitor` 偵測到行程被
+    系統凍結（休眠醒來）時自動觸發。重連後會自動重新訂閱商品、重新對帳
+    倉位/成交明細（見 QuoteModule.set_adapter / TradeModule.set_adapter），
+    呼叫端不用自己再做一次。
+    """
+    broker_id = (
+        (getattr(quote._adapter, "broker_id", None) if kind in ("quote", "both") else None)
+        or (getattr(trade._adapter, "broker_id", None) if kind in ("trade", "both") else None)
+        or getattr(settings, "AUTO_CONNECT_BROKER", None)
+    )
+    if not broker_id:
+        return False, "沒有可重新連線的券商設定"
+
+    logger.warning("[BrokerConfig] 強制重新連線 %s (%s)", broker_id, kind)
+    if kind in ("quote", "both"):
+        await quote.disconnect()
+    if kind in ("trade", "both"):
+        await trade.disconnect()
+
+    ok, message = await _connect_broker(broker_id, kind)
+    if ok and trade.is_connected:
+        # 重連中途可能有條件單被動地跟著部位變化擱置，這裡順手補一次對帳；
+        # reconcile_with_broker 只挑 ORPHANED 的條件處理，重複呼叫是安全的。
+        await conditions.reconcile_with_broker(trade.positions)
+    return ok, message
+
+
 async def startup_core():
     """Core Service 啟動 hook — event loop ready 後自動連線券商並訂閱預設商品。
 
@@ -897,15 +933,19 @@ async def _loop_lag_monitor():
         lag = _time.perf_counter() - started - 1.0
 
         if lag >= PROCESS_SUSPEND_SEC:
-            # 電腦睡醒後：券商的 TCP session 多半已經斷過再重連，
-            # 這段期間的委託／成交回報是收不到的，本地狀態不能再信，直接跟券商重對一次。
+            # 電腦睡醒後：券商的底層 session 多半已經死了，但 is_connected 這個
+            # 旗標還停在「連線中」，單純對帳（refresh_from_broker）是拿同一條
+            # 死掉的連線再查一次，查不到東西只會默默失敗，報價/下單還是不會恢復。
+            # 要整組強制重新連線（見 _force_reconnect_broker）才能真的救回來。
             logger.warning(
-                "[Core] 行程被凍結約 %.0f 秒（系統休眠？）——期間的券商回報已經錯過，重新對帳", lag,
+                "[Core] 行程被凍結約 %.0f 秒（系統休眠？）——期間的券商回報已經錯過，強制重新連線", lag,
             )
             try:
-                await trade.refresh_from_broker()
+                ok, message = await _force_reconnect_broker()
+                if not ok:
+                    logger.warning("[Core] 休眠恢復後的強制重新連線失敗: %s", message)
             except Exception:
-                logger.exception("[Core] 休眠恢復後的對帳失敗")
+                logger.exception("[Core] 休眠恢復後的強制重新連線擲出例外")
         elif lag >= LOOP_LAG_WARN_SEC:
             logger.warning(
                 "[Core] event loop 延遲 %.2fs — 這段期間所有回報與廣播都會被延後", lag
@@ -923,9 +963,14 @@ async def startup_condition_watcher():
 
 async def handle_broker_config(ws, data: dict):
     """前端: 連線或斷線指定券商
-    data.action    = "connect" | "disconnect"
+    data.action    = "connect" | "disconnect" | "reconnect"
     data.broker_id = "sinopac" | ...
     data.kind      = "quote" | "trade" (optional for backward compatibility)
+
+    "reconnect" 是強制重新連線（見 _force_reconnect_broker）：休眠醒來後
+    `is_connected` 可能還顯示 True 但底層連線其實已經死掉，一般的
+    disconnect→connect 兩步驟會被「已連線」guard 擋住，所以另開一個
+    action 繞過去，不是 disconnect 跟 connect 的單純組合。
     """
     action    = data.get("action", "connect")
     broker_id = data.get("broker_id", "")
@@ -936,7 +981,7 @@ async def handle_broker_config(ws, data: dict):
             await quote.disconnect()
         if kind in ("trade", "both"):
             await trade.disconnect()
-            
+
         await ws.send_json({
             "type": "broker_config_result",
             "success": True,
@@ -944,6 +989,20 @@ async def handle_broker_config(ws, data: dict):
             "broker_id": broker_id,
             "kind": kind,
             "message": "已斷線",
+        })
+        return
+
+    if action == "reconnect":
+        ok, message = await _force_reconnect_broker(kind)
+        await ws.send_json({
+            "type": "broker_config_result",
+            "success": ok,
+            "connected": ok,
+            "broker_id": broker_id,
+            "kind": kind,
+            "simulation": trade.is_simulation,
+            "ca_activated": trade.is_ca_activated,
+            "message": message,
         })
         return
 
