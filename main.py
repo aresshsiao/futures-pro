@@ -871,6 +871,14 @@ async def _force_reconnect_broker(kind: str = "both") -> tuple[bool, str]:
         # 重連中途可能有條件單被動地跟著部位變化擱置，這裡順手補一次對帳；
         # reconcile_with_broker 只挑 ORPHANED 的條件處理，重複呼叫是安全的。
         await conditions.reconcile_with_broker(trade.positions)
+    if ok and kind in ("quote", "both"):
+        # _ensure_backfilled 一個商品整個程式執行期間只補一次（見該函式說明），
+        # 平常這樣沒問題，但休眠期間的缺口正好落在「已經補過」之後，不把這個
+        # symbol 從已補清單踢掉的話，K 棒會永遠缺那一段——重連後看起來「已連線」
+        # 但圖表還是斷在睡著的那段時間，這就是使用者看到的「不連續」。
+        for sym in list(quote._subscriptions):
+            _backfilled_symbols.discard(sym)
+            await _ensure_backfilled(sym)
     return ok, message
 
 
@@ -916,7 +924,7 @@ PROCESS_SUSPEND_SEC = 30.0
 
 
 async def _loop_lag_monitor():
-    """量 event loop 的排程延遲。
+    """量 event loop 的排程延遲，順便偵測系統休眠。
 
     委託／成交回報是券商推播進來的（跑在 shioaji 的 callback 執行緒），
     但要送到瀏覽器得先排進 event loop —— loop 被同步工作佔住多久，畫面就晚多久。
@@ -924,21 +932,35 @@ async def _loop_lag_monitor():
     是回報變慢時第一個該看的數字：
       這個數字大 → 卡在我們自己（收棒工作、腳本、廣播）
       這個數字小但回報還是慢 → 看 adapter 記的「推播延遲」，問題在券商端或網路
+
+    休眠偵測一定要看 wall clock（time.time()），不能只看 perf_counter()：
+    系統休眠期間，部分平台的單調時鐘（perf_counter/monotonic，asyncio 內部排程
+    也是靠它）會跟著行程一起凍結、不往前走，醒來後量出來的 lag 可能幾乎是 0，
+    偵測永遠不會觸發，重新連線/補資料的邏輯等於形同虛設。wall clock 是唯一
+    保證跨休眠仍照真實時間走的時鐘（不然你電腦醒來後時間會不準）。
     """
     import time as _time
 
+    last_wall = _time.time()
     while True:
         started = _time.perf_counter()
         await asyncio.sleep(1)
         lag = _time.perf_counter() - started - 1.0
 
-        if lag >= PROCESS_SUSPEND_SEC:
+        now_wall = _time.time()
+        wall_gap = now_wall - last_wall - 1.0
+        last_wall = now_wall
+        # 兩個時鐘取較大值：perf_counter 抓 loop 排程延遲（正常情況下的主訊號），
+        # wall clock 專門補那種「perf_counter 在休眠期間沒動」的平台落差。
+        suspend_lag = max(lag, wall_gap)
+
+        if suspend_lag >= PROCESS_SUSPEND_SEC:
             # 電腦睡醒後：券商的底層 session 多半已經死了，但 is_connected 這個
             # 旗標還停在「連線中」，單純對帳（refresh_from_broker）是拿同一條
             # 死掉的連線再查一次，查不到東西只會默默失敗，報價/下單還是不會恢復。
             # 要整組強制重新連線（見 _force_reconnect_broker）才能真的救回來。
             logger.warning(
-                "[Core] 行程被凍結約 %.0f 秒（系統休眠？）——期間的券商回報已經錯過，強制重新連線", lag,
+                "[Core] 行程被凍結約 %.0f 秒（系統休眠？）——期間的券商回報已經錯過，強制重新連線", suspend_lag,
             )
             try:
                 ok, message = await _force_reconnect_broker()
