@@ -54,11 +54,13 @@ def reset_shared_api():
     sinopac._SHARED_CONNECTED = False
     sinopac._SHARED_SIMULATION = False
     sinopac._SHARED_CA_OK = False
+    sinopac._CALLBACKS_REGISTERED = False
     yield
     sinopac._SHARED_API = None
     sinopac._SHARED_CONNECTED = False
     sinopac._SHARED_SIMULATION = False
     sinopac._SHARED_CA_OK = False
+    sinopac._CALLBACKS_REGISTERED = False
 
 
 @pytest.fixture

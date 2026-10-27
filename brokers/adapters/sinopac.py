@@ -30,6 +30,11 @@ _SHARED_SIMULATION = False
 # 憑證是否已啟用。沒啟用時報價、查詢、庫存全都正常，只有「送出委託」會被
 # 券商擋下來 —— 所以這個狀態一定要留著給上層顯示，不能只寫在 log 裡。
 _SHARED_CA_OK = False
+# 委託/成交回報的 callback 是否已經在目前這個 _SHARED_API instance 上註冊過
+# （見 SinoPacTradeAdapter._setup_callbacks）。同一個 instance 被重複 connect()
+# 的話（例如短時間內觸發好幾次強制重新連線）不能每次都再註冊一次 callback，
+# 不然同一筆券商成交回報會被處理好幾遍——倉位、損益、語音播報的口數全部對不起來。
+_CALLBACKS_REGISTERED = False
 
 # login() 的 contracts_cb 會依 SecurityType（"Index"/"Stock"/"Future"/"Option"）逐一回呼，
 # 對應該分類的 Contracts 下載完成。這是目前這版 shioaji（1.5.x, Rust 重寫版）唯一
@@ -103,6 +108,22 @@ def _get_shared_api(credentials):
         _SHARED_CA_OK = _activate_ca(_SHARED_API, credentials, simulation)
         _SHARED_CONNECTED = True
     return _SHARED_API
+
+
+async def _get_shared_api_async(credentials):
+    """`_get_shared_api()` 的 async 包裝——真正連線/重連時一定要走這個，不能直接呼叫。
+
+    `login()` 是同步阻塞呼叫，實測連同合約下載可以卡住 **整個 asyncio event loop**
+    長達 30 秒以上（這段期間其他商品的 tick、WS 訊息全部停擺）。更糟的是：
+    `main._loop_lag_monitor` 就是靠量這段 event loop 排程延遲來偵測系統休眠的，
+    這段「自己造成」的凍結會被誤判成「又睡眠了」，觸發下一輪強制重新連線，
+    而那一輪又是同樣的阻塞 login()，於是連環觸發——同一筆券商成交回報因此
+    被 `set_order_callback` 重複註冊好幾次、處理好幾遍（見 _setup_callbacks）。
+    `_SHARED_CONNECTED` 已是 True 時 `_get_shared_api()` 會立刻回傳不呼叫
+    `login()`，那種情況進執行緒繞一圈的額外成本可以忽略。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _get_shared_api, credentials)
 
 
 def _resolve_cert_path(raw: str) -> Path:
@@ -294,7 +315,7 @@ def _logout_shared_api():
     整個重啟 Python 才會恢復正常」的根本原因）。丟棄物件讓下次連線等同於乾淨
     重啟一次 Shioaji client，不用真的重啟整個行程。
     """
-    global _SHARED_API, _SHARED_CONNECTED, _SHARED_CA_OK
+    global _SHARED_API, _SHARED_CONNECTED, _SHARED_CA_OK, _CALLBACKS_REGISTERED
     if _SHARED_API is not None and _SHARED_CONNECTED:
         try:
             _SHARED_API.logout()
@@ -305,6 +326,8 @@ def _logout_shared_api():
     # 斷線後憑證狀態一併清掉：不清的話 is_ca_activated() 會在斷線期間
     # 還顯示「上次連線」的啟用結果，讓人以為現在也能下單
     _SHARED_CA_OK = False
+    # instance 都丟了，舊的 callback 註冊自然失效，下次連線要重新註冊一次
+    _CALLBACKS_REGISTERED = False
 
 
 # ── 選擇權理論價 (Black-76) ─────────────────────────────
@@ -423,7 +446,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             import shioaji as sj
 
             self._loop = asyncio.get_running_loop()
-            self._api = _get_shared_api(credentials)
+            self._api = await _get_shared_api_async(credentials)
             await _wait_contracts_ready(("Future", "Index"))
 
             # 全域 tick callback 在 connect 時設定一次，避免每次 subscribe 覆蓋
@@ -1231,7 +1254,7 @@ class SinoPacTradeAdapter(TradeAdapter):
 
     async def connect(self, **credentials) -> bool:
         try:
-            self._api = _get_shared_api(credentials)
+            self._api = await _get_shared_api_async(credentials)
             await _wait_contracts_ready(("Future",))
 
             self._setup_callbacks()
@@ -1323,7 +1346,17 @@ class SinoPacTradeAdapter(TradeAdapter):
           FuturesOrder / StockOrder → 委託狀態變更
           FuturesDeal  / StockDeal  → 成交明細
         （這版 shioaji 沒有 set_deal_callback，之前掛在那上面的成交回報等於沒接上。）
+
+        同一個 `_SHARED_API` instance 只註冊一次（見 `_CALLBACKS_REGISTERED`）：
+        短時間內連續 reconnect（例如休眠偵測誤判連環觸發）會讓好幾個 TradeAdapter
+        都呼叫到這裡，重複 `set_order_callback` 的話，同一筆券商成交回報會被處理
+        好幾遍——倉位、損益、語音播報的口數全部跟著乘倍，而且很難事後排查。
         """
+        global _CALLBACKS_REGISTERED
+        if _CALLBACKS_REGISTERED:
+            logger.info("[SinoPac Trade] callback 已在此連線註冊過，略過重複註冊")
+            return
+
         def on_event(stat, msg):
             state = _enum_str(stat)
             # 回報有沒有進來，是「畫面倉位對不對」的根本前提；沒有這行 log，
@@ -1338,6 +1371,7 @@ class SinoPacTradeAdapter(TradeAdapter):
                 logger.exception("[SinoPac Trade] 處理回報失敗 stat=%s msg=%s", state, msg)
 
         self._api.set_order_callback(on_event)
+        _CALLBACKS_REGISTERED = True
 
     @staticmethod
     def _is_deal_report(state: str, msg: dict) -> bool:

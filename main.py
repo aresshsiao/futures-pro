@@ -949,7 +949,6 @@ async def _loop_lag_monitor():
 
         now_wall = _time.time()
         wall_gap = now_wall - last_wall - 1.0
-        last_wall = now_wall
         # 兩個時鐘取較大值：perf_counter 抓 loop 排程延遲（正常情況下的主訊號），
         # wall clock 專門補那種「perf_counter 在休眠期間沒動」的平台落差。
         suspend_lag = max(lag, wall_gap)
@@ -972,6 +971,14 @@ async def _loop_lag_monitor():
             logger.warning(
                 "[Core] event loop 延遲 %.2fs — 這段期間所有回報與廣播都會被延後", lag
             )
+
+        # last_wall 一定要在這裡（強制重新連線跑完之後）才更新：_force_reconnect_broker
+        # 本身可能跑很久（抓合約、補好幾檔歷史K棒），如果像 wall_gap 剛算完那樣提早
+        # 把 last_wall 寫成「現在」，下一輪醒來量到的 gap 會把這整段恢復時間也算
+        # 進去，又誤判成「還在睡」，觸發下一輪重連——實測一次真休眠就這樣連環
+        # 多觸發了一輪重連，而重連期間 callback 被重複註冊，同一筆券商成交回報
+        # 就被處理了兩三遍（另見 sinopac.py 的 _CALLBACKS_REGISTERED 防護）。
+        last_wall = _time.time()
 
 
 async def startup_loop_monitor():
