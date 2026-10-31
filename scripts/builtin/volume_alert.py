@@ -4,10 +4,12 @@ __meta__ = {
     "type": "indicator",
     "enabled": True,
     "params": {
-        # 只有列在這裡的商品會判斷爆量。門檻是照台指期的量能訂的，
-        # 套到小台、微台或加權指數上只會冒出一串跟眼前這檔無關的警示——
+        # 只有列在這裡的商品會判斷爆量。門檻是照小台的量能訂的，
+        # 套到大台、微台或加權指數上只會冒出一串跟眼前這檔無關的警示——
         # 而每一檔訂閱中的商品收完 M1 棒都會各跑一次 calc()。
-        "symbols": ["TX"],
+        # 這裡的商品必須在 settings.yaml 的 core_service.default_subscribe_symbols 裡：
+        # 沒訂閱就收不到 M1 棒、calc() 根本不會被呼叫，爆量也就永遠不會念。
+        "symbols": ["MTX"],
         # session: "day" 只在日盤判斷、"night" 只在夜盤判斷、省略則兩盤都判斷。
         # 這個欄位不能省成「用 label 猜」：日夜盤的量能差一個數量級，
         # 夜盤那根 1500 口的棒會同時跨過兩條門檻，於是同一根棒念兩次。
@@ -41,7 +43,7 @@ def calc(ctx: ScriptContext):
     成交量爆量水平線
 
     參數:
-      symbols: ["TX"]  —— 只對這些商品播報
+      symbols: ["MTX"] —— 只對這些商品播報
       levels:  [{"level": 1500, "label": "日盤大量", "session": "day"}, ...]
     """
     levels = ctx.param("levels") or []

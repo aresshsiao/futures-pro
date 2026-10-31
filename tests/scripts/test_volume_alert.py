@@ -18,6 +18,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from config import settings
 from core.models import ScriptMeta, ScriptType
 from scripts.builtin import volume_alert
 from scripts.engine import ScriptContext
@@ -25,12 +26,22 @@ from scripts.engine import ScriptContext
 DAY = datetime(2026, 9, 2, 10, 30)     # 日盤
 NIGHT = datetime(2026, 9, 2, 22, 30)   # 夜盤
 
+# 測試自己釘一份參數：__meta__ 裡的門檻與商品是盤中會依量能調的值，
+# 測試要驗的是邏輯，不該每調一次門檻就整排變紅。
+PARAMS = {
+    "symbols": ["TX"],
+    "levels": [
+        {"level": 1500, "label": "日盤大量", "session": "day"},
+        {"level": 400, "label": "夜盤大量", "session": "night"},
+    ],
+}
+
 
 def run(volume, ts=DAY, symbol="TX", params=None):
     """跑一次 calc()，回傳這次要播報的文字。"""
     meta = ScriptMeta(
         id="volume_alert", name="Volume_Alert", script_type=ScriptType.INDICATOR,
-        parameters=dict(params if params is not None else volume_alert.__meta__["params"]),
+        parameters=dict(params if params is not None else PARAMS),
     )
     # 只有最後一根的量會被拿去比對門檻，前面幾根純粹墊資料
     bars = pd.DataFrame([
@@ -85,8 +96,14 @@ class TestSymbolScope:
         assert run(1500, symbol="TX")[0].startswith("台指期")
 
     def test_symbols_can_be_widened_by_params(self):
-        params = dict(volume_alert.__meta__["params"], symbols=["TX", "MTX"])
+        params = dict(PARAMS, symbols=["TX", "MTX"])
         assert len(run(1500, symbol="MTX", params=params)) == 1
+
+    def test_default_watched_symbols_are_subscribed_at_startup(self):
+        """盯的商品若不在開機自動訂閱清單裡，就收不到 M1 棒、calc() 不會跑，
+        爆量永遠不會念 —— 曾經把預設訂閱從 TX 換成 MTX，這裡卻還盯著 TX。"""
+        watched = volume_alert.__meta__["params"]["symbols"]
+        assert set(watched) <= set(settings.DEFAULT_SUBSCRIBE_SYMBOLS)
 
 
 class TestPlotting:
@@ -95,7 +112,7 @@ class TestPlotting:
         """播報要挑時段，水平線不用 —— 圖上兩條參考線本來就都該在。"""
         meta = ScriptMeta(
             id="volume_alert", name="Volume_Alert", script_type=ScriptType.INDICATOR,
-            parameters=dict(volume_alert.__meta__["params"]),
+            parameters=dict(PARAMS),
         )
         bars = pd.DataFrame([
             {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 10, "timestamp": ts}
