@@ -124,6 +124,11 @@ CONDITION_SESSION_CHECK_SEC = int(_get("condition.session_check_sec"))
 # 成本防線啟動後，停損不是打平在進場價，而是往有利方向多留這麼多點緩衝
 # （多單 entry+save_value／空單 entry-save_value），順帶鎖住一點利潤。
 CONDITION_SAVE_VALUE = int(_get("condition.save_value"))
+# 成本防線的啟動門檻 = |損點| × 這個倍數。浮盈剛好等於損點就保本太早，
+# 正常的回檔就會被保本價掃出場，所以多等一段再啟動。
+CONDITION_COST_GUARD_RATIO = float(_get("condition.cost_guard_ratio"))
+if CONDITION_COST_GUARD_RATIO <= 0:
+    raise ConfigError(f"{CONFIG_FILE} 的 `condition.cost_guard_ratio` 必須大於 0")
 
 # 右邊下單面板的新條件預設值。逐欄轉型而不是整包丟出去：YAML 打成字串時
 # 要在載入當下就炸，而不是等使用者按下送出、後端才收到一個 "10" 的返點。

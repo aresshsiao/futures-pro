@@ -313,9 +313,13 @@ class Condition:
 
     @property
     def cost_guard_threshold(self) -> float:
-        """成本防線的啟動門檻（浮盈點數）。用損點而不是利點：
-        賺到「夠賠的量」就先立於不敗，不必等到接近停利才保本。"""
-        return abs(self.stop_loss) if (self.cost_guard and self.stop_loss) else 0.0
+        """成本防線的啟動門檻（浮盈點數）= |損點| × condition.cost_guard_ratio。
+        以損點為基準而不是利點：賺到「夠賠的量」再多一截就先立於不敗，
+        不必等到接近停利才保本；倍數讓正常回檔不會一碰就被保本價掃掉。"""
+        if not (self.cost_guard and self.stop_loss):
+            return 0.0
+        ratio = getattr(settings, "CONDITION_COST_GUARD_RATIO", 1.0)
+        return abs(self.stop_loss) * ratio
 
     def best_profit(self) -> float:
         """進場後看過的最大浮盈點數（以 peak_price 計，只增不減）。"""

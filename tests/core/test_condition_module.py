@@ -622,20 +622,25 @@ class TestExit:
 # ─── 成本防線與觸後跟隨（P3）────────────────────────────────
 
 class TestCostGuard:
-    def test_arms_when_profit_reaches_stop_loss_distance(self):
-        """浮盈 ≥ 損點 → 停損移到進場價 ± save_value（settings.yaml 設 10），狀態轉 guarded。"""
+    def test_arms_when_profit_reaches_stop_loss_times_ratio(self):
+        """浮盈 ≥ 損點 × cost_guard_ratio（settings.yaml 設 1.5）→ 停損移到
+        進場價 ± save_value（settings.yaml 設 10），狀態轉 guarded。"""
         async def scenario():
             cm, t, a = await build()
             c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-20,
                               take_profit=50, cost_guard=True)
-            cm._check_conditions(tick("TX", 18019))   # 浮盈 19 < 20，還不夠
+            cm._check_conditions(tick("TX", 18020))   # 浮盈 20 = 損點，舊門檻會啟動，現在不會
+            await settle()
+            at_stop_distance = c.status
+            cm._check_conditions(tick("TX", 18029))   # 浮盈 29 < 30，還不夠
             await settle()
             before = (c.status, c.active_stop_price)
-            cm._check_conditions(tick("TX", 18020))   # 浮盈 20 → 啟動
+            cm._check_conditions(tick("TX", 18030))   # 浮盈 30 = 20 × 1.5 → 啟動
             await settle()
-            return before, c
+            return at_stop_distance, before, c
 
-        (status_before, stop_before), c = asyncio.run(scenario())
+        at_stop_distance, (status_before, stop_before), c = asyncio.run(scenario())
+        assert at_stop_distance is ConditionStatus.FILLED
         assert status_before is ConditionStatus.FILLED
         assert stop_before == 17980.0                 # 還是原始停損
         assert c.status is ConditionStatus.GUARDED
@@ -647,7 +652,7 @@ class TestCostGuard:
             cm, t, a = await build()
             c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-20,
                               take_profit=50, cost_guard=True)
-            cm._check_conditions(tick("TX", 18020))
+            cm._check_conditions(tick("TX", 18030))
             await settle()
             cm._check_conditions(tick("TX", 18012))   # 回落但還沒碰到保本價(18010)
             await settle()
@@ -662,7 +667,7 @@ class TestCostGuard:
             cm, t, a = await build()
             c = await entered(cm, t, Direction.BUY, 18000, stop_loss=-20,
                               take_profit=50, cost_guard=True)
-            cm._check_conditions(tick("TX", 18020))   # 啟動保本
+            cm._check_conditions(tick("TX", 18030))   # 啟動保本（20 × 1.5）
             await settle()
             a.placed.clear()
             cm._check_conditions(tick("TX", 18010))   # 回到保本價（進場價+save_value）→ 出場

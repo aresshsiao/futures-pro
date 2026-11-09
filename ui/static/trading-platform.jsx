@@ -1731,7 +1731,7 @@ function RightSideOrderPanel({ currentPrice, activeSymbol, setActiveSymbol, symb
             {numField("口數", "qty")}
             {numField("利點", "tp")}
             {numField("損點", "sl")}
-            {switchField("成本", "costGuard", "成本防線：浮盈達損點時把停損移到進場價 ± 緩衝點（設定值 save_value）")}
+            {switchField("成本", "costGuard", "成本防線：浮盈達損點 × 1.5（設定值 cost_guard_ratio）時把停損移到進場價 ± 緩衝點（設定值 save_value）")}
             {switchField("跟隨", "trail", "觸後跟隨：觸發後繼續追極值，進場價跟著「最高/最低 ∓ 返點」走")}
           </div>
           <div style={{ display: "flex", gap: 4 }}>

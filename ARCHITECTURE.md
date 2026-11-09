@@ -354,7 +354,7 @@ UI: place_order → Gateway → TradeModule.place_order → SinoPac adapter
   waiting ─觸及觸發價─► triggered ─回檔到價送單─► sent ─成交回報─► filled ─停利/停損─► exited
   等待觸發              已觸發                  已送單           已成交            已出場
                                                                   │
-                                            浮盈 ≥ |損點| 時插入   ▼
+                           浮盈 ≥ |損點| × cost_guard_ratio 時插入 ▼
                                                               guarded 已守成本
                                                      （停損移到進場價 ± save_value，續走出場）
 
@@ -422,8 +422,9 @@ IOC 部分成交的回報是 `CANCELLED` 而不是 `FILLED`，當成失敗擱著
 - **停利／停損**：`entry_price ± take_profit` / `∓ |stop_loss|`。兩者是 OCO，
   一邊觸及就送出場單並把條件推進 `exited`，另一邊失效 ——
   唯一的例外是停損可以搶掉還沒成交的停利單（見下方委託方式）。
-- **成本防線**（`cost_guard`）：浮動獲利 ≥ `|stop_loss|` 時，把停損價移到 `entry_price`（保本），
-  狀態轉 `guarded`。門檻用損點而非利點，是為了讓「賺到夠賠的量」就先立於不敗。
+- **成本防線**（`cost_guard`）：浮動獲利 ≥ `|stop_loss| × cost_guard_ratio`（settings.yaml，預設 1.5）時，
+  把停損價移到 `entry_price ± save_value`（保本並鎖一點利潤），狀態轉 `guarded`。
+  門檻用損點而非利點，是為了讓「賺到夠賠的量」就先立於不敗；乘上倍數是避免正常回檔一碰就被保本價掃掉。
   判斷用的是 `peak_price`（看過的最大浮盈）而不是現價 —— 保本是棘輪，價格回落不該讓它失效。
 > 注意：「觸後跟隨」是**進場端**的機制（§7.4），不是移動停損。進場後的停損只有
 > 固定停損與成本防線兩種。
