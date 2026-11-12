@@ -35,6 +35,13 @@ _SHARED_CA_OK = False
 # 的話（例如短時間內觸發好幾次強制重新連線）不能每次都再註冊一次 callback，
 # 不然同一筆券商成交回報會被處理好幾遍——倉位、損益、語音播報的口數全部對不起來。
 _CALLBACKS_REGISTERED = False
+# 目前掛在 _SHARED_API 上的 adapter（問價、交易各一個）。
+# 問價與交易共用同一條 session，任何一邊 disconnect() 都直接 logout 的話，
+# 會把另一邊的連線也一起帶走——實際發生過：只按「交易」重新連線，舊 session
+# 被登出、交易拿到一條新的，但問價 adapter 手上還是那條已登出的舊 instance，
+# tick callback 也還掛在舊 instance 上，燈號是綠的，K 棒卻從此不再更新。
+# 所以改成引用計數：最後一個使用者離開時才真的登出。
+_SHARED_USERS: set[int] = set()
 
 # login() 的 contracts_cb 會依 SecurityType（"Index"/"Stock"/"Future"/"Option"）逐一回呼，
 # 對應該分類的 Contracts 下載完成。這是目前這版 shioaji（1.5.x, Rust 重寫版）唯一
@@ -79,6 +86,11 @@ def _get_shared_api(credentials):
 
     if _SHARED_API is not None and simulation != _SHARED_SIMULATION:
         logger.info("[SinoPac] 切換至%s環境，重建連線", "模擬" if simulation else "正式")
+        if _SHARED_USERS:
+            logger.warning(
+                "[SinoPac] 仍有 %d 個 adapter 掛在舊連線上，切換環境後它們會失效，需重新連線",
+                len(_SHARED_USERS),
+            )
         _logout_shared_api()
         _SHARED_API = None
 
@@ -323,11 +335,33 @@ def _logout_shared_api():
             pass
     _SHARED_API = None
     _SHARED_CONNECTED = False
+    _SHARED_USERS.clear()
     # 斷線後憑證狀態一併清掉：不清的話 is_ca_activated() 會在斷線期間
     # 還顯示「上次連線」的啟用結果，讓人以為現在也能下單
     _SHARED_CA_OK = False
     # instance 都丟了，舊的 callback 註冊自然失效，下次連線要重新註冊一次
     _CALLBACKS_REGISTERED = False
+
+
+def _attach_shared_api(owner) -> None:
+    """登記 owner 正在使用 _SHARED_API（connect 成功後呼叫）。"""
+    _SHARED_USERS.add(id(owner))
+
+
+def _release_shared_api(owner) -> None:
+    """owner 不再使用共用連線；最後一個使用者離開時才真的登出（見 _SHARED_USERS）。
+
+    要「連同另一邊一起」重建 session（例如休眠醒來後強制重新連線），
+    呼叫端必須讓問價、交易兩邊都 disconnect，見 main._force_reconnect_broker。
+    """
+    _SHARED_USERS.discard(id(owner))
+    if not _SHARED_USERS:
+        _logout_shared_api()
+
+
+def _is_current_shared_api(api) -> bool:
+    """adapter 手上的 instance 是否還是目前那條共用連線（沒被別人重建掉）。"""
+    return api is not None and api is _SHARED_API and _SHARED_CONNECTED
 
 
 # ── 選擇權理論價 (Black-76) ─────────────────────────────
@@ -416,6 +450,8 @@ class SinoPacQuoteAdapter(QuoteAdapter):
     """永豐金 — 問價 Adapter"""
 
     name = "永豐金"
+    # 跟交易 adapter 共用同一條 session：強制重新連線時兩邊必須一起重建（見 main._force_reconnect_broker）
+    shared_session = True
 
     def __init__(self):
         self._api = None  # shioaji.Shioaji instance
@@ -548,6 +584,9 @@ class SinoPacQuoteAdapter(QuoteAdapter):
                     row["putChange"] = change
                 self._schedule_option_push(chain_key)
 
+            # 新的 instance 上還沒有任何訂閱，清掉舊紀錄，QuoteModule 重新訂閱時才會真的送出
+            self._subscribed.clear()
+            _attach_shared_api(self)
             self._connected = True
             logger.info("[SinoPac Quote] 登入成功%s", "（模擬環境）" if _is_simulation() else "")
             return True
@@ -556,11 +595,12 @@ class SinoPacQuoteAdapter(QuoteAdapter):
             return False
 
     async def disconnect(self) -> None:
-        _logout_shared_api()
+        _release_shared_api(self)
         self._connected = False
 
     def is_connected(self) -> bool:
-        return self._connected
+        # 共用連線若已被重建（手上這條已登出），tick 不會再進來，必須誠實回報斷線
+        return self._connected and _is_current_shared_api(self._api)
 
     async def subscribe_tick(self, symbol: str, callback: Callable[[Tick], None]) -> None:
         """訂閱逐筆成交（同一 symbol 只發一次訂閱請求）"""
@@ -1239,6 +1279,7 @@ class SinoPacTradeAdapter(TradeAdapter):
     """永豐金 — 交易 Adapter"""
 
     name = "永豐金"
+    shared_session = True
 
     def __init__(self):
         self._api = None
@@ -1258,6 +1299,7 @@ class SinoPacTradeAdapter(TradeAdapter):
             await _wait_contracts_ready(("Future",))
 
             self._setup_callbacks()
+            _attach_shared_api(self)
             self._connected = True
             account = self._account()
             logger.info(
@@ -1273,12 +1315,12 @@ class SinoPacTradeAdapter(TradeAdapter):
             return False
 
     async def disconnect(self) -> None:
-        _logout_shared_api()
+        _release_shared_api(self)
         self._connected = False
         self._trades.clear()
 
     def is_connected(self) -> bool:
-        return self._connected
+        return self._connected and _is_current_shared_api(self._api)
 
     @property
     def is_simulation(self) -> bool:

@@ -780,12 +780,39 @@ async def handle_broker_status(ws, data: dict):
     })
 
 
+# 券商的連線 / 強制重連 / 斷線一律排隊執行，不能交錯。
+# 強制重連要跑 30 秒左右（login + 合約下載），中途兩邊都是「未連線」，
+# 前端 WS 重連後看到 broker_status 全斷，就會自動送一次 connect——
+# 兩條流程同時對同一條共用 session 登入/登出，最後問價 adapter 手上
+# 拿的是被另一條流程登出的 instance（補歷史出現 Not authenticated、K 棒不再更新）。
+# 有了這把鎖，那個 connect 會等重連跑完，再被「已連線」guard 擋下來。
+_broker_lock = asyncio.Lock()
+
+
 async def _connect_broker(broker_id: str, kind: str = "both") -> tuple[bool, str]:
     """核心券商連線邏輯（不依賴 ws）。
 
     供 Core Service 啟動時自動連線與 WS handler(handle_broker_config) 共用。
     回傳 (success, message)。已連線時直接回傳成功，不重連。
     """
+    async with _broker_lock:
+        return await _connect_broker_unlocked(broker_id, kind)
+
+
+def _broker_session_shared() -> bool:
+    """問價與交易是否共用同一條券商 session（例如永豐金的 _SHARED_API）。"""
+    qa, ta = quote._adapter, trade._adapter
+    if qa is None or ta is None:
+        return False
+    return (
+        getattr(qa, "shared_session", False)
+        and getattr(ta, "shared_session", False)
+        and getattr(qa, "broker_id", None) == getattr(ta, "broker_id", None)
+    )
+
+
+async def _connect_broker_unlocked(broker_id: str, kind: str = "both") -> tuple[bool, str]:
+    """_connect_broker 的本體；呼叫端必須已持有 _broker_lock。"""
     if not broker_id:
         return False, "未指定券商"
 
@@ -852,6 +879,19 @@ async def _force_reconnect_broker(kind: str = "both") -> tuple[bool, str]:
     倉位/成交明細（見 QuoteModule.set_adapter / TradeModule.set_adapter），
     呼叫端不用自己再做一次。
     """
+    async with _broker_lock:
+        return await _force_reconnect_broker_unlocked(kind)
+
+
+async def _force_reconnect_broker_unlocked(kind: str) -> tuple[bool, str]:
+    # 問價、交易共用同一條 session 時，只重連其中一邊等於沒重連：
+    # 共用連線要等兩邊都放掉才會真的登出重建（見 sinopac._release_shared_api）。
+    # 以前只重連交易時會直接登出共用 session，問價那邊被留在已登出的舊 instance 上，
+    # tick 從此不再進來——所以一律升級成兩邊一起重建。
+    if kind != "both" and _broker_session_shared():
+        logger.info("[BrokerConfig] 問價/交易共用同一條連線，%s 重新連線升級為兩邊一起重建", kind)
+        kind = "both"
+
     broker_id = (
         (getattr(quote._adapter, "broker_id", None) if kind in ("quote", "both") else None)
         or (getattr(trade._adapter, "broker_id", None) if kind in ("trade", "both") else None)
@@ -866,7 +906,7 @@ async def _force_reconnect_broker(kind: str = "both") -> tuple[bool, str]:
     if kind in ("trade", "both"):
         await trade.disconnect()
 
-    ok, message = await _connect_broker(broker_id, kind)
+    ok, message = await _connect_broker_unlocked(broker_id, kind)
     if ok and trade.is_connected:
         # 重連中途可能有條件單被動地跟著部位變化擱置，這裡順手補一次對帳；
         # reconcile_with_broker 只挑 ORPHANED 的條件處理，重複呼叫是安全的。
@@ -1006,10 +1046,11 @@ async def handle_broker_config(ws, data: dict):
     kind      = data.get("kind", "both")
 
     if action == "disconnect":
-        if kind in ("quote", "both"):
-            await quote.disconnect()
-        if kind in ("trade", "both"):
-            await trade.disconnect()
+        async with _broker_lock:
+            if kind in ("quote", "both"):
+                await quote.disconnect()
+            if kind in ("trade", "both"):
+                await trade.disconnect()
 
         await ws.send_json({
             "type": "broker_config_result",

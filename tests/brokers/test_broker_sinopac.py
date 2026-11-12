@@ -55,12 +55,14 @@ def reset_shared_api():
     sinopac._SHARED_SIMULATION = False
     sinopac._SHARED_CA_OK = False
     sinopac._CALLBACKS_REGISTERED = False
+    sinopac._SHARED_USERS.clear()
     yield
     sinopac._SHARED_API = None
     sinopac._SHARED_CONNECTED = False
     sinopac._SHARED_SIMULATION = False
     sinopac._SHARED_CA_OK = False
     sinopac._CALLBACKS_REGISTERED = False
+    sinopac._SHARED_USERS.clear()
 
 
 @pytest.fixture
@@ -156,6 +158,60 @@ class TestQuoteAdapterConnect:
     def test_disconnect_when_not_connected_does_not_raise(self):
         adapter = SinoPacQuoteAdapter()
         run(adapter.disconnect())
+
+
+# ─── 問價/交易共用同一條 session ─────────────────────────────
+
+class TestSharedSession:
+    """問價與交易共用 _SHARED_API：一邊斷線不能把另一邊的連線帶走。
+
+    實際發生過：只重新連線「交易」，舊 session 被登出重建，問價 adapter
+    還握著已登出的舊 instance（tick callback 也掛在上面），燈號綠的、K 棒卻不再更新。
+    """
+
+    def _connect_both(self):
+        sj_mod, api, _ = _make_mock_shioaji()
+        q, t = SinoPacQuoteAdapter(), SinoPacTradeAdapter()
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(q.connect(api_key="K", secret_key="S"))
+            run(t.connect(api_key="K", secret_key="S"))
+        return q, t, api, sj_mod
+
+    def test_both_share_one_login(self):
+        q, t, api, _ = self._connect_both()
+        assert q._api is t._api is api
+        assert api.login.call_count == 1
+
+    def test_trade_disconnect_keeps_quote_alive(self):
+        q, t, api, _ = self._connect_both()
+        run(t.disconnect())
+        api.logout.assert_not_called()
+        assert t.is_connected() is False
+        assert q.is_connected() is True
+
+    def test_quote_disconnect_keeps_trade_alive(self):
+        q, t, api, _ = self._connect_both()
+        run(q.disconnect())
+        api.logout.assert_not_called()
+        assert t.is_connected() is True
+
+    def test_last_user_disconnect_logs_out(self):
+        q, t, api, _ = self._connect_both()
+        run(t.disconnect())
+        run(q.disconnect())
+        api.logout.assert_called_once()
+        assert sinopac._SHARED_API is None
+
+    def test_rebuilt_session_marks_stale_adapter_disconnected(self):
+        """共用連線被整個重建後，還握著舊 instance 的 adapter 要誠實回報斷線。"""
+        q, t, api, _ = self._connect_both()
+        sinopac._logout_shared_api()
+        new_sj, new_api, _ = _make_mock_shioaji()
+        t2 = SinoPacTradeAdapter()
+        with patch.dict(sys.modules, {"shioaji": new_sj}):
+            run(t2.connect(api_key="K", secret_key="S"))
+        assert t2.is_connected() is True
+        assert q._api is api and q.is_connected() is False
 
 
 # ─── 模擬環境 (simulation) ───────────────────────────────────
