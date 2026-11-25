@@ -62,6 +62,26 @@ core_service:
   # 放在 core_service 是因為這關乎「Core 開機盯哪一檔」，最好也列進上面的
   # default_subscribe_symbols，開圖才有現成資料。下單面板的預設商品另設在 trading。
   default_symbol: MTX
+  # 券商連線斷掉（網路中斷、券商 session 失效、啟動時連不上）時自動重連。
+  # 只會維持「自動連線或使用者手動連上過」的那幾條線；手動按斷線的不會被連回來。
+  auto_reconnect: true
+  # 重連失敗後的等待秒數：從 min 開始每次加倍，最多到 max（網路恢復後最慢 max 秒內接回）
+  reconnect_min_delay_sec: 5
+  reconnect_max_delay_sec: 120
+
+# ── 電源管理（僅 Windows）──────────────────────────
+# 程式執行期間防止電腦進入睡眠／被關機。睡眠或關機期間券商回報全部漏接，
+# 停損條件單也不會觸發。
+#   - prevent_sleep：擋住「閒置自動睡眠」與螢幕保護觸發的睡眠。
+#     擋不住手動按睡眠、闔上筆電螢幕、電池電量過低——闔蓋要去
+#     「控制台 > 電源選項 > 選擇蓋上螢幕時的行為」改成「不執行任何動作」。
+#   - block_shutdown：關機／重新開機／登出時，Windows 會顯示
+#     「期貨交易程式仍在執行」並暫停，要你自己按「仍要關機」才會繼續。
+#     擋不住強制關機（shutdown /f、長按電源鍵）；Windows Update 自動重新開機
+#     請另外設定「使用時段」避開交易時間。
+power:
+  prevent_sleep: true
+  block_shutdown: true
 
 # ── 交易 ─────────────────────────────────────────────
 trading:

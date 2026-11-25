@@ -114,3 +114,96 @@ def test_connect_waits_for_running_reconnect(env, monkeypatch):
 
     run(scenario())
     assert overlapped is False
+
+
+# ─── 看門狗：網路斷線自動重連 ─────────────────────────────────
+# 11/25 夜盤 20:53 券商 session 斷掉、20:59 手動重登失敗後就一直斷著，
+# 直到 01:56 才被手動接回來。看門狗要做到：斷了就自己重連，失敗就退避重試，
+# 但使用者主動按斷線的不能被連回去。
+
+@pytest.fixture
+def watchdog(env, monkeypatch):
+    monkeypatch.setattr(main, "BROKER_WATCHDOG_INTERVAL_SEC", 0.005)
+    monkeypatch.setattr(main.settings, "RECONNECT_MIN_DELAY_SEC", 0.02)
+    monkeypatch.setattr(main.settings, "RECONNECT_MAX_DELAY_SEC", 0.04)
+    monkeypatch.setattr(main, "_broker_desired_id", None)
+    monkeypatch.setattr(main, "_broker_desired_kinds", set())
+    return env
+
+
+def run_watchdog(seconds):
+    async def scenario():
+        task = asyncio.create_task(main._broker_watchdog())
+        await asyncio.sleep(seconds)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    run(scenario())
+
+
+def test_watchdog_reconnects_after_drop(watchdog):
+    quote, trade, calls = watchdog
+    main._want_broker("sinopac", "both")
+    trade.connected = False            # session 斷了
+    run_watchdog(0.1)
+    assert calls == ["both"]           # 只重連一次，連上之後就不再動
+    assert trade.connected and quote.connected
+
+
+def test_watchdog_leaves_healthy_connection_alone(watchdog):
+    _, _, calls = watchdog
+    main._want_broker("sinopac", "both")
+    run_watchdog(0.05)
+    assert calls == []
+
+
+def test_watchdog_retries_with_backoff_until_network_back(watchdog, monkeypatch):
+    quote, trade, _ = watchdog
+    import time
+    attempts = []
+
+    async def flaky_connect(broker_id, kind="both"):
+        attempts.append(time.monotonic())
+        if len(attempts) < 4:
+            return False, "連線失敗"   # 網路還沒恢復
+        quote.connected = trade.connected = True
+        return True, "連線成功"
+
+    monkeypatch.setattr(main, "_connect_broker_unlocked", flaky_connect)
+    main._want_broker("sinopac", "both")
+    trade.connected = quote.connected = False
+    run_watchdog(0.4)
+
+    assert len(attempts) == 4
+    assert trade.connected and quote.connected
+    gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+    assert gaps[0] >= 0.02                 # 失敗後至少等 min delay
+    assert gaps[1] >= 0.04                 # 加倍
+    assert gaps[2] >= 0.04                 # 上限 max delay，不再加倍
+
+
+def test_watchdog_ignores_user_disconnect(watchdog):
+    quote, trade, calls = watchdog
+    main._want_broker("sinopac", "both")
+    main._unwant_broker("both")            # 使用者按了斷線
+    trade.connected = quote.connected = False
+    run_watchdog(0.05)
+    assert calls == []
+
+
+def test_watchdog_only_restores_wanted_side(watchdog):
+    """只連了交易、問價本來就沒連 → 問價沒連不算斷線。"""
+    quote, trade, calls = watchdog
+    quote._adapter.shared_session = False
+    main._want_broker("sinopac", "trade")
+    quote.connected = False
+    run_watchdog(0.05)
+    assert calls == []
+
+
+def test_successful_connect_registers_desire(watchdog):
+    quote, trade, _ = watchdog
+    quote.connected = trade.connected = False
+    ok, _ = run(main._connect_broker("sinopac", "trade"))
+    assert ok
+    assert main._desired_kind() == "trade"

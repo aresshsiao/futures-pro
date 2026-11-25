@@ -796,7 +796,131 @@ async def _connect_broker(broker_id: str, kind: str = "both") -> tuple[bool, str
     回傳 (success, message)。已連線時直接回傳成功，不重連。
     """
     async with _broker_lock:
-        return await _connect_broker_unlocked(broker_id, kind)
+        ok, message = await _connect_broker_unlocked(broker_id, kind)
+        if ok:
+            _want_broker(broker_id, kind)
+        return ok, message
+
+
+# ── 自動重連用的「想要維持的連線」───────────────────────
+# 看門狗（_broker_watchdog）只負責把這裡記的線維持住：自動連線或使用者手動連上過
+# 才會記進來，使用者手動按斷線就移掉——不然一按斷線就被自動連回去。
+_broker_desired_id: str | None = None
+_broker_desired_kinds: set[str] = set()
+
+
+def _kind_parts(kind: str) -> set[str]:
+    return {"quote", "trade"} if kind == "both" else {kind}
+
+
+def _want_broker(broker_id: str, kind: str) -> None:
+    global _broker_desired_id
+    if _broker_desired_id != broker_id:
+        _broker_desired_kinds.clear()
+    _broker_desired_id = broker_id
+    _broker_desired_kinds.update(_kind_parts(kind))
+
+
+def _unwant_broker(kind: str) -> None:
+    global _broker_desired_id
+    _broker_desired_kinds.difference_update(_kind_parts(kind))
+    if not _broker_desired_kinds:
+        _broker_desired_id = None
+
+
+def _desired_kind() -> str | None:
+    """看門狗要維持的連線（"quote" / "trade" / "both"），沒有就回 None。"""
+    if not _broker_desired_id or not _broker_desired_kinds:
+        return None
+    if _broker_desired_kinds == {"quote", "trade"}:
+        return "both"
+    return next(iter(_broker_desired_kinds))
+
+
+def _broker_healthy(kind: str) -> bool:
+    return (
+        (kind not in ("quote", "both") or quote.is_connected)
+        and (kind not in ("trade", "both") or trade.is_connected)
+    )
+
+
+# 看門狗多久檢查一次連線狀態。is_connected() 只看本地旗標（session_down 回呼、
+# 查詢撞到 SessionNotEstablished 時就會翻成 False），檢查本身不打券商 API。
+BROKER_WATCHDOG_INTERVAL_SEC = 3.0
+
+
+async def _broker_watchdog():
+    """網路斷線／券商 session 失效時自動重新連線，失敗就指數退避一直重試。
+
+    過去只有「偵測到系統休眠」才會自動強制重連（見 _loop_lag_monitor）；一般的
+    網路中斷只會把 adapter 標成未連線、等使用者手動重連。11/25 夜盤 20:53 券商
+    session 斷掉、20:59 重新登入失敗後就一直斷著，直到 01:56 才有人手動接回來。
+    """
+    import time as _time
+
+    delay = settings.RECONNECT_MIN_DELAY_SEC
+    next_try = 0.0
+    down_since: float | None = None
+    attempts = 0
+    while True:
+        await asyncio.sleep(BROKER_WATCHDOG_INTERVAL_SEC)
+        kind = _desired_kind()
+        if kind is None:
+            down_since, attempts, delay = None, 0, settings.RECONNECT_MIN_DELAY_SEC
+            continue
+        if _broker_lock.locked():
+            continue   # 連線/重連/斷線正在跑，等它跑完再看結果
+
+        if _broker_healthy(kind):
+            if down_since is not None:
+                logger.info(
+                    "[Watchdog] 券商連線已恢復（斷線約 %.0f 秒，重試 %d 次）",
+                    _time.monotonic() - down_since, attempts,
+                )
+            down_since, attempts, delay = None, 0, settings.RECONNECT_MIN_DELAY_SEC
+            continue
+
+        now = _time.monotonic()
+        if down_since is None:
+            down_since, next_try = now, now
+            logger.warning("[Watchdog] 偵測到券商連線中斷（%s），開始自動重新連線", kind)
+        if now < next_try:
+            continue
+
+        attempts += 1
+        logger.warning("[Watchdog] 第 %d 次自動重新連線（%s）", attempts, kind)
+        try:
+            ok, message = await _force_reconnect_broker(kind)
+        except Exception as e:
+            ok, message = False, f"{type(e).__name__}: {e}"
+            logger.exception("[Watchdog] 自動重新連線擲出例外")
+        # 重連途中使用者按了斷線 → 不算失敗，下一輪 _desired_kind() 會是 None
+        if ok and _broker_healthy(kind):
+            continue   # 下一輪看到 healthy 會記「已恢復」並重設退避
+        logger.warning(
+            "[Watchdog] 自動重新連線失敗：%s —— %.0f 秒後再試", message, delay,
+        )
+        next_try = _time.monotonic() + delay
+        delay = min(delay * 2, settings.RECONNECT_MAX_DELAY_SEC)
+
+
+async def startup_broker_watchdog():
+    if not settings.AUTO_RECONNECT:
+        logger.info("[Watchdog] core_service.auto_reconnect 關閉，斷線後需手動重新連線")
+        return
+    asyncio.create_task(_broker_watchdog())
+
+
+async def startup_power_guard():
+    """防止電腦在交易程式執行期間睡眠／關機（僅 Windows，見 utils/power.py）。"""
+    if not (settings.POWER_PREVENT_SLEEP or settings.POWER_BLOCK_SHUTDOWN):
+        return
+    from utils import power
+    active = power.start(settings.POWER_PREVENT_SLEEP, settings.POWER_BLOCK_SHUTDOWN)
+    if sys.platform != "win32":
+        logger.info("[Power] 非 Windows 平台，略過防睡眠/關機攔截")
+    elif settings.POWER_PREVENT_SLEEP and not active["prevent_sleep"]:
+        logger.error("[Power] 防睡眠沒有生效，電腦閒置仍可能自動睡眠")
 
 
 def _broker_session_shared() -> bool:
@@ -935,9 +1059,15 @@ async def startup_core():
         return
 
     kind = getattr(settings, "AUTO_CONNECT_KIND", "both")
+    # 先記成「想要維持的連線」：開機當下網路還沒好而連線失敗時，看門狗會接手重試
+    _want_broker(broker_id, kind)
     ok, message = await _connect_broker(broker_id, kind)
     if not ok:
         logger.warning("[Core] 自動連線 %s (%s) 失敗: %s", broker_id, kind, message)
+        # 預設商品先登記起來（未連線時 subscribe 只會記下、不打 API），
+        # 看門狗重連成功後 _force_reconnect_broker 會補資料並重新訂閱
+        for sym in getattr(settings, "DEFAULT_SUBSCRIBE_SYMBOLS", []):
+            await quote.subscribe(sym)
         return
 
     # 條件單重啟對帳：一定要等連上券商拿到真實倉位才能做，
@@ -1047,6 +1177,7 @@ async def handle_broker_config(ws, data: dict):
 
     if action == "disconnect":
         async with _broker_lock:
+            _unwant_broker(kind)   # 使用者主動斷線，看門狗不要再把它連回來
             if kind in ("quote", "both"):
                 await quote.disconnect()
             if kind in ("trade", "both"):
@@ -1645,8 +1776,12 @@ def setup():
     # 對帳完成 → 主動推完整成交明細（含券商剛結算好的已實現損益）
     bus.on("fills_update", forward_fills)
 
+    # 防睡眠／關機攔截 — 排在最前面：自動連線券商可能要跑 30 秒，這段期間就該生效
+    register_startup_hook(startup_power_guard)
     # Core Service 啟動 hook — event loop ready 後自動連線券商 + 訂閱預設商品
     register_startup_hook(startup_core)
+    # 券商連線看門狗 — 網路斷線/session 失效時自動重連（含開機時就連不上的情況）
+    register_startup_hook(startup_broker_watchdog)
     # script 定時器（interval_sec）— 與是否自動連線券商無關，一律啟動
     register_startup_hook(startup_script_timer)
     # event loop 延遲監控 — 回報變慢時用來分辨「卡在自己」還是「卡在券商端」

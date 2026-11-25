@@ -117,6 +117,18 @@ DEFAULT_SUBSCRIBE_SYMBOLS = list(_get("core_service.default_subscribe_symbols"))
 # 技術線圖的預設商品（下單面板的預設另設在 trading.default_symbol）。
 # 「在 trading.symbols 裡」的檢查跟 ORDER_DEFAULT_SYMBOL 一起做，見下方交易區塊。
 CHART_DEFAULT_SYMBOL = str(_get("core_service.default_symbol"))
+AUTO_RECONNECT = bool(_get("core_service.auto_reconnect"))
+RECONNECT_MIN_DELAY_SEC = float(_get("core_service.reconnect_min_delay_sec"))
+RECONNECT_MAX_DELAY_SEC = float(_get("core_service.reconnect_max_delay_sec"))
+if not 0 < RECONNECT_MIN_DELAY_SEC <= RECONNECT_MAX_DELAY_SEC:
+    raise ConfigError(
+        f"{CONFIG_FILE} 的 core_service.reconnect_min_delay_sec 必須 > 0 且 "
+        "不大於 reconnect_max_delay_sec"
+    )
+
+# ── 電源管理（僅 Windows，見 utils/power.py）───────────
+POWER_PREVENT_SLEEP = bool(_get("power.prevent_sleep"))
+POWER_BLOCK_SHUTDOWN = bool(_get("power.block_shutdown"))
 
 # ── 條件單（右邊下單）────────────────────────────────
 CONDITION_SESSION_CLOSE_TIMES = list(_get("condition.session_close_times"))

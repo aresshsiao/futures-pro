@@ -42,6 +42,17 @@ _CALLBACKS_REGISTERED = False
 # tick callback 也還掛在舊 instance 上，燈號是綠的，K 棒卻從此不再更新。
 # 所以改成引用計數：最後一個使用者離開時才真的登出。
 _SHARED_USERS: set[int] = set()
+# 底層 session 被判定「斷線且放棄自動重連」的時間點（time.time()），None = 正常。
+# solclient 自己會先重試幾次（event_code=12 reconnecting → 13 reconnected），
+# 那種一兩秒就自己接回去的不算；放棄之後才會發 event_code=1 / session_down
+# callback。實際發生過：11/25 20:53 收到 Session down 之後就再也沒有自己接回去，
+# 但 adapter 的 _connected 旗標還是 True，要等到下一次查詢撞到 SessionNotEstablished
+# 才會發現——有了這個旗標，is_connected() 會立刻誠實回報斷線，
+# main._broker_watchdog 也才能馬上接手重連。
+_SESSION_DOWN_AT: float | None = None
+
+# Shioaji on_event 的 event_code：1 = DownError（solclient 已放棄重連）
+_EVENT_SESSION_DOWN = 1
 
 # login() 的 contracts_cb 會依 SecurityType（"Index"/"Stock"/"Future"/"Option"）逐一回呼，
 # 對應該分類的 Contracts 下載完成。這是目前這版 shioaji（1.5.x, Rust 重寫版）唯一
@@ -79,7 +90,7 @@ def _get_shared_api(credentials):
     simulation 是 Shioaji() 的建構子參數，無法在既有 instance 上切換，
     因此模式改變時必須先登出、丟掉舊 instance 再重建。
     """
-    global _SHARED_API, _SHARED_CONNECTED, _SHARED_SIMULATION, _SHARED_CA_OK
+    global _SHARED_API, _SHARED_CONNECTED, _SHARED_SIMULATION, _SHARED_CA_OK, _SESSION_DOWN_AT
     import shioaji as sj
 
     simulation = bool(credentials.get("simulation", False))
@@ -95,23 +106,41 @@ def _get_shared_api(credentials):
         _SHARED_API = None
 
     if _SHARED_API is None:
-        _SHARED_API = sj.Shioaji(simulation=simulation)
+        api = sj.Shioaji(simulation=simulation)
+        _SHARED_API = api
         _SHARED_SIMULATION = simulation
 
-        @_SHARED_API.on_event
+        @api.on_event
         def _on_event(resp_code: int, event_code: int, info: str, event: str):
             logger.warning("[SinoPac Event] resp_code=%s event_code=%s info=%s event=%s", resp_code, event_code, info, event)
+            if event_code == _EVENT_SESSION_DOWN:
+                _mark_session_down(api, f"event_code={event_code} {info}")
+
+        try:
+            api.set_session_down_callback(lambda: _mark_session_down(api, "session_down callback"))
+        except Exception:
+            # 舊版 shioaji 沒有這個 API；還有 on_event 的 event_code=1 可以抓
+            logger.debug("[SinoPac] 無法註冊 session_down callback", exc_info=True)
 
     if not _SHARED_CONNECTED:
         for ev in _CONTRACTS_READY.values():
             ev.clear()
-        accounts = _SHARED_API.login(
-            api_key=credentials.get("api_key", ""),
-            secret_key=credentials.get("secret_key", ""),
-            subscribe_trade=credentials.get("subscribe_trade", True),
-            receive_window=10000,
-            contracts_cb=_on_contracts_fetched,
-        )
+        try:
+            accounts = _SHARED_API.login(
+                api_key=credentials.get("api_key", ""),
+                secret_key=credentials.get("secret_key", ""),
+                subscribe_trade=credentials.get("subscribe_trade", True),
+                receive_window=10000,
+                contracts_cb=_on_contracts_fetched,
+            )
+        except Exception:
+            # 登入失敗（典型是網路還沒恢復）就把這個 instance 丟掉：同一個物件
+            # 重新 login() 不保證救得回來（見 _logout_shared_api），下一輪自動重連
+            # 要拿全新的 instance 重試。
+            _SHARED_API = None
+            _SESSION_DOWN_AT = None
+            raise
+        _SESSION_DOWN_AT = None
         logger.info(
             "[SinoPac] 登入成功（%s環境），可用帳戶 %s 個",
             "模擬" if simulation else "正式",
@@ -120,6 +149,23 @@ def _get_shared_api(credentials):
         _SHARED_CA_OK = _activate_ca(_SHARED_API, credentials, simulation)
         _SHARED_CONNECTED = True
     return _SHARED_API
+
+
+def _mark_session_down(api, reason: str) -> None:
+    """底層 session 已經斷了（solclient 放棄自動重連）。跑在 shioaji 的 callback 執行緒。
+
+    只認目前這個 instance：重連後舊 instance 的遲來事件不能把新連線也標成斷線。
+    """
+    global _SESSION_DOWN_AT
+    if api is not _SHARED_API or not _SHARED_CONNECTED or _SESSION_DOWN_AT is not None:
+        return
+    _SESSION_DOWN_AT = time.time()
+    logger.error("[SinoPac] 券商 session 已斷線（%s），等待自動重新連線", reason[:160])
+
+
+def session_down_since() -> float | None:
+    """底層 session 斷線的時間點（time.time()）；連線正常時回 None。"""
+    return _SESSION_DOWN_AT
 
 
 async def _get_shared_api_async(credentials):
@@ -327,14 +373,17 @@ def _logout_shared_api():
     整個重啟 Python 才會恢復正常」的根本原因）。丟棄物件讓下次連線等同於乾淨
     重啟一次 Shioaji client，不用真的重啟整個行程。
     """
-    global _SHARED_API, _SHARED_CONNECTED, _SHARED_CA_OK, _CALLBACKS_REGISTERED
-    if _SHARED_API is not None and _SHARED_CONNECTED:
+    global _SHARED_API, _SHARED_CONNECTED, _SHARED_CA_OK, _CALLBACKS_REGISTERED, _SESSION_DOWN_AT
+    # session 已經斷掉時不呼叫 logout()：它是同步阻塞呼叫，對著死掉的連線
+    # 會卡到逾時，期間整個 event loop 停擺（_loop_lag_monitor 還會誤判成休眠）
+    if _SHARED_API is not None and _SHARED_CONNECTED and _SESSION_DOWN_AT is None:
         try:
             _SHARED_API.logout()
         except Exception:
             pass
     _SHARED_API = None
     _SHARED_CONNECTED = False
+    _SESSION_DOWN_AT = None
     _SHARED_USERS.clear()
     # 斷線後憑證狀態一併清掉：不清的話 is_ca_activated() 會在斷線期間
     # 還顯示「上次連線」的啟用結果，讓人以為現在也能下單
@@ -600,7 +649,7 @@ class SinoPacQuoteAdapter(QuoteAdapter):
 
     def is_connected(self) -> bool:
         # 共用連線若已被重建（手上這條已登出），tick 不會再進來，必須誠實回報斷線
-        return self._connected and _is_current_shared_api(self._api)
+        return self._connected and _is_current_shared_api(self._api) and _SESSION_DOWN_AT is None
 
     async def subscribe_tick(self, symbol: str, callback: Callable[[Tick], None]) -> None:
         """訂閱逐筆成交（同一 symbol 只發一次訂閱請求）"""
@@ -1320,7 +1369,7 @@ class SinoPacTradeAdapter(TradeAdapter):
         self._trades.clear()
 
     def is_connected(self) -> bool:
-        return self._connected and _is_current_shared_api(self._api)
+        return self._connected and _is_current_shared_api(self._api) and _SESSION_DOWN_AT is None
 
     @property
     def is_simulation(self) -> bool:

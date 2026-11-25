@@ -56,6 +56,7 @@ def reset_shared_api():
     sinopac._SHARED_CA_OK = False
     sinopac._CALLBACKS_REGISTERED = False
     sinopac._SHARED_USERS.clear()
+    sinopac._SESSION_DOWN_AT = None
     yield
     sinopac._SHARED_API = None
     sinopac._SHARED_CONNECTED = False
@@ -63,6 +64,7 @@ def reset_shared_api():
     sinopac._SHARED_CA_OK = False
     sinopac._CALLBACKS_REGISTERED = False
     sinopac._SHARED_USERS.clear()
+    sinopac._SESSION_DOWN_AT = None
 
 
 @pytest.fixture
@@ -996,3 +998,83 @@ class TestShioajiAvailability:
             assert hasattr(shioaji, "Shioaji"), "shioaji 缺少 Shioaji class"
         except ImportError:
             pytest.skip("shioaji 未安裝，跳過此測試 (pip install shioaji)")
+
+
+# ─── 底層 session 斷線偵測（自動重連的前提）────────────────────
+
+class TestSessionDown:
+    """solclient 放棄自動重連（Session down）後，adapter 要立刻回報斷線。
+
+    實際發生過：11/25 20:53 收到 Session down，_connected 旗標卻還是 True，
+    直到下一次查詢撞到 SessionNotEstablished 才發現——看門狗要靠 is_connected()
+    翻成 False 才會接手重連。
+    """
+
+    def _connect_both(self):
+        sj_mod, api, _ = _make_mock_shioaji()
+        q, t = SinoPacQuoteAdapter(), SinoPacTradeAdapter()
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            run(q.connect(api_key="K", secret_key="S"))
+            run(t.connect(api_key="K", secret_key="S"))
+        return q, t, api, sj_mod
+
+    def _event_handler(self, api):
+        # @api.on_event 的裝飾器形式：MagicMock 記下了被裝飾的函式
+        return api.on_event.call_args.args[0]
+
+    def test_session_down_callback_marks_both_disconnected(self):
+        q, t, api, _ = self._connect_both()
+        down_cb = api.set_session_down_callback.call_args.args[0]
+        down_cb()
+        assert sinopac.session_down_since() is not None
+        assert q.is_connected() is False
+        assert t.is_connected() is False
+
+    def test_down_event_code_marks_disconnected(self):
+        q, t, api, _ = self._connect_both()
+        self._event_handler(api)(0, 1, "Session connect timeout", "Session down")
+        assert t.is_connected() is False
+
+    def test_reconnecting_event_does_not_mark_disconnected(self):
+        """event_code=12（solclient 正在自己重連）多半一兩秒就接回去，不能當成斷線。"""
+        q, t, api, _ = self._connect_both()
+        self._event_handler(api)(0, 12, "keep-alive detected session down", "Session reconnecting")
+        assert t.is_connected() is True
+
+    def test_logout_skipped_when_session_down_and_flag_cleared(self):
+        """session 已死時 logout() 會卡到逾時、凍結 event loop，不能呼叫。"""
+        q, t, api, _ = self._connect_both()
+        api.set_session_down_callback.call_args.args[0]()
+        run(t.disconnect())
+        run(q.disconnect())
+        api.logout.assert_not_called()
+        assert sinopac._SHARED_API is None
+        assert sinopac.session_down_since() is None
+
+    def test_stale_instance_event_ignored_after_rebuild(self):
+        """重建連線後，舊 instance 遲來的 Session down 不能把新連線標成斷線。"""
+        q, t, old_api, _ = self._connect_both()
+        old_down_cb = old_api.set_session_down_callback.call_args.args[0]
+        run(t.disconnect())
+        run(q.disconnect())
+        new_sj, _, _ = _make_mock_shioaji()
+        t2 = SinoPacTradeAdapter()
+        with patch.dict(sys.modules, {"shioaji": new_sj}):
+            run(t2.connect(api_key="K", secret_key="S"))
+        old_down_cb()
+        assert t2.is_connected() is True
+
+    def test_failed_login_discards_instance(self):
+        """網路還沒恢復時登入失敗，要丟掉這個 instance，下一輪重試拿全新的。"""
+        sj_mod = MagicMock()
+        sj_mod.Shioaji.return_value.login.side_effect = RuntimeError("login: connection error")
+        t = SinoPacTradeAdapter()
+        with patch.dict(sys.modules, {"shioaji": sj_mod}):
+            assert run(t.connect(api_key="K", secret_key="S")) is False
+        assert sinopac._SHARED_API is None
+        assert sinopac._SHARED_CONNECTED is False
+
+        ok_sj, ok_api, _ = _make_mock_shioaji()
+        with patch.dict(sys.modules, {"shioaji": ok_sj}):
+            assert run(t.connect(api_key="K", secret_key="S")) is True
+        assert t._api is ok_api
